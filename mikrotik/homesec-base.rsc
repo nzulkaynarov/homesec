@@ -63,7 +63,11 @@ set [find comment="defconf: fasttrack"] src-address-list=!hs-managed dst-address
 add chain=forward action=drop src-address-list=hs-blocked comment="hs: drop blocked devices" place-before=[find comment="defconf: fasttrack"]
 add chain=forward action=drop protocol=tcp dst-port=853 src-address-list=hs-managed comment="hs: block DoT (tcp/853)" place-before=[find comment="defconf: fasttrack"]
 add chain=forward action=drop protocol=udp dst-port=853 src-address-list=hs-managed comment="hs: block DoT/DoQ (udp/853)" place-before=[find comment="defconf: fasttrack"]
-add chain=forward action=drop dst-address-list=hs-doh src-address-list=hs-managed comment="hs: block known DoH servers" place-before=[find comment="defconf: fasttrack"]
+# DoH — ТОЛЬКО порт 443 к DoH-серверам. Нельзя рубить весь трафик к этим IP:
+# среди них 1.1.1.1/8.8.8.8, а обычный DNS (порт 53) на них заворачивается на
+# AdGuard отдельно. Блокировка всего трафика ломала бы upstream AdGuard.
+add chain=forward action=drop protocol=tcp dst-port=443 dst-address-list=hs-doh src-address-list=hs-managed comment="hs: block DoH (tcp/443)" place-before=[find comment="defconf: fasttrack"]
+add chain=forward action=drop protocol=udp dst-port=443 dst-address-list=hs-doh src-address-list=hs-managed comment="hs: block DoH (udp/443 DoQ/H3)" place-before=[find comment="defconf: fasttrack"]
 add chain=forward action=drop protocol=udp dst-port=443 src-address-list=hs-kids comment="hs: block QUIC for kids" disabled=yes place-before=[find comment="defconf: fasttrack"]
 add chain=forward action=drop protocol=udp dst-port=1194,51820 src-address-list=hs-kids comment="hs: block VPN (OpenVPN/WireGuard) for kids" place-before=[find comment="defconf: fasttrack"]
 

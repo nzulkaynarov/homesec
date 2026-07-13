@@ -5,6 +5,7 @@
 Идемпотентно: применяются только отличия."""
 
 import logging
+import socket
 from datetime import datetime, timedelta
 from typing import Optional
 
@@ -30,6 +31,28 @@ DOH_SERVER_IPS = {
     "76.76.2.0", "76.76.10.0",               # freedns.controld.com
     "185.222.222.222", "45.11.45.11",        # dns.sb
 }
+
+
+def get_self_ips() -> set[str]:
+    """IP самой малинки — их НЕЛЬЗЯ добавлять в списки контроля, иначе AdGuard
+    (на этом же хосте) окажется «управляемым» и его upstream-трафик срежется
+    правилами блокировки. Определяем основной LAN-адрес по маршруту."""
+    ips: set[str] = set()
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 53))  # пакет не шлётся, только выбирается маршрут
+        ips.add(s.getsockname()[0])
+    except OSError:
+        pass
+    finally:
+        s.close()
+    try:
+        for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
+            ips.add(info[4][0])
+    except OSError:
+        pass
+    ips.discard("127.0.0.1")
+    return ips
 
 
 def rule_is_active(rule: Rule, now: Optional[datetime] = None) -> bool:
@@ -94,9 +117,10 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
     queues: dict[str, str] = {}
     ag_clients: dict[str, dict] = {}
 
+    self_ips = get_self_ips()
     for dev in devices:
-        if not dev.ip:
-            continue
+        if not dev.ip or dev.ip in self_ips:
+            continue  # пропускаем саму малинку — она инфраструктура, не клиент
         group = dev.group
         if group in GROUP_ADDRESS_LISTS:
             lists[GROUP_ADDRESS_LISTS[group]].add(dev.ip)
