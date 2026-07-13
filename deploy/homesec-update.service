@@ -5,4 +5,4 @@ Wants=network-online.target
 
 [Service]
 Type=oneshot
-ExecStart=/opt/homesec/deploy/update.sh
+ExecStart=/bin/bash /opt/homesec/deploy/update.sh
