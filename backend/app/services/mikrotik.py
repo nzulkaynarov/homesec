@@ -3,6 +3,7 @@
 или обработку запроса) и закрывается — так не копятся зависшие сессии."""
 
 import logging
+import socket
 from contextlib import contextmanager
 
 import librouteros
@@ -12,20 +13,34 @@ from ..config import settings
 
 log = logging.getLogger("homesec.mikrotik")
 
+API_PORT = 8728
+
 
 class MikrotikError(Exception):
     pass
 
 
+def _reachable(host: str, port: int = API_PORT, timeout: float = 1.0) -> bool:
+    """Быстрая TCP-проверка перед полным API-сеансом: когда роутер недоступен
+    (ещё не в сети), страницы панели не должны висеть на длинном таймауте."""
+    try:
+        with socket.create_connection((host, port), timeout=timeout):
+            return True
+    except OSError:
+        return False
+
+
 @contextmanager
 def api_session():
+    if not _reachable(settings.mikrotik_host):
+        raise MikrotikError(f"RouterOS {settings.mikrotik_host}:{API_PORT} недоступен")
     api = None
     try:
         api = librouteros.connect(
             host=settings.mikrotik_host,
             username=settings.mikrotik_user,
             password=settings.mikrotik_password,
-            timeout=5,
+            timeout=10,
         )
         yield api
     except (OSError, librouteros.exceptions.LibRouterosError) as e:
