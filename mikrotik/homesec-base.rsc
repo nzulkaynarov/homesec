@@ -26,22 +26,26 @@
 /ip service set winbox address=192.168.88.0/24
 
 # ----------------------------------------------------------------------------
-# 2. DNS: всем клиентам выдаётся AdGuard Home на Pi
+# 2. DNS — БЕЗОПАСНО ПО УМОЛЧАНИЮ.
+#    Пока НЕ переводим клиентов на малинку: сеть должна работать ДО того, как
+#    Raspberry Pi окажется на 192.168.88.2. Резолвит сам MikroTik через upstream.
+#    Перевод DNS на AdGuard делается ОТДЕЛЬНО (enable-adguard.rsc) — только после
+#    того, как малинка подтверждённо доступна на 192.168.88.2.
+#    (DHCP по defconf уже выдаёт клиентам dns-server=192.168.88.1 — сам роутер.)
 # ----------------------------------------------------------------------------
-/ip dhcp-server network set [find address=192.168.88.0/24] dns-server=$piAddr
-# Роутер сам ходит через AdGuard (логи в одном месте)
-/ip dns set servers=$piAddr
+/ip dns set servers=1.1.1.1,8.8.8.8 allow-remote-requests=yes
 
 # ----------------------------------------------------------------------------
-# 3. Принудительный DNS: любой запрос на порт 53 заворачивается на AdGuard.
-#    Смена DNS на устройстве (8.8.8.8 и т.п.) перестаёт работать.
+# 3. Принудительный DNS на AdGuard — заворот порта 53 на малинку.
+#    ВЫКЛЮЧЕНО по умолчанию (disabled=yes): включится в enable-adguard.rsc,
+#    иначе при отсутствующей малинке весь DNS уходит в никуда и «нет интернета».
 # ----------------------------------------------------------------------------
 /ip firewall nat
 add chain=dstnat action=accept src-address=$piAddr comment="hs: Pi resolves upstream freely"
-add chain=dstnat action=dst-nat protocol=udp dst-port=53 src-address=192.168.88.0/24 to-addresses=$piAddr comment="hs: force DNS (udp) -> AdGuard"
-add chain=dstnat action=dst-nat protocol=tcp dst-port=53 src-address=192.168.88.0/24 to-addresses=$piAddr comment="hs: force DNS (tcp) -> AdGuard"
-add chain=dstnat action=dst-nat protocol=udp dst-port=53 src-address=192.168.90.0/24 to-addresses=$piAddr comment="hs: guest force DNS (udp)"
-add chain=dstnat action=dst-nat protocol=tcp dst-port=53 src-address=192.168.90.0/24 to-addresses=$piAddr comment="hs: guest force DNS (tcp)"
+add chain=dstnat action=dst-nat protocol=udp dst-port=53 src-address=192.168.88.0/24 to-addresses=$piAddr comment="hs: force DNS (udp) -> AdGuard" disabled=yes
+add chain=dstnat action=dst-nat protocol=tcp dst-port=53 src-address=192.168.88.0/24 to-addresses=$piAddr comment="hs: force DNS (tcp) -> AdGuard" disabled=yes
+add chain=dstnat action=dst-nat protocol=udp dst-port=53 src-address=192.168.90.0/24 to-addresses=$piAddr comment="hs: guest force DNS (udp)" disabled=yes
+add chain=dstnat action=dst-nat protocol=tcp dst-port=53 src-address=192.168.90.0/24 to-addresses=$piAddr comment="hs: guest force DNS (tcp)" disabled=yes
 
 # ----------------------------------------------------------------------------
 # 4. Fasttrack: исключаем контролируемые устройства (список hs-managed),
