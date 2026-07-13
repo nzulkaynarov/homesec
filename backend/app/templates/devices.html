@@ -1,0 +1,59 @@
+{% extends "base.html" %}
+{% block title %}HomeSec — устройства{% endblock %}
+{% block content %}
+<h1>Устройства</h1>
+
+<form method="post" action="/devices/scan" class="inline">
+  <button>↻ Сканировать сеть</button>
+</form>
+
+<table class="devices">
+  <tr>
+    <th></th><th>Имя</th><th>MAC / IP</th><th>Владелец</th><th>Группа</th>
+    <th>Лимит скорости</th><th></th>
+  </tr>
+  {% for d in devices %}
+  <tr class="{{ 'blocked-row' if d.blocked_manual }}">
+    <td title="{{ 'онлайн' if d.ip in online_ips else 'офлайн' }}">
+      {{ '🟢' if d.ip in online_ips else '⚪' }}
+    </td>
+    <td>
+      <form method="post" action="/devices/{{ d.id }}/update" id="dev{{ d.id }}">
+        <input name="name" value="{{ d.name }}">
+      </form>
+    </td>
+    <td class="mono">{{ d.mac }}<br>{{ d.ip or '—' }}</td>
+    <td>
+      <select name="person_id" form="dev{{ d.id }}">
+        <option value="">— никто (неизвестное) —</option>
+        {% for p in people %}
+        <option value="{{ p.id }}" {{ 'selected' if d.person_id == p.id }}>
+          {{ p.name }} ({{ GROUP_LABELS[p.role] }})
+        </option>
+        {% endfor %}
+      </select>
+    </td>
+    <td><span class="tag g-{{ d.group }}">{{ GROUP_LABELS[d.group] }}</span></td>
+    <td><input name="speed_limit" form="dev{{ d.id }}" value="{{ d.speed_limit }}" placeholder="10M/10M" size="9"></td>
+    <td class="actions">
+      <button form="dev{{ d.id }}">💾</button>
+      {% if d.blocked_manual %}
+      <form method="post" action="/devices/{{ d.id }}/unblock" class="inline"><button class="good">▶ Разблокировать</button></form>
+      {% else %}
+      <form method="post" action="/devices/{{ d.id }}/block" class="inline"><button class="danger">⛔ Блокировать</button></form>
+      {% endif %}
+      <form method="post" action="/devices/{{ d.id }}/delete" class="inline"
+            onsubmit="return confirm('Удалить устройство из списка? При следующем появлении в сети оно добавится как новое.')">
+        <button>🗑</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="7">Устройств пока нет — нажмите «Сканировать сеть»</td></tr>
+  {% endfor %}
+</table>
+
+<p class="hint">Лимит скорости в формате upload/download, например <code>5M/20M</code>.
+Пустое поле — без ограничений. Назначьте владельца, чтобы устройство попало в его группу;
+IP закрепится автоматически.</p>
+{% endblock %}

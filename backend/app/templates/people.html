@@ -1,0 +1,42 @@
+{% extends "base.html" %}
+{% block title %}HomeSec — пользователи{% endblock %}
+{% block content %}
+<h1>Пользователи</h1>
+
+<form method="post" action="/people/add" class="row-form">
+  <input name="name" placeholder="Имя (например, Тимур)" required>
+  <select name="role">
+    <option value="kid">Дети</option>
+    <option value="adult">Взрослые</option>
+    <option value="guest">Гости</option>
+  </select>
+  <button>Добавить</button>
+</form>
+
+<table>
+  <tr><th>Имя</th><th>Группа</th><th>Устройств</th><th></th></tr>
+  {% for p in people %}
+  <tr>
+    <td>{{ p.name }}</td>
+    <td>
+      <form method="post" action="/people/{{ p.id }}/update" class="inline">
+        <select name="role" onchange="this.form.submit()">
+          <option value="kid" {{ 'selected' if p.role == 'kid' }}>Дети</option>
+          <option value="adult" {{ 'selected' if p.role == 'adult' }}>Взрослые</option>
+          <option value="guest" {{ 'selected' if p.role == 'guest' }}>Гости</option>
+        </select>
+      </form>
+    </td>
+    <td>{{ p.devices|length }}</td>
+    <td>
+      <form method="post" action="/people/{{ p.id }}/delete" class="inline"
+            onsubmit="return confirm('Удалить пользователя? Его устройства станут неизвестными.')">
+        <button>🗑</button>
+      </form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="4">Добавьте членов семьи, затем привяжите к ним устройства на вкладке «Устройства»</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

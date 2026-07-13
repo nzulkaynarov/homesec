@@ -1,0 +1,13 @@
+{% extends "base.html" %}
+{% block title %}HomeSec — журнал{% endblock %}
+{% block content %}
+<h1>Журнал событий</h1>
+<table>
+  <tr><th>Время</th><th>Тип</th><th>Событие</th></tr>
+  {% for e in events %}
+  <tr><td>{{ e.ts.strftime('%d.%m.%Y %H:%M:%S') }}</td><td><span class="tag">{{ e.kind }}</span></td><td>{{ e.message }}</td></tr>
+  {% else %}
+  <tr><td colspan="3">Пока пусто</td></tr>
+  {% endfor %}
+</table>
+{% endblock %}

@@ -1,0 +1,84 @@
+{% extends "base.html" %}
+{% block title %}HomeSec — правила{% endblock %}
+{% block content %}
+<h1>Расписания блокировки</h1>
+
+<table>
+  <tr><th>Правило</th><th>Кому</th><th>Когда</th><th>Статус</th><th></th></tr>
+  {% for r in rules %}
+  <tr>
+    <td>{{ r.name }}</td>
+    <td>
+      {% if r.target_type == 'group' %}{{ GROUP_LABELS.get(r.target, r.target) }}
+      {% else %}{{ device_names.get(r.target, '?') }}{% endif %}
+    </td>
+    <td>
+      {% set day_list = r.days.split(',') %}
+      {% for i in range(7) %}{% if i|string in day_list %}{{ DAY_NAMES[i] }} {% endif %}{% endfor %}
+      · {{ r.start_time }}–{{ r.end_time }}
+    </td>
+    <td>
+      {% if not r.enabled %}<span class="tag">выкл</span>
+      {% elif rule_is_active(r) %}<span class="tag g-kid">действует сейчас</span>
+      {% else %}<span class="tag g-adult">ожидает</span>{% endif %}
+    </td>
+    <td class="actions">
+      <form method="post" action="/rules/{{ r.id }}/toggle" class="inline">
+        <button>{{ 'Выключить' if r.enabled else 'Включить' }}</button>
+      </form>
+      <form method="post" action="/rules/{{ r.id }}/delete" class="inline"><button>🗑</button></form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="5">Правил пока нет</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Новое правило</h2>
+<form method="post" action="/rules/add" class="rule-form">
+  <input name="name" placeholder="Название (Ночь без интернета)" required>
+  <select name="target_type" id="target_type" onchange="
+      document.getElementById('t-group').style.display = this.value == 'group' ? '' : 'none';
+      document.getElementById('t-device').style.display = this.value == 'device' ? '' : 'none';
+      document.getElementById('t-group').name = this.value == 'group' ? 'target' : '';
+      document.getElementById('t-device').name = this.value == 'device' ? 'target' : '';">
+    <option value="group">Группе</option>
+    <option value="device">Устройству</option>
+  </select>
+  <select name="target" id="t-group">
+    <option value="kid">Дети</option>
+    <option value="guest">Гости</option>
+    <option value="unknown">Неизвестные</option>
+  </select>
+  <select id="t-device" style="display:none">
+    {% for d in devices %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}
+  </select>
+  <span class="days">
+    {% for i in range(7) %}
+    <label><input type="checkbox" name="days" value="{{ i }}" {{ 'checked' if i < 5 }}>{{ DAY_NAMES[i] }}</label>
+    {% endfor %}
+  </span>
+  с <input type="time" name="start_time" value="22:00" required>
+  до <input type="time" name="end_time" value="07:00" required>
+  <button>Создать</button>
+</form>
+<p class="hint">Окно может проходить через полночь: «с 22:00 до 07:00» заблокирует ночь.
+Дни относятся к началу окна.</p>
+
+<h1>Политики групп (DNS-фильтр)</h1>
+<p class="hint">Блокировка категорий и безопасный поиск применяются через AdGuard Home
+к каждому устройству группы.</p>
+{% for group, policy in policies.items() %}
+<form method="post" action="/policies/{{ group }}" class="policy-form">
+  <strong>{{ GROUP_LABELS[group] }}</strong>
+  {% set blocked = policy.blocked_services.split(',') %}
+  {% for cat_id, cat in SERVICE_CATEGORIES.items() %}
+  <label><input type="checkbox" name="categories" value="{{ cat_id }}"
+    {{ 'checked' if cat_id in blocked }}> {{ cat.label }}</label>
+  {% endfor %}
+  <label><input type="checkbox" name="safe_search" value="1"
+    {{ 'checked' if policy.safe_search }}> Безопасный поиск</label>
+  <button>💾 Сохранить</button>
+</form>
+{% endfor %}
+{% endblock %}

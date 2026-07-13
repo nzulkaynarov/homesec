@@ -1,0 +1,10 @@
+[Unit]
+Description=Run HomeSec pull-deploy every minute
+
+[Timer]
+OnBootSec=2min
+OnUnitActiveSec=1min
+Unit=homesec-update.service
+
+[Install]
+WantedBy=timers.target
