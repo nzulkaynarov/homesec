@@ -36,16 +36,22 @@
 /ip dns set servers=1.1.1.1,8.8.8.8 allow-remote-requests=yes
 
 # ----------------------------------------------------------------------------
-# 3. Принудительный DNS на AdGuard — заворот порта 53 на малинку.
-#    ВЫКЛЮЧЕНО по умолчанию (disabled=yes): включится в enable-adguard.rsc,
-#    иначе при отсутствующей малинке весь DNS уходит в никуда и «нет интернета».
+# 3. Принудительный DNS на AdGuard — mark-based + hairpin.
+#    AdGuard в той же подсети, что и клиенты, поэтому простой заворот dst-nat
+#    ломается: ответ приходит с «неожиданного источника» (88.2 вместо того, кому
+#    слал клиент) и отвергается. Решение: помечаем завёрнутый DNS и маскируем его
+#    (hairpin) — ответ возвращается через роутер. Малинку (её upstream) исключаем.
+#    Клиенты, что уже используют AdGuard напрямую (dst=88.2), не трогаем — AdGuard
+#    видит их реальный IP (нужно для per-client политик).
+#    Заворот ВЫКЛЮЧЕН по умолчанию (disabled=yes) — включает enable-adguard.rsc.
 # ----------------------------------------------------------------------------
+/ip firewall mangle
+add chain=prerouting action=accept src-address=$piAddr comment="hs: DNS Pi exempt"
+add chain=prerouting action=mark-connection new-connection-mark=hs-dns protocol=udp dst-port=53 dst-address=!$piAddr passthrough=yes comment="hs: DNS mark udp"
+add chain=prerouting action=mark-connection new-connection-mark=hs-dns protocol=tcp dst-port=53 dst-address=!$piAddr passthrough=yes comment="hs: DNS mark tcp"
 /ip firewall nat
-add chain=dstnat action=accept src-address=$piAddr comment="hs: Pi resolves upstream freely"
-add chain=dstnat action=dst-nat protocol=udp dst-port=53 src-address=192.168.88.0/24 to-addresses=$piAddr comment="hs: force DNS (udp) -> AdGuard" disabled=yes
-add chain=dstnat action=dst-nat protocol=tcp dst-port=53 src-address=192.168.88.0/24 to-addresses=$piAddr comment="hs: force DNS (tcp) -> AdGuard" disabled=yes
-add chain=dstnat action=dst-nat protocol=udp dst-port=53 src-address=192.168.90.0/24 to-addresses=$piAddr comment="hs: guest force DNS (udp)" disabled=yes
-add chain=dstnat action=dst-nat protocol=tcp dst-port=53 src-address=192.168.90.0/24 to-addresses=$piAddr comment="hs: guest force DNS (tcp)" disabled=yes
+add chain=dstnat action=dst-nat connection-mark=hs-dns to-addresses=$piAddr comment="hs: force DNS -> AdGuard" disabled=yes
+add chain=srcnat action=masquerade connection-mark=hs-dns place-before=[find comment="defconf: masquerade"] comment="hs: hairpin DNS" disabled=yes
 
 # ----------------------------------------------------------------------------
 # 4. Fasttrack: исключаем контролируемые устройства (список hs-managed),

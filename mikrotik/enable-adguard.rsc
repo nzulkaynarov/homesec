@@ -16,7 +16,8 @@
 # Откат (если что-то не так — вернуть DNS на сам роутер):
 #   /ip dhcp-server network set [find address=192.168.88.0/24] dns-server=192.168.88.1
 #   /ip dns set servers=1.1.1.1,8.8.8.8
-#   /ip firewall nat disable [find comment~"force DNS"]
+#   /ip firewall nat disable [find comment~"hs: force DNS"]
+#   /ip firewall nat disable [find comment~"hs: hairpin DNS"]
 # ============================================================================
 
 :local piAddr "192.168.88.2"
@@ -30,7 +31,8 @@
 /ip dhcp-server network set [find address=192.168.88.0/24] dns-server=$piAddr
 # 2. Сам роутер тоже резолвит через AdGuard (единый лог запросов)
 /ip dns set servers=$piAddr
-# 3. Включаем принудительный заворот DNS (порт 53 -> AdGuard)
-/ip firewall nat enable [find comment~"force DNS"]
+# 3. Включаем принудительный заворот DNS + hairpin (порт 53 -> AdGuard)
+/ip firewall nat enable [find comment="hs: force DNS -> AdGuard"]
+/ip firewall nat enable [find comment="hs: hairpin DNS"]
 
 :put "AdGuard-контроль включён. DNS всей сети идёт через 192.168.88.2."
