@@ -7,6 +7,7 @@ from fastapi import Request
 from fastapi.responses import RedirectResponse
 from itsdangerous import BadSignature, SignatureExpired, URLSafeTimedSerializer
 
+from . import db as dbmod
 from .config import settings
 
 COOKIE = "hs_session"
@@ -37,11 +38,24 @@ def is_authenticated(request: Request) -> bool:
 
 
 def _is_public(path: str) -> bool:
-    return path == "/login" or path.startswith("/static/")
+    return path in ("/login", "/blocked") or path.startswith("/static/")
 
 
 async def auth_middleware(request: Request, call_next):
-    """Всё, кроме /login и /static, требует сессии."""
-    if not _is_public(request.url.path) and not is_authenticated(request):
-        return RedirectResponse("/login", status_code=302)
-    return await call_next(request)
+    """Всё, кроме публичных страниц, требует сессии. Неавторизованный запрос
+    с ограниченного устройства (NAT-перехват HTTP, см. enable-block-page.rsc)
+    уводится на «время вышло», остальные — на /login."""
+    if _is_public(request.url.path) or is_authenticated(request):
+        return await call_next(request)
+    from .services.restrictions import restriction_for_ip  # не тянуть при импорте
+
+    session = dbmod.session()
+    try:
+        restricted = restriction_for_ip(
+            session, request.client.host if request.client else ""
+        )
+    except Exception:
+        restricted = None
+    finally:
+        session.close()
+    return RedirectResponse("/blocked" if restricted else "/login", status_code=302)

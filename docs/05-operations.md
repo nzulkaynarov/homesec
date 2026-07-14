@@ -60,6 +60,28 @@ Wi-Fi: `/interface wireless monitor wlan2 once` (свойству `running` не
   или `/ip firewall address-list print where list~"hs"` на MikroTik.
 - **Перезапуск всего на Pi:** `sudo systemctl restart AdGuardHome homesec`.
 
+## Страница «время вышло» и портал (опционально)
+
+Чтобы заблокированные видели причину вместо «сломавшегося интернета»:
+
+1. Залить `mikrotik/enable-block-page.rsc` на роутер (Winbox → Files).
+2. Проверить, что дублей нет: `/ip firewall nat print where comment~"hs:"`.
+3. `/import file-name=enable-block-page.rsc` — скрипт сам откажется от
+   повторного импорта.
+4. Проверка: с заблокированного устройства открыть любой `http://`-сайт
+   (не https) — должна показаться страница HomeSec. Прямой адрес страницы:
+   `http://192.168.88.2:8000/blocked`.
+
+Перехватывается только HTTP; https-сайты у заблокированных просто не
+открываются (осознанное ограничение, без подмены сертификатов).
+
+Правило для портала неизвестных (`hs: block page (unknown portal)`) создаётся
+ВЫКЛЮЧЕННЫМ — включать только вместе с `HS_BLOCK_UNKNOWN=true` в `.env`,
+иначе оно заворачивает HTTP незаблокированных «неизвестных» устройств.
+
+Откат: `/ip firewall nat disable [find comment~"hs: block page"]` и
+`/ip firewall filter disable [find comment~"hs: allow block page"]`.
+
 ## Инциденты, которые уже случались (и их следы)
 
 1. «Нет интернета» после включения контроля → малинка не была на 88.2 /
