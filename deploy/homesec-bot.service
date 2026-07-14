@@ -1,0 +1,18 @@
+[Unit]
+Description=HomeSec Telegram bot
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/opt/homesec/backend
+EnvironmentFile=/opt/homesec/backend/.env
+ExecStart=/opt/homesec/backend/.venv/bin/python -m app.bot
+# При пустом HS_TELEGRAM_BOT_TOKEN процесс сразу выходит с кодом 0 —
+# on-failure не даст systemd бесконечно его перезапускать.
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

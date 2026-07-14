@@ -21,4 +21,13 @@ echo "$(date -Is) homesec update: $local_sha -> $remote_sha"
 run git -C "$APP_DIR" reset --hard "origin/$BRANCH"
 run "$APP_DIR/backend/.venv/bin/pip" install -q -r "$APP_DIR/backend/requirements.txt"
 systemctl restart homesec
+# Бот — отдельный юнит. Прод ставился до его появления, поэтому деплой
+# устанавливает юнит сам (update.sh выполняется от root из systemd-таймера).
+if ! systemctl cat homesec-bot >/dev/null 2>&1; then
+  sed "s/^User=.*/User=$DEPLOY_USER/" "$APP_DIR/deploy/homesec-bot.service" \
+    > /etc/systemd/system/homesec-bot.service
+  systemctl daemon-reload
+  systemctl enable homesec-bot
+fi
+systemctl restart homesec-bot
 echo "$(date -Is) homesec restarted"

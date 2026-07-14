@@ -31,6 +31,9 @@ fi
 echo "==> systemd: сервис панели"
 sed "s/^User=.*/User=$DEPLOY_USER/" "$APP_DIR/deploy/homesec.service" > /etc/systemd/system/homesec.service
 
+echo "==> systemd: telegram-бот (спит, пока не заполнен HS_TELEGRAM_BOT_TOKEN)"
+sed "s/^User=.*/User=$DEPLOY_USER/" "$APP_DIR/deploy/homesec-bot.service" > /etc/systemd/system/homesec-bot.service
+
 echo "==> systemd: таймер авто-обновления из GitHub"
 cat > /etc/default/homesec-deploy <<EOF
 DEPLOY_USER=$DEPLOY_USER
@@ -42,6 +45,7 @@ cp "$APP_DIR/deploy/homesec-update.timer" /etc/systemd/system/homesec-update.tim
 
 systemctl daemon-reload
 systemctl enable --now homesec
+systemctl enable --now homesec-bot
 systemctl enable --now homesec-update.timer
 
 echo "==> Готово."

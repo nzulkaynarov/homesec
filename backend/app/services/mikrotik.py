@@ -30,6 +30,11 @@ def _reachable(host: str, port: int = API_PORT, timeout: float = 1.0) -> bool:
         return False
 
 
+def api_reachable() -> bool:
+    """Публичная быстрая проверка доступности роутера (для health-мониторинга)."""
+    return _reachable(settings.mikrotik_host)
+
+
 @contextmanager
 def api_session():
     if not _reachable(settings.mikrotik_host):

@@ -102,3 +102,26 @@ class EventLog(Base):
 def log_event(db, kind: str, message: str) -> None:
     db.add(EventLog(kind=kind, message=message))
     db.commit()
+
+
+class KVState(Base):
+    """Служебное key-value хранилище (курсор уведомлений бота и т.п.)."""
+
+    __tablename__ = "kv_state"
+
+    key: Mapped[str] = mapped_column(String(64), primary_key=True)
+    value: Mapped[str] = mapped_column(Text, default="")
+
+
+def kv_get(db, key: str, default: str = "") -> str:
+    row = db.get(KVState, key)
+    return row.value if row else default
+
+
+def kv_set(db, key: str, value: str) -> None:
+    row = db.get(KVState, key)
+    if row is None:
+        db.add(KVState(key=key, value=value))
+    else:
+        row.value = value
+    db.commit()
