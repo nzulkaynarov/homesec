@@ -30,6 +30,10 @@ class Settings(BaseSettings):
     telegram_bot_token: str = ""
     telegram_chat_ids: str = ""  # csv chat_id: кому разрешены команды и куда слать алерты
     panel_url: str = "http://127.0.0.1:8000"  # для health-проверки панели ботом
+    # Адрес панели ИЗ домашней сети — сюда редиректим HTTP, перехваченный
+    # enable-block-page.rsc: hairpin-masquerade скрывает IP клиента от панели,
+    # а прямое соединение приходит с настоящим IP (нужен для /blocked и /register)
+    panel_lan_url: str = "http://192.168.88.2:8000"
 
     @property
     def telegram_allowed_ids(self) -> set[int]:

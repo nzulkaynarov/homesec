@@ -52,10 +52,14 @@ MikroTik `homesec` (HS_MIKROTIK_PASSWORD). Доступ MikroTik: `ssh admin@192
 2. **IP самой малинки никогда не попадает в hs-managed/hs-blocked.**
    Она инфраструктура: её upstream-запросы (AdGuard→1.1.1.1) нельзя резать.
    Защита в коде: `get_self_ips()` в `backend/app/services/enforcement.py` — не удалять.
-3. **Заворот DNS в той же подсети требует hairpin masquerade.** Простой dst-nat
-   ломается: клиент слал на 8.8.8.8, ответ приходит с 88.2 → «reply from
-   unexpected source», отвергается (симптом: часть сайтов не открывается).
-   Схема: mangle mark `hs-dns` → dst-nat → srcnat masquerade по метке.
+3. **ЛЮБОЙ dst-nat-заворот в той же подсети требует hairpin masquerade.**
+   Простой dst-nat ломается: клиент слал на 8.8.8.8, ответ приходит с 88.2 →
+   «reply from unexpected source», отвергается (симптом: часть сайтов не
+   открывается). Схема DNS: mangle mark `hs-dns` → dst-nat → srcnat masquerade
+   по метке. То же для HTTP-перехвата block-page: masquerade по
+   `connection-nat-state=dstnat` (а раз masquerade прячет IP клиента, панель
+   отвечает на перехват редиректом на HS_PANEL_LAN_URL — прямое соединение
+   приходит с настоящим IP).
 4. **Блокировка DoH — только tcp/udp 443 к списку hs-doh.** В hs-doh входят
    1.1.1.1/8.8.8.8; блокировать к ним ВЕСЬ трафик = зарезать upstream AdGuard.
 5. **`.rsc`-скрипты одноразовые** (не идемпотентны): повторный импорт создаёт

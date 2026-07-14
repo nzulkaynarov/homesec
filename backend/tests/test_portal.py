@@ -105,6 +105,20 @@ def test_unrestricted_still_goes_to_login(db):
         assert r.status_code == 302 and r.headers["location"] == "/login"
 
 
+def test_intercepted_http_redirected_to_panel(db):
+    # NAT-перехват enable-block-page.rsc: Host — чужой сайт, а настоящий IP
+    # клиента скрыт hairpin-masquerade (устройства с таким IP в базе нет).
+    # Ответ — абсолютный редирект на прямой адрес панели: прямое соединение
+    # придёт с настоящим IP, и уже оно разведётся на /blocked или /register.
+    with TestClient(app) as c:
+        r = c.get("/", headers={"host": "neverssl.com"}, follow_redirects=False)
+        assert r.status_code == 302
+        assert r.headers["location"] == settings.panel_lan_url.rstrip("/") + "/"
+        # заход по адресу панели (Host свой) — обычный /login, не перехват
+        r = c.get("/", headers={"host": "testserver:8000"}, follow_redirects=False)
+        assert r.status_code == 302 and r.headers["location"] == "/login"
+
+
 # ---------- портал регистрации ----------
 
 def test_register_flow_and_cooldown(db):
