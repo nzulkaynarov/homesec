@@ -38,7 +38,7 @@ def is_authenticated(request: Request) -> bool:
 
 
 def _is_public(path: str) -> bool:
-    return path in ("/login", "/blocked") or path.startswith("/static/")
+    return path in ("/login", "/blocked", "/register") or path.startswith("/static/")
 
 
 async def auth_middleware(request: Request, call_next):
@@ -58,4 +58,7 @@ async def auth_middleware(request: Request, call_next):
         restricted = None
     finally:
         session.close()
-    return RedirectResponse("/blocked" if restricted else "/login", status_code=302)
+    if restricted is None:
+        return RedirectResponse("/login", status_code=302)
+    target = "/register" if restricted["kind"] == "unknown" else "/blocked"
+    return RedirectResponse(target, status_code=302)

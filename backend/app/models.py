@@ -134,6 +134,19 @@ def active_pauses(db, now: datetime | None = None) -> list["Pause"]:
     return [p for p in db.query(Pause).all() if p.until > now]
 
 
+class RegistrationRequest(Base):
+    """Заявка с портала: человек на неизвестном устройстве представился,
+    владелец сети подтверждает кнопкой в Telegram."""
+
+    __tablename__ = "registration_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_id: Mapped[int] = mapped_column(index=True)
+    name: Mapped[str] = mapped_column(String(64))
+    comment: Mapped[str] = mapped_column(Text, default="")
+    ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
 class EventLog(Base):
     __tablename__ = "event_log"
 

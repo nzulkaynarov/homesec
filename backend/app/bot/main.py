@@ -35,18 +35,22 @@ async def _broadcast(bot: Bot, chat_ids: set[int], text: str, keyboard=None) -> 
             log.exception("не удалось отправить сообщение в чат %s", chat_id)
 
 
-def _collect_new_devices() -> list[tuple[dict, list[tuple[int, str, str]]]]:
-    """(устройство, список людей для кнопок) по каждому новому устройству."""
+def _collect_notifications() -> list[tuple[str, dict, str, list[tuple[int, str, str]]]]:
+    """(kind, устройство, текст события, люди для кнопок) по каждому событию."""
     s = dbmod.session()
     try:
-        devices = notify.collect_new_devices(s)
-        if not devices:
+        items = notify.collect_notifications(s)
+        if not items:
             return []
         from ..models import Person
 
         people = [(p.id, p.name, p.role) for p in s.query(Person).order_by(Person.name)]
         return [
-            ({"id": d.id, "name": d.name, "mac": d.mac, "ip": d.ip}, people) for d in devices
+            (n.kind,
+             {"id": n.device.id, "name": n.device.name,
+              "mac": n.device.mac, "ip": n.device.ip},
+             n.message, people)
+            for n in items
         ]
     finally:
         s.close()
@@ -55,9 +59,13 @@ def _collect_new_devices() -> list[tuple[dict, list[tuple[int, str, str]]]]:
 async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
     while True:
         try:
-            for dev, people in await asyncio.to_thread(_collect_new_devices):
+            for kind, dev, message, people in await asyncio.to_thread(_collect_notifications):
                 kb = handlers.new_device_keyboard(dev["id"], people)
-                await _broadcast(bot, chat_ids, texts.format_new_device(dev), kb)
+                if kind == "register_request":
+                    text = texts.format_registration(message)
+                else:
+                    text = texts.format_new_device(dev)
+                await _broadcast(bot, chat_ids, text, kb)
         except Exception:
             log.exception("notify_loop")
         await asyncio.sleep(NOTIFY_INTERVAL)

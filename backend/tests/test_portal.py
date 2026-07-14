@@ -103,3 +103,59 @@ def test_unrestricted_still_goes_to_login(db):
     with TestClient(app) as c:
         r = c.get("/", follow_redirects=False)
         assert r.status_code == 302 and r.headers["location"] == "/login"
+
+
+# ---------- портал регистрации ----------
+
+def test_register_flow_and_cooldown(db):
+    from app.models import EventLog, RegistrationRequest
+
+    db.query(RegistrationRequest).delete()
+    db.query(EventLog).delete()
+    dev = Device(mac="DD:00:00:00:00:04", ip="testclient", name="новичок")
+    db.add(dev)
+    db.commit()
+    with TestClient(app) as c:
+        assert "Представьтесь" not in c.get("/blocked").text  # разные страницы
+        r = c.get("/register")
+        assert r.status_code == 200 and "заявку" in r.text
+
+        r = c.post("/register", data={"name": "Бабушка", "comment": "мой планшет"})
+        assert "Заявка отправлена" in r.text
+        req = db.query(RegistrationRequest).one()
+        assert req.device_id == dev.id and req.name == "Бабушка"
+        ev = [e for e in db.query(EventLog) if e.kind == "register_request"]
+        assert len(ev) == 1 and dev.mac in ev[0].message and "Бабушка" in ev[0].message
+
+        # антиспам: повторная заявка раньше чем через 10 минут не создаётся
+        r = c.post("/register", data={"name": "Ещё раз"})
+        assert "уже отправлена" in r.text
+        assert db.query(RegistrationRequest).count() == 1
+    db.delete(dev)
+    db.query(RegistrationRequest).delete()
+    db.commit()
+
+
+def test_register_for_known_device(db, dev):
+    # у устройства с владельцем портал сообщает «уже зарегистрировано»
+    d2 = Device(mac="EE:00:00:00:00:05", ip="testclient", name="своё",
+                person_id=dev.person_id)
+    db.add(d2)
+    db.commit()
+    with TestClient(app) as c:
+        r = c.get("/register")
+        assert "уже зарегистрировано" in r.text
+    db.delete(d2)
+    db.commit()
+
+
+def test_unknown_device_redirected_to_register(db, monkeypatch):
+    monkeypatch.setattr(settings, "block_unknown", True)
+    dev = Device(mac="FF:00:00:00:00:06", ip="testclient", name="незнакомец")
+    db.add(dev)
+    db.commit()
+    with TestClient(app) as c:
+        r = c.get("/", follow_redirects=False)
+        assert r.status_code == 302 and r.headers["location"] == "/register"
+    db.delete(dev)
+    db.commit()

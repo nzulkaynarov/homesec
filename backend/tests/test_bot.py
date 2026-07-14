@@ -5,7 +5,7 @@ import pytest
 
 from app.bot import texts
 from app.bot.health import HealthMonitor
-from app.bot.notify import CURSOR_KEY, collect_new_devices
+from app.bot.notify import CURSOR_KEY, collect_notifications
 from app.db import Base, engine, session
 from app.models import Device, EventLog, KVState, kv_get, log_event
 
@@ -60,25 +60,29 @@ def test_health_probe_exception_counts_as_fail():
     assert any("не отвечает" in m for m in monitor.tick())
 
 
-def test_new_device_cursor(db):
+def test_notification_cursor(db):
     dev = Device(mac="AA:00:00:00:00:07", ip="192.168.88.77", name="tv")
     db.add(dev)
     db.commit()
     log_event(db, "device_new", f"Новое устройство: tv ({dev.mac}, {dev.ip})")
 
     # первый запуск: история пропускается, курсор встаёт на текущий максимум
-    assert collect_new_devices(db) == []
+    assert collect_notifications(db) == []
     assert kv_get(db, CURSOR_KEY) != ""
 
     dev2 = Device(mac="AA:00:00:00:00:08", ip="192.168.88.78", name="phone")
     db.add(dev2)
     db.commit()
     log_event(db, "device_new", f"Новое устройство: phone ({dev2.mac}, {dev2.ip})")
+    log_event(db, "register_request", f"Заявка: phone ({dev2.mac}) — владелец: Бабушка")
     log_event(db, "block", "не относится к делу")
 
-    found = collect_new_devices(db)
-    assert [d.id for d in found] == [dev2.id]
-    assert collect_new_devices(db) == []  # повторно не отдаёт
+    found = collect_notifications(db)
+    assert [(n.kind, n.device.id) for n in found] == [
+        ("device_new", dev2.id), ("register_request", dev2.id),
+    ]
+    assert "Бабушка" in found[1].message
+    assert collect_notifications(db) == []  # повторно не отдаёт
 
 
 def test_new_device_keyboard():

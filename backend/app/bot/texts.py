@@ -57,6 +57,10 @@ def format_devices(rows: list[dict]) -> str:
     return "\n".join(lines)
 
 
+def format_registration(event_message: str) -> str:
+    return f"📨 {event_message}\n\nКому назначить устройство?"
+
+
 def format_new_device(dev: dict) -> str:
     return (
         "🆕 Новое устройство в сети\n"
