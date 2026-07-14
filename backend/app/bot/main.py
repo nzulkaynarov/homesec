@@ -15,7 +15,7 @@ from .. import db as dbmod
 from ..ai import analyst, watchdog
 from ..config import settings
 from ..db import Base, engine
-from ..migrations import run_migrations
+from ..migrations import ensure_schema
 from . import handlers, notify, texts
 from .health import default_monitor
 
@@ -35,8 +35,8 @@ async def _broadcast(bot: Bot, chat_ids: set[int], text: str, keyboard=None) -> 
             log.exception("не удалось отправить сообщение в чат %s", chat_id)
 
 
-def _collect_notifications() -> list[tuple[str, dict, str, list[tuple[int, str, str]]]]:
-    """(kind, устройство, текст события, люди для кнопок) по каждому событию."""
+def _collect_notifications() -> list[tuple[str, dict, str, int | None, list]]:
+    """(kind, устройство, текст события, id оригинала, люди) по каждому событию."""
     s = dbmod.session()
     try:
         items = notify.collect_notifications(s)
@@ -47,9 +47,11 @@ def _collect_notifications() -> list[tuple[str, dict, str, list[tuple[int, str, 
         people = [(p.id, p.name, p.role) for p in s.query(Person).order_by(Person.name)]
         return [
             (n.kind,
-             {"id": n.device.id, "name": n.device.name,
-              "mac": n.device.mac, "ip": n.device.ip},
-             n.message, people)
+             {"id": n.device.id, "name": n.device.name, "mac": n.device.mac,
+              "ip": n.device.ip, "random_mac": n.device.mac_is_random},
+             n.message,
+             n.extra_device.id if n.extra_device else None,
+             people)
             for n in items
         ]
     finally:
@@ -59,12 +61,18 @@ def _collect_notifications() -> list[tuple[str, dict, str, list[tuple[int, str, 
 async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
     while True:
         try:
-            for kind, dev, message, people in await asyncio.to_thread(_collect_notifications):
-                kb = handlers.new_device_keyboard(dev["id"], people)
-                if kind == "register_request":
+            for kind, dev, message, extra_id, people in await asyncio.to_thread(
+                _collect_notifications
+            ):
+                if kind == "device_maybe_same" and extra_id is not None:
+                    text = f"🔁 {message}"
+                    kb = handlers.merge_keyboard(dev["id"], extra_id)
+                elif kind == "register_request":
                     text = texts.format_registration(message)
+                    kb = handlers.new_device_keyboard(dev["id"], people)
                 else:
                     text = texts.format_new_device(dev)
+                    kb = handlers.new_device_keyboard(dev["id"], people)
                 await _broadcast(bot, chat_ids, text, kb)
         except Exception:
             log.exception("notify_loop")
@@ -133,8 +141,7 @@ async def main() -> None:
         log.warning("HS_TELEGRAM_CHAT_IDS пуст — бот некому отвечать, выходим")
         return
 
-    Base.metadata.create_all(engine)
-    run_migrations(engine)
+    ensure_schema(engine, Base.metadata)
 
     bot = Bot(token=settings.telegram_bot_token)
     dp = Dispatcher()

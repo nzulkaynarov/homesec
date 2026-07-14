@@ -13,6 +13,13 @@ GROUP_LABELS = {"kid": "Дети", "adult": "Взрослые", "guest": "Гос
 GROUP_ADDRESS_LISTS = {"kid": "hs-kids", "guest": "hs-guests", "unknown": "hs-unknown"}
 
 
+def is_random_mac(mac: str) -> bool:
+    """Локально-администрируемый MAC — «приватный адрес» iOS/Android.
+    Второй hex-символ 2/6/A/E. Такой адрес может меняться, и правила слетят —
+    для домашней сети приватный адрес стоит выключить на устройстве."""
+    return len(mac) > 1 and mac[1].upper() in "26AE"
+
+
 class Person(Base):
     __tablename__ = "people"
 
@@ -27,9 +34,10 @@ class Device(Base):
     __tablename__ = "devices"
 
     id: Mapped[int] = mapped_column(primary_key=True)
-    mac: Mapped[str] = mapped_column(String(17), unique=True)
+    mac: Mapped[str] = mapped_column(String(17), unique=True)  # основной (для показа)
     ip: Mapped[str] = mapped_column(String(15), default="")
     name: Mapped[str] = mapped_column(String(64), default="")
+    hostname: Mapped[str] = mapped_column(String(64), default="")  # из DHCP-lease
     person_id: Mapped[int | None] = mapped_column(ForeignKey("people.id"), nullable=True)
     blocked_manual: Mapped[bool] = mapped_column(Boolean, default=False)
     speed_limit: Mapped[str] = mapped_column(String(32), default="")  # напр. "10M/10M"
@@ -40,6 +48,22 @@ class Device(Base):
     @property
     def group(self) -> str:
         return self.person.role if self.person else "unknown"
+
+    @property
+    def mac_is_random(self) -> bool:
+        return is_random_mac(self.mac)
+
+
+class DeviceMac(Base):
+    """Дополнительные MAC устройства: телефоны с рандомизацией («приватный
+    адрес») приходят с новыми MAC — после объединения все они ведут к одному
+    устройству, и правила не слетают."""
+
+    __tablename__ = "device_macs"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_id: Mapped[int] = mapped_column(ForeignKey("devices.id"), index=True)
+    mac: Mapped[str] = mapped_column(String(17), unique=True)
 
 
 class Rule(Base):

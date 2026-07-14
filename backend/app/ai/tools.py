@@ -27,6 +27,7 @@ from ..models import (
     GROUP_LABELS,
     GROUPS,
     Device,
+    DeviceMac,
     EventLog,
     Pause,
     Person,
@@ -493,6 +494,32 @@ def add_bonus_time(
     db.commit()
     return (f"Бонус +{minutes} мин ({quota_svc.QUOTA_CATEGORY_LABELS[category]}) "
             f"для {label} на сегодня" + (f": {comment}" if comment else ""))
+
+
+@tool(mutating=True)
+def merge_devices(
+    db: Session,
+    duplicate_id: Annotated[int, "id устройства-дубля (обычно свежее, со случайным MAC)"],
+    target_id: Annotated[int, "id настоящего устройства (сохраняет имя, владельца, правила)"],
+) -> str:
+    """Объединяет дубль (новый MAC того же физического устройства, обычно
+    из-за «приватного адреса») с настоящим устройством: MAC-адреса дубля
+    переходят к настоящему, дубль удаляется, настройки сохраняются."""
+    if int(duplicate_id) == int(target_id):
+        raise ToolError("Нельзя объединить устройство с самим собой")
+    dup = _device_or_error(db, int(duplicate_id))
+    target = _device_or_error(db, int(target_id))
+    _guard_self(dup)
+    for dm in db.scalars(select(DeviceMac).where(DeviceMac.device_id == dup.id)):
+        dm.device_id = target.id
+    if not db.scalar(select(DeviceMac).where(DeviceMac.mac == dup.mac)):
+        db.add(DeviceMac(device_id=target.id, mac=dup.mac))
+    if dup.ip:  # дубль — более свежий lease, актуальный адрес у него
+        target.ip = dup.ip
+    dup_label = f"{dup.name} ({dup.mac})"
+    db.delete(dup)
+    db.commit()
+    return f"Объединено: {dup_label} → «{target.name}»; правила и владелец сохранены"
 
 
 @tool(mutating=True)

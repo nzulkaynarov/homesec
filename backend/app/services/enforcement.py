@@ -12,7 +12,16 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import GROUP_ADDRESS_LISTS, Device, GroupPolicy, Rule, active_pauses, log_event
+from ..models import (
+    GROUP_ADDRESS_LISTS,
+    Device,
+    DeviceMac,
+    GroupPolicy,
+    Rule,
+    active_pauses,
+    is_random_mac,
+    log_event,
+)
 from . import adguard, mikrotik, quota
 from .adguard import SERVICE_CATEGORIES
 
@@ -76,23 +85,52 @@ def rule_is_active(rule: Rule, now: datetime | None = None) -> bool:
 
 
 def discover_devices(db: Session, api) -> list[Device]:
-    """Синхронизирует DHCP-lease'ы с базой: новые MAC → новые устройства."""
-    known = {d.mac.upper(): d for d in db.scalars(select(Device))}
+    """Синхронизирует DHCP-lease'ы с базой: новые MAC → новые устройства.
+    Матчит по ВСЕМ MAC устройства (device_macs) — телефон с рандомизацией,
+    объединённый с исходным устройством, не плодит дублей. Новое устройство
+    с hostname существующего — кандидат на объединение (device_maybe_same)."""
+    devices = list(db.scalars(select(Device)))
+    known: dict[str, Device] = {d.mac.upper(): d for d in devices}
+    by_id = {d.id: d for d in devices}
+    for dm in db.scalars(select(DeviceMac)):
+        dev = by_id.get(dm.device_id)
+        if dev is not None:
+            known.setdefault(dm.mac.upper(), dev)
+
     for lease in mikrotik.get_leases(api):
         mac = lease["mac"].upper()
         if not mac:
             continue
+        hostname = (lease["hostname"] or "").strip()
         dev = known.get(mac)
         if dev is None:
-            dev = Device(mac=mac, ip=lease["ip"], name=lease["hostname"] or mac)
+            dev = Device(mac=mac, ip=lease["ip"], name=hostname or mac, hostname=hostname)
             db.add(dev)
             db.commit()
-            known[mac] = dev
-            log_event(db, "device_new", f"Новое устройство: {dev.name} ({mac}, {lease['ip']})")
-        elif lease["ip"] and dev.ip != lease["ip"]:
-            dev.ip = lease["ip"]
+            db.add(DeviceMac(device_id=dev.id, mac=mac))
             db.commit()
-    return list(known.values())
+            known[mac] = dev
+            by_id[dev.id] = dev
+            note = " ⚠️ случайный MAC" if is_random_mac(mac) else ""
+            log_event(db, "device_new",
+                      f"Новое устройство: {dev.name} ({mac}, {lease['ip']}){note}")
+            if hostname:
+                twin = next(
+                    (d for d in devices if d.hostname and d.hostname == hostname), None
+                )
+                if twin is not None:
+                    log_event(db, "device_maybe_same",
+                              f"Похоже, «{dev.name}» ({mac}) — это снова "
+                              f"«{twin.name}» ({twin.mac}): совпадает имя хоста.")
+            devices.append(dev)
+        else:
+            if lease["ip"] and dev.ip != lease["ip"]:
+                dev.ip = lease["ip"]
+                db.commit()
+            if hostname and dev.hostname != hostname:
+                dev.hostname = hostname
+                db.commit()
+    return devices
 
 
 def _desired_state(db: Session, devices: list[Device]) -> dict:

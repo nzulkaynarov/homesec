@@ -62,9 +62,13 @@ def format_registration(event_message: str) -> str:
 
 
 def format_new_device(dev: dict) -> str:
+    warning = ""
+    if dev.get("random_mac"):
+        warning = ("\n⚠️ Случайный MAC («приватный адрес»). Для домашней сети "
+                   "его лучше выключить на устройстве, иначе правила будут слетать.")
     return (
         "🆕 Новое устройство в сети\n"
         f"{dev['name']}\n"
-        f"MAC: {dev['mac']}\nIP: {dev['ip'] or '—'}\n\n"
+        f"MAC: {dev['mac']}\nIP: {dev['ip'] or '—'}{warning}\n\n"
         "Кому оно принадлежит?"
     )

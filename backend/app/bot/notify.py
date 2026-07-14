@@ -13,16 +13,17 @@ from sqlalchemy.orm import Session
 from ..models import Device, EventLog, kv_get, kv_set
 
 CURSOR_KEY = "bot_last_event_id"
-NOTIFY_KINDS = ("device_new", "register_request")
+NOTIFY_KINDS = ("device_new", "register_request", "device_maybe_same")
 
 _MAC_RE = re.compile(r"([0-9A-F]{2}(?::[0-9A-F]{2}){5})", re.IGNORECASE)
 
 
 @dataclass
 class Notification:
-    kind: str  # device_new | register_request
+    kind: str  # device_new | register_request | device_maybe_same
     device: Device
     message: str  # исходный текст события
+    extra_device: Device | None = None  # для maybe_same: устройство-оригинал
 
 
 def collect_notifications(db: Session) -> list[Notification]:
@@ -41,12 +42,19 @@ def collect_notifications(db: Session) -> list[Notification]:
     )
     out = []
     for e in events:
-        m = _MAC_RE.search(e.message)
-        if not m:
+        macs = [m.upper() for m in _MAC_RE.findall(e.message)]
+        if not macs:
             continue
-        dev = db.scalar(select(Device).where(Device.mac == m.group(1).upper()))
-        if dev is not None:
-            out.append(Notification(kind=e.kind, device=dev, message=e.message))
+        dev = db.scalar(select(Device).where(Device.mac == macs[0]))
+        if dev is None:
+            continue
+        extra = None
+        if e.kind == "device_maybe_same" and len(macs) > 1:
+            extra = db.scalar(select(Device).where(Device.mac == macs[1]))
+            if extra is None:
+                continue  # оригинал уже объединили/удалили
+        out.append(Notification(kind=e.kind, device=dev, message=e.message,
+                                extra_device=extra))
     if max_id > last:
         kv_set(db, CURSOR_KEY, str(max_id))
     return out

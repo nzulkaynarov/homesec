@@ -22,7 +22,9 @@
         <input name="name" value="{{ d.name }}">
       </form>
     </td>
-    <td class="mono">{{ d.mac }}<br>{{ d.ip or '—' }}</td>
+    <td class="mono">{{ d.mac }}{% if d.mac_is_random %}
+      <span title="Случайный MAC («приватный адрес») — выключите его на устройстве для домашней сети, иначе правила будут слетать">⚠️</span>
+      {% endif %}<br>{{ d.ip or '—' }}</td>
     <td>
       <select name="person_id" form="dev{{ d.id }}">
         <option value="">— никто (неизвестное) —</option>

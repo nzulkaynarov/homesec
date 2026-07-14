@@ -10,7 +10,7 @@ from . import scheduler
 from .auth import auth_middleware
 from .config import settings
 from .db import Base, engine, session
-from .migrations import run_migrations
+from .migrations import ensure_schema
 from .models import GROUP_ADDRESS_LISTS, GroupPolicy, Quota
 from .routers import auth_routes, dashboard, devices, people, portal, rules
 
@@ -34,8 +34,7 @@ def _seed_policies() -> None:
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    Base.metadata.create_all(engine)
-    run_migrations(engine)
+    ensure_schema(engine, Base.metadata)
     _seed_policies()
     if settings.scheduler_enabled:
         scheduler.start()

@@ -171,6 +171,38 @@ def new_device_keyboard(dev_id: int, people: list[tuple[int, str, str]]) -> Inli
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def merge_keyboard(duplicate_id: int, target_id: int) -> InlineKeyboardMarkup:
+    """Кнопки к подозрению «это то же устройство с новым MAC»."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="🔁 Объединить",
+                             callback_data=f"mg:{duplicate_id}:{target_id}"),
+        InlineKeyboardButton(text="Это разные устройства",
+                             callback_data=f"mg:{duplicate_id}:{target_id}:no"),
+    ]])
+
+
+@router.callback_query(F.data.startswith("mg:"))
+async def cb_merge(cb: CallbackQuery) -> None:
+    parts = (cb.data or "").split(":")
+    duplicate_id, target_id = int(parts[1]), int(parts[2])
+    if len(parts) > 3 and parts[3] == "no":
+        result = "Хорошо, оставляю как два разных устройства."
+    else:
+        try:
+            result = await asyncio.to_thread(
+                run_tool_sync, "merge_devices",
+                {"duplicate_id": duplicate_id, "target_id": target_id},
+            )
+        except tools.ToolError as e:
+            result = f"Не получилось: {e}"
+        except Exception:
+            log.exception("merge_devices упал")
+            result = "Ошибка при объединении, подробности в журнале."
+    await cb.answer()
+    if isinstance(cb.message, Message):
+        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
+
+
 def _person_name(person_id: int) -> str | None:
     s = dbmod.session()
     try:
