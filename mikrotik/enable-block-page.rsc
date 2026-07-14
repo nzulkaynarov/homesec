@@ -18,6 +18,11 @@
 # отвечает на перехваченный запрос редиректом на свой прямой адрес —
 # прямое соединение идёт мимо NAT и приходит с настоящим IP.
 #
+# Реализация hairpin — через mark-connection (как DNS-hairpin в base):
+# connection-nat-state=dstnat в srcnat не принимается RouterOS 7.23.
+# Помечаем перехваченный HTTP в mangle ДО dst-nat и маскируем по метке —
+# прямые заходы на панель (dst-port 8000, не 80) не метятся и IP сохраняют.
+#
 # Второе правило (hs-unknown, ВЫКЛЮЧЕНО) — для портала регистрации:
 # включайте ТОЛЬКО если HS_BLOCK_UNKNOWN=true в .env панели. Иначе оно
 # заворачивало бы HTTP незаблокированных «неизвестных» устройств и ломало
@@ -37,19 +42,27 @@
   :error "Правила block page уже есть — повторный импорт создал бы дубли. Ничего не сделано."
 }
 
-# Заблокированным разрешается доступ ТОЛЬКО к панели (порт 8000) — до
-# общего drop'а. Всё остальное для них по-прежнему падает.
+# Заблокированным разрешается доступ ТОЛЬКО к панели (:8000) и к DNS AdGuard
+# (:53) — до общего drop'а. DNS обязателен: без резолва имени браузер не дойдёт
+# до HTTP-перехвата и человек увидит «нет интернета» вместо страницы. Весь
+# остальной трафик заблокированных по-прежнему падает.
 /ip firewall filter
 add chain=forward action=accept protocol=tcp dst-address=$piAddr dst-port=8000 src-address-list=hs-blocked comment="hs: allow block page" place-before=[find comment="hs: drop blocked devices"]
+add chain=forward action=accept protocol=udp dst-address=$piAddr dst-port=53 src-address-list=hs-blocked comment="hs: allow block page dns" place-before=[find comment="hs: drop blocked devices"]
+add chain=forward action=accept protocol=tcp dst-address=$piAddr dst-port=53 src-address-list=hs-blocked comment="hs: allow block page dns tcp" place-before=[find comment="hs: drop blocked devices"]
+
+# Метка перехваченного HTTP ДО dst-nat — для hairpin masquerade по метке.
+/ip firewall mangle
+add chain=prerouting action=mark-connection new-connection-mark=hs-blockpage protocol=tcp dst-port=80 src-address-list=hs-blocked dst-address=!$piAddr passthrough=yes comment="hs: mark block page"
 
 # Перехват HTTP -> страница на панели. Исключаем сам Pi и адреса роутера.
 /ip firewall nat
 add chain=dstnat action=dst-nat protocol=tcp dst-port=80 src-address-list=hs-blocked dst-address=!$piAddr dst-address-type=!local to-addresses=$piAddr to-ports=8000 comment="hs: block page (blocked)"
 add chain=dstnat action=dst-nat protocol=tcp dst-port=80 src-address-list=hs-unknown dst-address=!$piAddr dst-address-type=!local to-addresses=$piAddr to-ports=8000 comment="hs: block page (unknown portal)" disabled=yes
 
-# Hairpin для перехваченных соединений (см. шапку). connection-nat-state=dstnat
-# гарантирует, что прямые заходы на панель НЕ маскарадятся — их настоящий IP
-# нужен панели, чтобы показать персональную причину блокировки.
-add chain=srcnat action=masquerade protocol=tcp dst-address=$piAddr dst-port=8000 connection-nat-state=dstnat place-before=[find comment="defconf: masquerade"] comment="hs: block page hairpin"
+# Hairpin: маскируем ТОЛЬКО перехваченные (помеченные) соединения. Прямые
+# заходы на панель (dst-port 8000, не 80) не метятся → их настоящий IP
+# доходит до панели, и она показывает персональную причину блокировки.
+add chain=srcnat action=masquerade connection-mark=hs-blockpage place-before=[find comment="defconf: masquerade"] comment="hs: block page hairpin"
 
 :put "Страница «время вышло» включена. Портал для неизвестных (второе правило) выключен — включайте только вместе с HS_BLOCK_UNKNOWN=true."
