@@ -7,14 +7,22 @@
 import logging
 import socket
 from datetime import datetime, timedelta
-from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import GROUP_ADDRESS_LISTS, Device, GroupPolicy, Rule, log_event
-from . import adguard, mikrotik
+from ..models import (
+    GROUP_ADDRESS_LISTS,
+    Device,
+    DeviceMac,
+    GroupPolicy,
+    Rule,
+    active_pauses,
+    is_random_mac,
+    log_event,
+)
+from . import adguard, mikrotik, quota
 from .adguard import SERVICE_CATEGORIES
 
 log = logging.getLogger("homesec.enforce")
@@ -48,14 +56,14 @@ def get_self_ips() -> set[str]:
         s.close()
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ips.add(info[4][0])
+            ips.add(str(info[4][0]))
     except OSError:
         pass
     ips.discard("127.0.0.1")
     return ips
 
 
-def rule_is_active(rule: Rule, now: Optional[datetime] = None) -> bool:
+def rule_is_active(rule: Rule, now: datetime | None = None) -> bool:
     if not rule.enabled:
         return False
     now = now or datetime.now()
@@ -77,23 +85,52 @@ def rule_is_active(rule: Rule, now: Optional[datetime] = None) -> bool:
 
 
 def discover_devices(db: Session, api) -> list[Device]:
-    """Синхронизирует DHCP-lease'ы с базой: новые MAC → новые устройства."""
-    known = {d.mac.upper(): d for d in db.scalars(select(Device))}
+    """Синхронизирует DHCP-lease'ы с базой: новые MAC → новые устройства.
+    Матчит по ВСЕМ MAC устройства (device_macs) — телефон с рандомизацией,
+    объединённый с исходным устройством, не плодит дублей. Новое устройство
+    с hostname существующего — кандидат на объединение (device_maybe_same)."""
+    devices = list(db.scalars(select(Device)))
+    known: dict[str, Device] = {d.mac.upper(): d for d in devices}
+    by_id = {d.id: d for d in devices}
+    for dm in db.scalars(select(DeviceMac)):
+        dev = by_id.get(dm.device_id)
+        if dev is not None:
+            known.setdefault(dm.mac.upper(), dev)
+
     for lease in mikrotik.get_leases(api):
         mac = lease["mac"].upper()
         if not mac:
             continue
+        hostname = (lease["hostname"] or "").strip()
         dev = known.get(mac)
         if dev is None:
-            dev = Device(mac=mac, ip=lease["ip"], name=lease["hostname"] or mac)
+            dev = Device(mac=mac, ip=lease["ip"], name=hostname or mac, hostname=hostname)
             db.add(dev)
             db.commit()
-            known[mac] = dev
-            log_event(db, "device_new", f"Новое устройство: {dev.name} ({mac}, {lease['ip']})")
-        elif lease["ip"] and dev.ip != lease["ip"]:
-            dev.ip = lease["ip"]
+            db.add(DeviceMac(device_id=dev.id, mac=mac))
             db.commit()
-    return list(known.values())
+            known[mac] = dev
+            by_id[dev.id] = dev
+            note = " ⚠️ случайный MAC" if is_random_mac(mac) else ""
+            log_event(db, "device_new",
+                      f"Новое устройство: {dev.name} ({mac}, {lease['ip']}){note}")
+            if hostname:
+                twin = next(
+                    (d for d in devices if d.hostname and d.hostname == hostname), None
+                )
+                if twin is not None:
+                    log_event(db, "device_maybe_same",
+                              f"Похоже, «{dev.name}» ({mac}) — это снова "
+                              f"«{twin.name}» ({twin.mac}): совпадает имя хоста.")
+            devices.append(dev)
+        else:
+            if lease["ip"] and dev.ip != lease["ip"]:
+                dev.ip = lease["ip"]
+                db.commit()
+            if hostname and dev.hostname != hostname:
+                dev.hostname = hostname
+                db.commit()
+    return devices
 
 
 def _desired_state(db: Session, devices: list[Device]) -> dict:
@@ -109,6 +146,11 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
                 active_group_blocks.add(r.target)
             else:
                 active_device_blocks.add(str(r.target))
+    for p in active_pauses(db, now):  # разовые «паузы до …» поверх расписаний
+        if p.target_type == "group":
+            active_group_blocks.add(p.target)
+        else:
+            active_device_blocks.add(str(p.target))
 
     lists: dict[str, set[str]] = {name: set() for name in GROUP_ADDRESS_LISTS.values()}
     lists["hs-blocked"] = set()
@@ -117,11 +159,13 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
     queues: dict[str, str] = {}
     ag_clients: dict[str, dict] = {}
 
+    quota_spent = quota.exhausted(db, devices, now)  # {device_id: категории}
     self_ips = get_self_ips()
     for dev in devices:
         if not dev.ip or dev.ip in self_ips:
             continue  # пропускаем саму малинку — она инфраструктура, не клиент
         group = dev.group
+        spent = quota_spent.get(dev.id, set())
         if group in GROUP_ADDRESS_LISTS:
             lists[GROUP_ADDRESS_LISTS[group]].add(dev.ip)
         blocked = (
@@ -129,6 +173,7 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
             or group in active_group_blocks
             or str(dev.id) in active_device_blocks
             or (group == "unknown" and settings.block_unknown)
+            or "internet" in spent  # квота на интернет исчерпана — до полуночи
         )
         if blocked:
             lists["hs-blocked"].add(dev.ip)
@@ -139,15 +184,20 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
             queues[dev.ip] = dev.speed_limit
 
         policy = policies.get(group)
-        if policy and (policy.blocked_services or policy.safe_search):
-            services: list[str] = []
+        services: list[str] = []
+        safe_search = bool(policy.safe_search) if policy else False
+        if policy:
             for cat in policy.blocked_services.split(","):
                 if cat.strip() in SERVICE_CATEGORIES:
                     services += SERVICE_CATEGORIES[cat.strip()]["services"]
+        for cat in sorted(spent - {"internet"}):  # исчерпанные категории-квоты
+            if cat in SERVICE_CATEGORIES:
+                services += SERVICE_CATEGORIES[cat]["services"]
+        if services or safe_search:
             ag_clients[f"hs-{dev.mac.lower().replace(':', '')}"] = {
                 "ip": dev.ip,
-                "blocked_services": services,
-                "safe_search": policy.safe_search,
+                "blocked_services": sorted(set(services)),
+                "safe_search": safe_search,
             }
 
     return {"lists": lists, "queues": queues, "ag_clients": ag_clients}
@@ -156,7 +206,7 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
 def reconcile(db: Session) -> dict:
     """Полный цикл: обнаружить устройства, применить состояние. Возвращает
     сводку; ошибки интеграций пишет в журнал, но не роняет планировщик."""
-    summary = {"ok": True, "errors": [], "newly_blocked": []}
+    summary: dict = {"ok": True, "errors": [], "newly_blocked": []}
 
     try:
         with mikrotik.api_session() as api:

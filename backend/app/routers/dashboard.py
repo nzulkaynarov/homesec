@@ -1,6 +1,7 @@
 import logging
 
 from fastapi import APIRouter, Depends, Request
+from fastapi.concurrency import run_in_threadpool
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -13,24 +14,30 @@ log = logging.getLogger("homesec.dashboard")
 router = APIRouter()
 
 
+def _router_snapshot() -> tuple[set[str], bool]:
+    """Синхронный I/O к RouterOS — вызывать только через run_in_threadpool,
+    иначе таймаут недоступного роутера подвешивает event loop для всех."""
+    try:
+        with mikrotik.api_session() as api:
+            return mikrotik.get_online_ips(api), True
+    except mikrotik.MikrotikError as e:
+        log.warning("%s", e)
+        return set(), False
+
+
+def _adguard_snapshot() -> tuple[dict, bool]:
+    try:
+        return adguard.get_stats(), True
+    except adguard.AdGuardError as e:
+        log.warning("%s", e)
+        return {}, False
+
+
 @router.get("/")
 async def dashboard(request: Request, db: Session = Depends(get_db)):
     devices = list(db.scalars(select(Device)))
-    online_ips: set[str] = set()
-    router_ok = False
-    try:
-        with mikrotik.api_session() as api:
-            online_ips = mikrotik.get_online_ips(api)
-            router_ok = True
-    except mikrotik.MikrotikError as e:
-        log.warning("%s", e)
-
-    stats, adguard_ok = {}, False
-    try:
-        stats = adguard.get_stats()
-        adguard_ok = True
-    except adguard.AdGuardError as e:
-        log.warning("%s", e)
+    online_ips, router_ok = await run_in_threadpool(_router_snapshot)
+    stats, adguard_ok = await run_in_threadpool(_adguard_snapshot)
 
     events = list(db.scalars(select(EventLog).order_by(EventLog.ts.desc()).limit(20)))
     return templates.TemplateResponse(request, "dashboard.html", {
@@ -49,4 +56,5 @@ async def dashboard(request: Request, db: Session = Depends(get_db)):
 @router.get("/events")
 async def events_page(request: Request, db: Session = Depends(get_db)):
     events = list(db.scalars(select(EventLog).order_by(EventLog.ts.desc()).limit(200)))
-    return templates.TemplateResponse(request, "events.html", {"active": "events", "events": events})
+    ctx = {"active": "events", "events": events}
+    return templates.TemplateResponse(request, "events.html", ctx)

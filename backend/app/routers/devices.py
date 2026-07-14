@@ -1,14 +1,16 @@
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
+from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from .. import db as dbmod
 from ..db import get_db
-from ..models import Device, Person, log_event
-from ..services import mikrotik
+from ..models import Device, Person, active_pauses, log_event
+from ..services import mikrotik, quota
 from ..services.enforcement import reconcile
 from ..templates_env import templates
 
@@ -26,21 +28,44 @@ def _reconcile_bg() -> None:
         session.close()
 
 
+def _online_ips() -> set[str]:
+    """Синхронный I/O к RouterOS — вызывать через run_in_threadpool."""
+    try:
+        with mikrotik.api_session() as api:
+            return mikrotik.get_online_ips(api)
+    except mikrotik.MikrotikError as e:
+        log.warning("%s", e)
+        return set()
+
+
+def _pin_lease(mac: str, ip: str, name: str) -> None:
+    try:
+        with mikrotik.api_session() as api:
+            mikrotik.make_lease_static(api, mac, ip, comment=f"hs: {name}")
+    except mikrotik.MikrotikError as e:
+        log.warning("%s", e)
+
+
 @router.get("/devices")
 async def devices_page(request: Request, db: Session = Depends(get_db)):
     devices = list(db.scalars(select(Device).order_by(Device.first_seen.desc())))
     people = list(db.scalars(select(Person).order_by(Person.name)))
-    online_ips: set[str] = set()
-    try:
-        with mikrotik.api_session() as api:
-            online_ips = mikrotik.get_online_ips(api)
-    except mikrotik.MikrotikError as e:
-        log.warning("%s", e)
+    online_ips = await run_in_threadpool(_online_ips)
+    pause_until: dict[int, datetime] = {}
+    for p in active_pauses(db):
+        for d in devices:
+            hit = (p.target_type == "device" and p.target == str(d.id)) or (
+                p.target_type == "group" and p.target == d.group
+            )
+            if hit and (d.id not in pause_until or p.until > pause_until[d.id]):
+                pause_until[d.id] = p.until
     return templates.TemplateResponse(request, "devices.html", {
         "active": "devices",
         "devices": devices,
         "people": people,
         "online_ips": online_ips,
+        "pause_until": pause_until,
+        "quota_progress": quota.progress(db, devices),
     })
 
 
@@ -67,11 +92,7 @@ async def update_device(
         db.commit()
         # Закрепляем IP за устройством, чтобы правила по IP не «переехали»
         if dev.ip:
-            try:
-                with mikrotik.api_session() as api:
-                    mikrotik.make_lease_static(api, dev.mac, dev.ip, comment=f"hs: {dev.name}")
-            except mikrotik.MikrotikError as e:
-                log.warning("%s", e)
+            await run_in_threadpool(_pin_lease, dev.mac, dev.ip, dev.name)
         log_event(db, "device_update", f"Устройство обновлено: {dev.name} ({dev.mac})")
     tasks.add_task(_reconcile_bg)
     return RedirectResponse("/devices", status_code=302)

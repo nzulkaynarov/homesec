@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>HomeSec — доступ ограничен</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f4f4f4; margin: 0;
+           display: flex; min-height: 100vh; align-items: center; justify-content: center; }
+    .card { background: #fff; border-radius: 12px; padding: 32px; max-width: 420px;
+            margin: 16px; box-shadow: 0 2px 12px rgba(0,0,0,.08); text-align: center; }
+    h1 { font-size: 1.4em; margin: 0 0 12px; }
+    .emoji { font-size: 3em; }
+    p { color: #444; line-height: 1.5; }
+    .quota { text-align: left; margin: 16px 0; padding: 12px;
+             background: #f8f8f8; border-radius: 8px; font-size: .95em; }
+    .hint { color: #888; font-size: .85em; }
+  </style>
+</head>
+<body>
+<div class="card">
+  {% if info is none %}
+  <div class="emoji">✅</div>
+  <h1>Ограничений нет</h1>
+  <p>Для этого устройства сейчас нет активных блокировок.
+     Если сайты не открываются — попробуйте перезагрузить Wi-Fi.</p>
+  {% elif info.kind == 'quota' %}
+  <div class="emoji">⏰</div>
+  <h1>Время вышло</h1>
+  <p>Дневной лимит интернета для «{{ info.device.name }}» на сегодня израсходован.
+     Доступ вернётся после полуночи.</p>
+  {% elif info.kind == 'pause' %}
+  <div class="emoji">⏸</div>
+  <h1>Интернет на паузе</h1>
+  <p>Для «{{ info.device.name }}» интернет приостановлен
+     до {{ info.until.strftime('%H:%M') }}.</p>
+  {% elif info.kind == 'rule' %}
+  <div class="emoji">🌙</div>
+  <h1>Сейчас не время</h1>
+  <p>Действует расписание «{{ info.rule_name }}»{% if info.until %} —
+     интернет вернётся в {{ info.until.strftime('%H:%M') }}{% endif %}.</p>
+  {% elif info.kind == 'unknown' %}
+  <div class="emoji">❓</div>
+  <h1>Устройство не зарегистрировано</h1>
+  <p>Это устройство ещё не добавлено в домашнюю сеть.
+     <a href="/register">Отправить заявку на регистрацию</a>.</p>
+  {% else %}
+  <div class="emoji">⛔</div>
+  <h1>Доступ выключен</h1>
+  <p>Интернет для «{{ info.device.name }}» выключен вручную.</p>
+  {% endif %}
+
+  {% if info and info.quota %}
+  <div class="quota">
+    {% for q in info.quota %}
+    <div>{{ '⛔' if q.used >= q.limit else '⏳' }} {{ q.label }}:
+         {{ q.used }} из {{ q.limit }} мин</div>
+    {% endfor %}
+  </div>
+  {% endif %}
+
+  {% if info %}
+  <p class="hint">Добавить время может владелец сети — команда /bonus в Telegram.</p>
+  {% endif %}
+</div>
+</body>
+</html>

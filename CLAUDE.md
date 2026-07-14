@@ -52,10 +52,14 @@ MikroTik `homesec` (HS_MIKROTIK_PASSWORD). Доступ MikroTik: `ssh admin@192
 2. **IP самой малинки никогда не попадает в hs-managed/hs-blocked.**
    Она инфраструктура: её upstream-запросы (AdGuard→1.1.1.1) нельзя резать.
    Защита в коде: `get_self_ips()` в `backend/app/services/enforcement.py` — не удалять.
-3. **Заворот DNS в той же подсети требует hairpin masquerade.** Простой dst-nat
-   ломается: клиент слал на 8.8.8.8, ответ приходит с 88.2 → «reply from
-   unexpected source», отвергается (симптом: часть сайтов не открывается).
-   Схема: mangle mark `hs-dns` → dst-nat → srcnat masquerade по метке.
+3. **ЛЮБОЙ dst-nat-заворот в той же подсети требует hairpin masquerade.**
+   Простой dst-nat ломается: клиент слал на 8.8.8.8, ответ приходит с 88.2 →
+   «reply from unexpected source», отвергается (симптом: часть сайтов не
+   открывается). Схема DNS: mangle mark `hs-dns` → dst-nat → srcnat masquerade
+   по метке. То же для HTTP-перехвата block-page: masquerade по
+   `connection-nat-state=dstnat` (а раз masquerade прячет IP клиента, панель
+   отвечает на перехват редиректом на HS_PANEL_LAN_URL — прямое соединение
+   приходит с настоящим IP).
 4. **Блокировка DoH — только tcp/udp 443 к списку hs-doh.** В hs-doh входят
    1.1.1.1/8.8.8.8; блокировать к ним ВЕСЬ трафик = зарезать upstream AdGuard.
 5. **`.rsc`-скрипты одноразовые** (не идемпотентны): повторный импорт создаёт
@@ -75,24 +79,35 @@ MikroTik `homesec` (HS_MIKROTIK_PASSWORD). Доступ MikroTik: `ssh admin@192
 | `backend/app/services/enforcement.py` | ЯДРО: расчёт желаемого состояния + reconcile (раз в минуту и после каждого изменения) |
 | `backend/app/services/mikrotik.py` | RouterOS API (librouteros); только address-lists, queues, leases, connections |
 | `backend/app/services/adguard.py` | AdGuard REST API: per-client блокировки сервисов, safe search |
+| `backend/app/ai/tools.py` | Реестр инструментов — ЕДИНСТВЕННАЯ точка, через которую ИИ и бот трогают систему; guardrails зашиты в код (self-IP, только hs-*, аудит) |
+| `backend/app/ai/` | ИИ-слой: client.py (Claude API + дневной бюджет), orchestrator.py (NL→tools, мутации только через кнопку), analyst.py (дайджест), watchdog.py (аномалии: эвристики + LLM-оформление) |
+| `backend/app/bot/` | Telegram-бот, отдельный systemd-юнит homesec-bot: уведомления, health-алерты, команды, ИИ-канал |
+| `backend/app/migrations.py` | Мини-миграции схемы (PRAGMA user_version), только аддитивные |
 | `backend/app/routers/`, `templates/` | Веб-панель (FastAPI + Jinja2, без JS-фреймворков) |
 | `mikrotik/homesec-base.rsc` | Базовый импорт (контроль создаётся выключенным) |
 | `mikrotik/enable-adguard.rsc` | Отдельное включение принудительного DNS (с проверкой Pi) |
+| `mikrotik/enable-block-page.rsc` | Опция: HTTP заблокированных -> страница «время вышло» (правило для hs-unknown создаётся выключенным!) |
 | `deploy/` | systemd-юниты + install.sh + pull-деплой update.sh |
 | `docs/05-operations.md` | Снапшот прода, health-чеки, откаты — читать перед работой с живой сетью |
+| `docs/06-ai-multiagent-tz.md` | ТЗ ИИ-слоя: архитектура, guardrails, этапы (реализованы этапы 0–2) |
 
 ## Дорожная карта (согласована с владельцем)
 
-Фаза 1: **Telegram-бот** (уведомления о новых устройствах с кнопками,
-/status /block /pause, health-алерты если AdGuard/панель упали) — бот решает
-удалённый доступ (исходящее соединение обходит NAT) и станет каналом ИИ-фич.
-Фаза 2: квоты времени по категориям, страница блокировки («время вышло»),
-ИИ-дайджест дня в Telegram, портал регистрации неизвестных устройств.
-Фаза 3: NL-управление через Claude API (tool calls в services/), детектор
-аномалий (ночная активность, всплеск DoH = попытка обхода), бонусы времени.
-
-Известный продуктовый риск: MAC-рандомизация телефонов плодит «новые
-устройства» — учитывать в дизайне идентификации (фаза 2).
+Фаза 1 — **СДЕЛАНО**: Telegram-бот (уведомления о новых устройствах с
+кнопками, /status /block /pause /resume /digest, health-алерты). Для запуска
+на проде нужно заполнить HS_TELEGRAM_* в .env на малинке.
+Фаза 3 (ИИ) — **СДЕЛАНО в базовой версии**: NL-управление через Claude API
+(app/ai/orchestrator.py; Opus для рассуждений, Haiku для рутины), детектор
+аномалий (ночная активность, всплеск DoH), ИИ-дайджест дня. Правила: любая
+мутация от ИИ — только через кнопку подтверждения в Telegram; дневной бюджет
+токенов HS_AI_DAILY_TOKEN_BUDGET; без ключа HS_ANTHROPIC_API_KEY ИИ молчит,
+остальное работает.
+Фаза 2 — **СДЕЛАНО** (ТЗ: docs/07-phase2-tz.md): квоты времени по категориям
+(учёт по DNS-активности, бонусы через /bonus), страница «время вышло»
+(/blocked, требует разовый импорт enable-block-page.rsc на роутере), портал
+регистрации (/register), анти-MAC-рандомизация (метка случайного MAC,
+кнопка «объединить» по совпадению hostname, несколько MAC на устройство
+через device_macs; первая настоящая миграция схемы — №1 в migrations.py).
 
 ## Владелец
 

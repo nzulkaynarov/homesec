@@ -109,7 +109,8 @@ def sync_clients(desired: dict[str, dict]) -> None:
         cur_services = cur.get("blocked_services") or []
         if isinstance(cur_services, dict):  # новые версии: {"ids": [...], "schedule": ...}
             cur_services = cur_services.get("ids") or []
-        cur_safe = (cur.get("safe_search") or {}).get("enabled", cur.get("safesearch_enabled", False))
+        legacy_safe = cur.get("safesearch_enabled", False)
+        cur_safe = (cur.get("safe_search") or {}).get("enabled", legacy_safe)
         if (
             sorted(cur_services) != sorted(want["blocked_services"])
             or cur.get("ids") != [want["ip"]]

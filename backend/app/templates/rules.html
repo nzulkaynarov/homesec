@@ -65,6 +65,73 @@
 <p class="hint">Окно может проходить через полночь: «с 22:00 до 07:00» заблокирует ночь.
 Дни относятся к началу окна.</p>
 
+<h1>Квоты времени</h1>
+<p class="hint">Сколько минут в день разрешена категория (или интернет целиком).
+Для группы квота действует на каждое устройство отдельно. Считается по
+DNS-активности (приближённо); по исчерпании — блокировка до полуночи.
+Добавить время сегодня: /bonus в Telegram.</p>
+
+<table>
+  <tr><th>Квота</th><th>Кому</th><th>Что</th><th>Минут/день</th><th>Дни</th><th>Статус</th><th></th></tr>
+  {% for q in quotas %}
+  <tr>
+    <td>{{ q.name }}</td>
+    <td>
+      {% if q.target_type == 'group' %}{{ GROUP_LABELS.get(q.target, q.target) }}
+      {% else %}{{ device_names.get(q.target, '?') }}{% endif %}
+    </td>
+    <td>{{ QUOTA_LABELS.get(q.category, q.category) }}</td>
+    <td>{{ q.minutes_per_day }}</td>
+    <td>
+      {% set day_list = q.days.split(',') %}
+      {% for i in range(7) %}{% if i|string in day_list %}{{ DAY_NAMES[i] }} {% endif %}{% endfor %}
+    </td>
+    <td>{% if q.enabled %}<span class="tag g-kid">вкл</span>{% else %}<span class="tag">выкл</span>{% endif %}</td>
+    <td class="actions">
+      <form method="post" action="/quotas/{{ q.id }}/toggle" class="inline">
+        <button>{{ 'Выключить' if q.enabled else 'Включить' }}</button>
+      </form>
+      <form method="post" action="/quotas/{{ q.id }}/delete" class="inline"><button>🗑</button></form>
+    </td>
+  </tr>
+  {% else %}
+  <tr><td colspan="7">Квот пока нет</td></tr>
+  {% endfor %}
+</table>
+
+<h2>Новая квота</h2>
+<form method="post" action="/quotas/add" class="rule-form">
+  <input name="name" placeholder="Название (Игры детям)">
+  <select name="target_type" id="q_target_type" onchange="
+      document.getElementById('q-group').style.display = this.value == 'group' ? '' : 'none';
+      document.getElementById('q-device').style.display = this.value == 'device' ? '' : 'none';
+      document.getElementById('q-group').name = this.value == 'group' ? 'target' : '';
+      document.getElementById('q-device').name = this.value == 'device' ? 'target' : '';">
+    <option value="group">Группе</option>
+    <option value="device">Устройству</option>
+  </select>
+  <select name="target" id="q-group">
+    <option value="kid">Дети</option>
+    <option value="guest">Гости</option>
+    <option value="unknown">Неизвестные</option>
+  </select>
+  <select id="q-device" style="display:none">
+    {% for d in devices %}<option value="{{ d.id }}">{{ d.name }}</option>{% endfor %}
+  </select>
+  <select name="category">
+    {% for cat_id, label in QUOTA_LABELS.items() %}
+    <option value="{{ cat_id }}">{{ label }}</option>
+    {% endfor %}
+  </select>
+  <input type="number" name="minutes_per_day" value="120" min="1" max="1440" size="5"> мин/день
+  <span class="days">
+    {% for i in range(7) %}
+    <label><input type="checkbox" name="days" value="{{ i }}" checked>{{ DAY_NAMES[i] }}</label>
+    {% endfor %}
+  </span>
+  <button>Создать</button>
+</form>
+
 <h1>Политики групп (DNS-фильтр)</h1>
 <p class="hint">Блокировка категорий и безопасный поиск применяются через AdGuard Home
 к каждому устройству группы.</p>
