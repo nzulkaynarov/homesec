@@ -13,7 +13,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import GROUP_ADDRESS_LISTS, Device, GroupPolicy, Rule, active_pauses, log_event
-from . import adguard, mikrotik
+from . import adguard, mikrotik, quota
 from .adguard import SERVICE_CATEGORIES
 
 log = logging.getLogger("homesec.enforce")
@@ -121,11 +121,13 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
     queues: dict[str, str] = {}
     ag_clients: dict[str, dict] = {}
 
+    quota_spent = quota.exhausted(db, devices, now)  # {device_id: категории}
     self_ips = get_self_ips()
     for dev in devices:
         if not dev.ip or dev.ip in self_ips:
             continue  # пропускаем саму малинку — она инфраструктура, не клиент
         group = dev.group
+        spent = quota_spent.get(dev.id, set())
         if group in GROUP_ADDRESS_LISTS:
             lists[GROUP_ADDRESS_LISTS[group]].add(dev.ip)
         blocked = (
@@ -133,6 +135,7 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
             or group in active_group_blocks
             or str(dev.id) in active_device_blocks
             or (group == "unknown" and settings.block_unknown)
+            or "internet" in spent  # квота на интернет исчерпана — до полуночи
         )
         if blocked:
             lists["hs-blocked"].add(dev.ip)
@@ -143,15 +146,20 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
             queues[dev.ip] = dev.speed_limit
 
         policy = policies.get(group)
-        if policy and (policy.blocked_services or policy.safe_search):
-            services: list[str] = []
+        services: list[str] = []
+        safe_search = bool(policy.safe_search) if policy else False
+        if policy:
             for cat in policy.blocked_services.split(","):
                 if cat.strip() in SERVICE_CATEGORIES:
                     services += SERVICE_CATEGORIES[cat.strip()]["services"]
+        for cat in sorted(spent - {"internet"}):  # исчерпанные категории-квоты
+            if cat in SERVICE_CATEGORIES:
+                services += SERVICE_CATEGORIES[cat]["services"]
+        if services or safe_search:
             ag_clients[f"hs-{dev.mac.lower().replace(':', '')}"] = {
                 "ip": dev.ip,
-                "blocked_services": services,
-                "safe_search": policy.safe_search,
+                "blocked_services": sorted(set(services)),
+                "safe_search": safe_search,
             }
 
     return {"lists": lists, "queues": queues, "ag_clients": ag_clients}

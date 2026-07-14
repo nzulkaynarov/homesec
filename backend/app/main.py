@@ -11,7 +11,7 @@ from .auth import auth_middleware
 from .config import settings
 from .db import Base, engine, session
 from .migrations import run_migrations
-from .models import GROUP_ADDRESS_LISTS, GroupPolicy
+from .models import GROUP_ADDRESS_LISTS, GroupPolicy, Quota
 from .routers import auth_routes, dashboard, devices, people, rules
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
@@ -23,6 +23,10 @@ def _seed_policies() -> None:
         for group in GROUP_ADDRESS_LISTS:  # kid, guest, unknown
             if not db.scalar(select(GroupPolicy).where(GroupPolicy.group == group)):
                 db.add(GroupPolicy(group=group))
+        # Образец квоты (выключен): включается в панели на странице правил
+        if db.scalar(select(Quota)) is None:
+            db.add(Quota(name="Игры детям (образец)", target_type="group", target="kid",
+                         category="games", minutes_per_day=120, enabled=False))
         db.commit()
     finally:
         db.close()

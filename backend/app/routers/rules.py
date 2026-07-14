@@ -7,9 +7,10 @@ from sqlalchemy.orm import Session
 
 from .. import db as dbmod
 from ..db import get_db
-from ..models import Device, GroupPolicy, Rule, log_event
+from ..models import Device, GroupPolicy, Quota, Rule, log_event
 from ..services.adguard import SERVICE_CATEGORIES
 from ..services.enforcement import reconcile, rule_is_active
+from ..services.quota import QUOTA_CATEGORIES, QUOTA_CATEGORY_LABELS
 from ..templates_env import templates
 
 log = logging.getLogger("homesec.rules")
@@ -39,6 +40,8 @@ async def rules_page(request: Request, db: Session = Depends(get_db)):
         "policies": policies,
         "device_names": device_names,
         "rule_is_active": rule_is_active,
+        "quotas": list(db.scalars(select(Quota).order_by(Quota.id))),
+        "QUOTA_LABELS": QUOTA_CATEGORY_LABELS,
     })
 
 
@@ -82,6 +85,53 @@ async def delete_rule(rule_id: int, tasks: BackgroundTasks, db: Session = Depend
     rule = db.get(Rule, rule_id)
     if rule:
         db.delete(rule)
+        db.commit()
+    tasks.add_task(_reconcile_bg)
+    return RedirectResponse("/rules", status_code=302)
+
+
+@router.post("/quotas/add")
+async def add_quota(
+    tasks: BackgroundTasks,
+    name: str = Form(""),
+    target_type: str = Form("group"),
+    target: str = Form(...),
+    category: str = Form(...),
+    minutes_per_day: int = Form(120),
+    days: list[str] = Form([]),
+    db: Session = Depends(get_db),
+):
+    if category not in QUOTA_CATEGORIES:
+        return RedirectResponse("/rules", status_code=302)
+    db.add(Quota(
+        name=name.strip() or QUOTA_CATEGORY_LABELS[category],
+        target_type=target_type if target_type in ("group", "device") else "group",
+        target=target,
+        category=category,
+        minutes_per_day=max(1, min(int(minutes_per_day), 1440)),
+        days=",".join(sorted(set(days) & {"0", "1", "2", "3", "4", "5", "6"})) or "0,1,2,3,4,5,6",
+    ))
+    db.commit()
+    log_event(db, "quota", f"Создана квота «{name}»: {category}, {minutes_per_day} мин/день")
+    tasks.add_task(_reconcile_bg)
+    return RedirectResponse("/rules", status_code=302)
+
+
+@router.post("/quotas/{quota_id}/toggle")
+async def toggle_quota(quota_id: int, tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    q = db.get(Quota, quota_id)
+    if q:
+        q.enabled = not q.enabled
+        db.commit()
+    tasks.add_task(_reconcile_bg)
+    return RedirectResponse("/rules", status_code=302)
+
+
+@router.post("/quotas/{quota_id}/delete")
+async def delete_quota(quota_id: int, tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    q = db.get(Quota, quota_id)
+    if q:
+        db.delete(q)
         db.commit()
     tasks.add_task(_reconcile_bg)
     return RedirectResponse("/rules", status_code=302)

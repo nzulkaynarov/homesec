@@ -30,10 +30,13 @@ from ..models import (
     EventLog,
     Pause,
     Person,
+    Quota,
+    QuotaBonus,
     active_pauses,
     log_event,
 )
 from ..services import adguard, enforcement, mikrotik
+from ..services import quota as quota_svc
 
 
 class ToolError(Exception):
@@ -378,6 +381,118 @@ def resume_internet(
     if not removed:
         raise ToolError(f"Активных пауз для «{label}» нет")
     return f"Пауза снята: {label}"
+
+
+@tool()
+def get_quota_status(db: Session) -> list[dict]:
+    """Статус квот времени на сегодня: по каждому устройству с квотой —
+    категория, сколько минут использовано и каков лимит (с учётом бонусов)."""
+    devices = list(db.scalars(select(Device)))
+    prog = quota_svc.progress(db, devices)
+    out = []
+    for dev in devices:
+        for p in prog.get(dev.id, []):
+            out.append({
+                "device_id": dev.id,
+                "device": dev.name,
+                "category": p["category"],
+                "category_label": p["label"],
+                "used_minutes": p["used"],
+                "limit_minutes": p["limit"],
+                "exhausted": p["used"] >= p["limit"],
+            })
+    return out
+
+
+def _parse_quota_target(db: Session, target: str) -> tuple[str, str, str]:
+    """-> (target_type, target, человекочитаемое имя)."""
+    t = target.strip()
+    if t in GROUPS:
+        return "group", t, GROUP_LABELS[t]
+    dev = find_device(db, t)
+    if dev is None:
+        raise ToolError(f"Не нашёл устройство «{target}» — уточните имя или id")
+    return "device", str(dev.id), f"{dev.name} ({dev.ip or dev.mac})"
+
+
+@tool(mutating=True)
+def set_quota(
+    db: Session,
+    target: Annotated[str, "группа (kid/guest/unknown/adult) или устройство: id, имя, MAC"],
+    category: Annotated[str, "internet | games | video | social"],
+    minutes_per_day: Annotated[int, "минут в день (1–1440); 0 удаляет квоту"],
+    days: Annotated[str, "дни недели csv, 0=Пн (по умолчанию все)"] = "0,1,2,3,4,5,6",
+) -> str:
+    """Ставит, меняет или удаляет дневную квоту времени. Для группы квота
+    действует на каждое устройство группы отдельно."""
+    if category not in quota_svc.QUOTA_CATEGORIES:
+        raise ToolError(f"Неизвестная категория «{category}», есть: "
+                        + ", ".join(quota_svc.QUOTA_CATEGORIES))
+    target_type, target_key, label = _parse_quota_target(db, target)
+    minutes_per_day = int(minutes_per_day)
+    existing = db.scalar(select(Quota).where(
+        Quota.target_type == target_type, Quota.target == target_key,
+        Quota.category == category))
+    cat_label = quota_svc.QUOTA_CATEGORY_LABELS[category]
+    if minutes_per_day <= 0:
+        if existing is None:
+            raise ToolError(f"Квоты «{cat_label}» для {label} нет — удалять нечего")
+        db.delete(existing)
+        db.commit()
+        return f"Квота удалена: {cat_label} для {label}"
+    if not 1 <= minutes_per_day <= 1440:
+        raise ToolError("Квота — от 1 до 1440 минут в день")
+    day_set = ",".join(sorted(set(days.split(",")) & {"0", "1", "2", "3", "4", "5", "6"}))
+    if existing is None:
+        db.add(Quota(name=f"{cat_label} — {label}", target_type=target_type,
+                     target=target_key, category=category,
+                     minutes_per_day=minutes_per_day, days=day_set or "0,1,2,3,4,5,6"))
+    else:
+        existing.minutes_per_day = minutes_per_day
+        existing.days = day_set or existing.days
+        existing.enabled = True
+    db.commit()
+    return f"Квота: {cat_label} для {label} — {minutes_per_day} мин/день"
+
+
+@tool(mutating=True)
+def add_bonus_time(
+    db: Session,
+    target: Annotated[str, "группа или устройство: id, имя, MAC"],
+    minutes: Annotated[int, "сколько минут добавить сегодня (1–720)"],
+    category: Annotated[str, "internet | games | video | social"] = "internet",
+    comment: Annotated[str, "за что бонус, попадает в журнал"] = "",
+) -> str:
+    """Добавляет минуты к СЕГОДНЯШНЕЙ квоте («+30 минут игр за уборку»).
+    Работает, только если подходящая квота существует."""
+    minutes = int(minutes)
+    if not 1 <= minutes <= 720:
+        raise ToolError("Бонус — от 1 до 720 минут")
+    if category not in quota_svc.QUOTA_CATEGORIES:
+        raise ToolError(f"Неизвестная категория «{category}», есть: "
+                        + ", ".join(quota_svc.QUOTA_CATEGORIES))
+    target_type, target_key, label = _parse_quota_target(db, target)
+    dev_group = ""
+    if target_type == "device":
+        dev = _device_or_error(db, int(target_key))
+        dev_group = dev.group
+    quotas = [q for q in db.scalars(select(Quota)) if q.enabled and q.category == category]
+    applies = any(
+        (q.target_type == target_type and q.target == target_key)
+        or (target_type == "device" and q.target_type == "group" and q.target == dev_group)
+        for q in quotas
+    )
+    if not applies:
+        raise ToolError(
+            f"У {label} нет активной квоты «{quota_svc.QUOTA_CATEGORY_LABELS[category]}» — "
+            "бонус не к чему добавлять"
+        )
+    db.add(QuotaBonus(target_type=target_type, target=target_key,
+                      date=datetime.now().strftime("%Y-%m-%d"),
+                      category=category, minutes=minutes, comment=comment))
+    db.commit()
+    return (f"Бонус +{minutes} мин ({quota_svc.QUOTA_CATEGORY_LABELS[category]}) "
+            f"для {label} на сегодня" + (f": {comment}" if comment else ""))
 
 
 @tool(mutating=True)

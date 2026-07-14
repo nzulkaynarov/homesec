@@ -10,7 +10,7 @@ from sqlalchemy.orm import Session
 from .. import db as dbmod
 from ..db import get_db
 from ..models import Device, Person, active_pauses, log_event
-from ..services import mikrotik
+from ..services import mikrotik, quota
 from ..services.enforcement import reconcile
 from ..templates_env import templates
 
@@ -65,6 +65,7 @@ async def devices_page(request: Request, db: Session = Depends(get_db)):
         "people": people,
         "online_ips": online_ips,
         "pause_until": pause_until,
+        "quota_progress": quota.progress(db, devices),
     })
 
 

@@ -70,6 +70,50 @@ class GroupPolicy(Base):
     safe_search: Mapped[bool] = mapped_column(Boolean, default=False)
 
 
+class Quota(Base):
+    """Дневная квота времени: сколько минут в день группе или устройству
+    разрешена категория (games/video/social) или интернет целиком. Для групп
+    квота действует НА КАЖДОЕ устройство группы отдельно. По исчерпании —
+    блокировка категории (AdGuard) или интернета (hs-blocked) до полуночи."""
+
+    __tablename__ = "quotas"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    name: Mapped[str] = mapped_column(String(64), default="")
+    target_type: Mapped[str] = mapped_column(String(8), default="group")  # group | device
+    target: Mapped[str] = mapped_column(String(32))
+    category: Mapped[str] = mapped_column(String(16))  # internet | games | video | social
+    minutes_per_day: Mapped[int] = mapped_column(default=120)
+    days: Mapped[str] = mapped_column(String(16), default="0,1,2,3,4,5,6")  # 0=Пн
+    enabled: Mapped[bool] = mapped_column(Boolean, default=True)
+
+
+class QuotaUsage(Base):
+    """Счётчик активных минут: устройство × дата × категория."""
+
+    __tablename__ = "quota_usage"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_id: Mapped[int] = mapped_column(index=True)
+    date: Mapped[str] = mapped_column(String(10), index=True)  # YYYY-MM-DD
+    category: Mapped[str] = mapped_column(String(16))
+    minutes: Mapped[int] = mapped_column(default=0)
+
+
+class QuotaBonus(Base):
+    """Разовая добавка к квоте на конкретный день («+30 минут за уборку»)."""
+
+    __tablename__ = "quota_bonus"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_type: Mapped[str] = mapped_column(String(8))  # group | device
+    target: Mapped[str] = mapped_column(String(32))
+    date: Mapped[str] = mapped_column(String(10), index=True)
+    category: Mapped[str] = mapped_column(String(16))
+    minutes: Mapped[int] = mapped_column(default=30)
+    comment: Mapped[str] = mapped_column(Text, default="")
+
+
 class Pause(Base):
     """Временная блокировка интернета («пауза до…») для группы или устройства.
     В отличие от Rule (недельное расписание) — разовая, с моментом окончания.

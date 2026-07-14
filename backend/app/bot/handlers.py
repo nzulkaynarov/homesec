@@ -136,6 +136,25 @@ async def cmd_resume(message: Message, command: CommandObject) -> None:
     await _do_tool(message, "resume_internet", {"target": target})
 
 
+@router.message(Command("bonus"))
+async def cmd_bonus(message: Message, command: CommandObject) -> None:
+    from ..services.quota import QUOTA_CATEGORIES
+
+    parts = (command.args or "").split()
+    usage = ("Использование: /bonus <кто> <минут> [категория]\n"
+             "Например: /bonus Миша 30 games\n"
+             f"Категории: {', '.join(QUOTA_CATEGORIES)} (по умолчанию internet)")
+    category = "internet"
+    if parts and parts[-1].lower() in QUOTA_CATEGORIES:
+        category = parts.pop().lower()
+    if len(parts) < 2 or not parts[-1].isdigit():
+        await message.answer(usage)
+        return
+    target, minutes = " ".join(parts[:-1]), int(parts[-1])
+    await _do_tool(message, "add_bonus_time",
+                   {"target": target, "minutes": minutes, "category": category})
+
+
 # ---------- кнопки под уведомлением о новом устройстве ----------
 
 def new_device_keyboard(dev_id: int, people: list[tuple[int, str, str]]) -> InlineKeyboardMarkup:
