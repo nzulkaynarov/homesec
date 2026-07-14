@@ -46,6 +46,9 @@ def api_session():
             username=settings.mikrotik_user,
             password=settings.mikrotik_password,
             timeout=10,
+            # RouterOS 7 хранит UTF-8; по умолчанию librouteros кодирует в ASCII
+            # и кириллица в комментариях (имена людей/устройств) роняет запрос.
+            encoding="utf-8",
         )
         yield api
     except (OSError, librouteros.exceptions.LibRouterosError) as e:
