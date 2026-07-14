@@ -7,13 +7,12 @@
 import logging
 import socket
 from datetime import datetime, timedelta
-from typing import Optional
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import GROUP_ADDRESS_LISTS, Device, GroupPolicy, Rule, log_event
+from ..models import GROUP_ADDRESS_LISTS, Device, GroupPolicy, Rule, active_pauses, log_event
 from . import adguard, mikrotik
 from .adguard import SERVICE_CATEGORIES
 
@@ -48,14 +47,14 @@ def get_self_ips() -> set[str]:
         s.close()
     try:
         for info in socket.getaddrinfo(socket.gethostname(), None, socket.AF_INET):
-            ips.add(info[4][0])
+            ips.add(str(info[4][0]))
     except OSError:
         pass
     ips.discard("127.0.0.1")
     return ips
 
 
-def rule_is_active(rule: Rule, now: Optional[datetime] = None) -> bool:
+def rule_is_active(rule: Rule, now: datetime | None = None) -> bool:
     if not rule.enabled:
         return False
     now = now or datetime.now()
@@ -109,6 +108,11 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
                 active_group_blocks.add(r.target)
             else:
                 active_device_blocks.add(str(r.target))
+    for p in active_pauses(db, now):  # разовые «паузы до …» поверх расписаний
+        if p.target_type == "group":
+            active_group_blocks.add(p.target)
+        else:
+            active_device_blocks.add(str(p.target))
 
     lists: dict[str, set[str]] = {name: set() for name in GROUP_ADDRESS_LISTS.values()}
     lists["hs-blocked"] = set()
@@ -156,7 +160,7 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
 def reconcile(db: Session) -> dict:
     """Полный цикл: обнаружить устройства, применить состояние. Возвращает
     сводку; ошибки интеграций пишет в журнал, но не роняет планировщик."""
-    summary = {"ok": True, "errors": [], "newly_blocked": []}
+    summary: dict = {"ok": True, "errors": [], "newly_blocked": []}
 
     try:
         with mikrotik.api_session() as api:

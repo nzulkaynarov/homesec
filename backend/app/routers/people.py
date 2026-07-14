@@ -13,7 +13,8 @@ router = APIRouter()
 @router.get("/people")
 async def people_page(request: Request, db: Session = Depends(get_db)):
     people = list(db.scalars(select(Person).order_by(Person.name)))
-    return templates.TemplateResponse(request, "people.html", {"active": "people", "people": people})
+    ctx = {"active": "people", "people": people}
+    return templates.TemplateResponse(request, "people.html", ctx)
 
 
 @router.post("/people/add")

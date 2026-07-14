@@ -116,7 +116,8 @@ def kill_connections(api, ip: str) -> None:
     а не после таймаута установленных сессий."""
     path = api.path("ip", "firewall", "connection")
     src = Key("src-address")
-    ids = [row[".id"] for row in path.select(Key(".id"), src) if row.get("src-address", "").split(":")[0] == ip]
+    rows = path.select(Key(".id"), src)
+    ids = [row[".id"] for row in rows if row.get("src-address", "").split(":")[0] == ip]
     for cid in ids:
         try:
             path.remove(cid)

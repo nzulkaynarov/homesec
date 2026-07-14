@@ -33,7 +33,10 @@
         {% endfor %}
       </select>
     </td>
-    <td><span class="tag g-{{ d.group }}">{{ GROUP_LABELS[d.group] }}</span></td>
+    <td>
+      <span class="tag g-{{ d.group }}">{{ GROUP_LABELS[d.group] }}</span>
+      {% if d.id in pause_until %}<br><small>⏸ до {{ pause_until[d.id].strftime('%H:%M') }}</small>{% endif %}
+    </td>
     <td><input name="speed_limit" form="dev{{ d.id }}" value="{{ d.speed_limit }}" placeholder="10M/10M" size="9"></td>
     <td class="actions">
       <button form="dev{{ d.id }}">💾</button>

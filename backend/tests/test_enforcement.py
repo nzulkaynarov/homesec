@@ -1,6 +1,5 @@
 """Проверяет расчёт желаемого состояния сети из БД — чистая логика без сети."""
 
-from datetime import datetime
 
 import pytest
 

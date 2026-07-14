@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Optional
 
 from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
@@ -31,12 +30,12 @@ class Device(Base):
     mac: Mapped[str] = mapped_column(String(17), unique=True)
     ip: Mapped[str] = mapped_column(String(15), default="")
     name: Mapped[str] = mapped_column(String(64), default="")
-    person_id: Mapped[Optional[int]] = mapped_column(ForeignKey("people.id"), nullable=True)
+    person_id: Mapped[int | None] = mapped_column(ForeignKey("people.id"), nullable=True)
     blocked_manual: Mapped[bool] = mapped_column(Boolean, default=False)
     speed_limit: Mapped[str] = mapped_column(String(32), default="")  # напр. "10M/10M"
     first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
-    person: Mapped[Optional[Person]] = relationship(back_populates="devices")
+    person: Mapped[Person | None] = relationship(back_populates="devices")
 
     @property
     def group(self) -> str:
@@ -69,6 +68,26 @@ class GroupPolicy(Base):
     group: Mapped[str] = mapped_column(String(16), unique=True)
     blocked_services: Mapped[str] = mapped_column(Text, default="")  # csv id сервисов AdGuard
     safe_search: Mapped[bool] = mapped_column(Boolean, default=False)
+
+
+class Pause(Base):
+    """Временная блокировка интернета («пауза до…») для группы или устройства.
+    В отличие от Rule (недельное расписание) — разовая, с моментом окончания.
+    Активна, пока `until` в будущем; истёкшие записи чистит планировщик."""
+
+    __tablename__ = "pauses"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    target_type: Mapped[str] = mapped_column(String(8))  # group | device
+    target: Mapped[str] = mapped_column(String(32))  # имя группы или id устройства
+    until: Mapped[datetime] = mapped_column(DateTime, index=True)
+    reason: Mapped[str] = mapped_column(Text, default="")
+    created: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+
+
+def active_pauses(db, now: datetime | None = None) -> list["Pause"]:
+    now = now or datetime.now()
+    return [p for p in db.query(Pause).all() if p.until > now]
 
 
 class EventLog(Base):

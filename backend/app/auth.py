@@ -36,11 +36,12 @@ def is_authenticated(request: Request) -> bool:
         return False
 
 
-PUBLIC_PATHS = ("/login", "/static")
+def _is_public(path: str) -> bool:
+    return path == "/login" or path.startswith("/static/")
 
 
 async def auth_middleware(request: Request, call_next):
     """Всё, кроме /login и /static, требует сессии."""
-    if not request.url.path.startswith(PUBLIC_PATHS) and not is_authenticated(request):
+    if not _is_public(request.url.path) and not is_authenticated(request):
         return RedirectResponse("/login", status_code=302)
     return await call_next(request)
