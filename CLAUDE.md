@@ -75,21 +75,30 @@ MikroTik `homesec` (HS_MIKROTIK_PASSWORD). Доступ MikroTik: `ssh admin@192
 | `backend/app/services/enforcement.py` | ЯДРО: расчёт желаемого состояния + reconcile (раз в минуту и после каждого изменения) |
 | `backend/app/services/mikrotik.py` | RouterOS API (librouteros); только address-lists, queues, leases, connections |
 | `backend/app/services/adguard.py` | AdGuard REST API: per-client блокировки сервисов, safe search |
+| `backend/app/ai/tools.py` | Реестр инструментов — ЕДИНСТВЕННАЯ точка, через которую ИИ и бот трогают систему; guardrails зашиты в код (self-IP, только hs-*, аудит) |
+| `backend/app/ai/` | ИИ-слой: client.py (Claude API + дневной бюджет), orchestrator.py (NL→tools, мутации только через кнопку), analyst.py (дайджест), watchdog.py (аномалии: эвристики + LLM-оформление) |
+| `backend/app/bot/` | Telegram-бот, отдельный systemd-юнит homesec-bot: уведомления, health-алерты, команды, ИИ-канал |
+| `backend/app/migrations.py` | Мини-миграции схемы (PRAGMA user_version), только аддитивные |
 | `backend/app/routers/`, `templates/` | Веб-панель (FastAPI + Jinja2, без JS-фреймворков) |
 | `mikrotik/homesec-base.rsc` | Базовый импорт (контроль создаётся выключенным) |
 | `mikrotik/enable-adguard.rsc` | Отдельное включение принудительного DNS (с проверкой Pi) |
 | `deploy/` | systemd-юниты + install.sh + pull-деплой update.sh |
 | `docs/05-operations.md` | Снапшот прода, health-чеки, откаты — читать перед работой с живой сетью |
+| `docs/06-ai-multiagent-tz.md` | ТЗ ИИ-слоя: архитектура, guardrails, этапы (реализованы этапы 0–2) |
 
 ## Дорожная карта (согласована с владельцем)
 
-Фаза 1: **Telegram-бот** (уведомления о новых устройствах с кнопками,
-/status /block /pause, health-алерты если AdGuard/панель упали) — бот решает
-удалённый доступ (исходящее соединение обходит NAT) и станет каналом ИИ-фич.
-Фаза 2: квоты времени по категориям, страница блокировки («время вышло»),
-ИИ-дайджест дня в Telegram, портал регистрации неизвестных устройств.
-Фаза 3: NL-управление через Claude API (tool calls в services/), детектор
-аномалий (ночная активность, всплеск DoH = попытка обхода), бонусы времени.
+Фаза 1 — **СДЕЛАНО**: Telegram-бот (уведомления о новых устройствах с
+кнопками, /status /block /pause /resume /digest, health-алерты). Для запуска
+на проде нужно заполнить HS_TELEGRAM_* в .env на малинке.
+Фаза 3 (ИИ) — **СДЕЛАНО в базовой версии**: NL-управление через Claude API
+(app/ai/orchestrator.py; Opus для рассуждений, Haiku для рутины), детектор
+аномалий (ночная активность, всплеск DoH), ИИ-дайджест дня. Правила: любая
+мутация от ИИ — только через кнопку подтверждения в Telegram; дневной бюджет
+токенов HS_AI_DAILY_TOKEN_BUDGET; без ключа HS_ANTHROPIC_API_KEY ИИ молчит,
+остальное работает.
+Осталось (фаза 2): квоты времени по категориям, страница «время вышло»,
+портал регистрации неизвестных устройств, эвристики против MAC-рандомизации.
 
 Известный продуктовый риск: MAC-рандомизация телефонов плодит «новые
 устройства» — учитывать в дизайне идентификации (фаза 2).

@@ -9,3 +9,4 @@ apscheduler==3.10.*
 itsdangerous==2.2.*
 pydantic-settings==2.*
 aiogram==3.*
+anthropic==0.*

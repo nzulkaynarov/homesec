@@ -4,7 +4,9 @@
 мутации исполняются сразу; подтверждение кнопкой нужно только действиям ИИ."""
 
 import asyncio
+import itertools
 import logging
+from collections import defaultdict, deque
 from typing import Any
 
 from aiogram import F, Router
@@ -12,12 +14,21 @@ from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .. import db as dbmod
-from ..ai import tools
+from ..ai import client as ai_client
+from ..ai import orchestrator, tools
 from ..models import GROUP_LABELS, Person
 from . import texts
 
 log = logging.getLogger("homesec.bot")
 router = Router()
+
+# Мутации, предложенные ИИ и ждущие кнопку. Живут в памяти процесса бота:
+# после рестарта кнопка вежливо попросит повторить запрос.
+PENDING_ACTIONS: dict[int, orchestrator.PendingAction] = {}
+_pending_seq = itertools.count(1)
+
+# Короткая память диалога с ИИ на чат (только текстовые реплики, без tool call'ов)
+CHAT_HISTORY: dict[int, deque] = defaultdict(lambda: deque(maxlen=6))
 
 
 def run_tool_sync(name: str, args: dict, source: str = "bot") -> Any:
@@ -67,6 +78,21 @@ async def cmd_status(message: Message) -> None:
 async def cmd_devices(message: Message) -> None:
     rows = await asyncio.to_thread(run_tool_sync, "list_devices", {})
     await message.answer(texts.format_devices(rows))
+
+
+def _digest_sync() -> str:
+    from ..ai import analyst
+
+    s = dbmod.session()
+    try:
+        return analyst.daily_digest(s)
+    finally:
+        s.close()
+
+
+@router.message(Command("digest"))
+async def cmd_digest(message: Message) -> None:
+    await message.answer(await asyncio.to_thread(_digest_sync))
 
 
 async def _device_command(message: Message, command: CommandObject, tool_name: str) -> None:
@@ -163,7 +189,74 @@ async def cb_new_device(cb: CallbackQuery) -> None:
         await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
 
 
-# Свободный текст (не команда): на этапе 2 сюда подключается ИИ-оркестратор.
+# ---------- свободный текст -> ИИ-оркестратор ----------
+
+def _orchestrate(chat_id: int, text: str) -> orchestrator.Answer:
+    s = dbmod.session()
+    try:
+        return orchestrator.handle(s, text, history=list(CHAT_HISTORY[chat_id]))
+    finally:
+        s.close()
+
+
+def confirm_keyboard(pending_id: int) -> InlineKeyboardMarkup:
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(text="✅ Выполнить", callback_data=f"act:{pending_id}:yes"),
+        InlineKeyboardButton(text="❌ Отмена", callback_data=f"act:{pending_id}:no"),
+    ]])
+
+
 @router.message(F.text)
-async def fallback(message: Message) -> None:
-    await message.answer("Пока я понимаю только команды — см. /help.")
+async def free_text(message: Message) -> None:
+    if not ai_client.is_configured():
+        await message.answer(
+            "Свободный текст понимает ИИ, а он не настроен "
+            "(HS_ANTHROPIC_API_KEY в .env). Пока доступны команды — /help."
+        )
+        return
+    try:
+        answer = await asyncio.to_thread(_orchestrate, message.chat.id, message.text or "")
+    except ai_client.AiError as e:
+        await message.answer(str(e))
+        return
+    except Exception:
+        log.exception("оркестратор упал")
+        await message.answer("ИИ споткнулся, подробности в журнале бота. Команды /help работают.")
+        return
+
+    CHAT_HISTORY[message.chat.id].append({"role": "user", "content": message.text or ""})
+    CHAT_HISTORY[message.chat.id].append({"role": "assistant", "content": answer.text})
+    await message.answer(answer.text)
+    for action in answer.pending:
+        pending_id = next(_pending_seq)
+        PENDING_ACTIONS[pending_id] = action
+        await message.answer(
+            f"Подтвердите действие:\n{action.description}",
+            reply_markup=confirm_keyboard(pending_id),
+        )
+
+
+@router.callback_query(F.data.startswith("act:"))
+async def cb_confirm_action(cb: CallbackQuery) -> None:
+    parts = (cb.data or "").split(":")
+    pending_id, decision = int(parts[1]), parts[2]
+    action = PENDING_ACTIONS.pop(pending_id, None)
+    if action is None:
+        await cb.answer("Действие устарело (бот перезапускался) — повторите запрос",
+                        show_alert=True)
+        return
+    if decision != "yes":
+        result = "Отменено."
+    else:
+        try:
+            result = await asyncio.to_thread(
+                run_tool_sync, action.tool, action.args, "ai"
+            )
+        except tools.ToolError as e:
+            result = f"Не получилось: {e}"
+        except Exception:
+            log.exception("подтверждённое действие %s упало", action.tool)
+            result = "Ошибка при выполнении, подробности в журнале."
+    await cb.answer()
+    if isinstance(cb.message, Message):
+        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)

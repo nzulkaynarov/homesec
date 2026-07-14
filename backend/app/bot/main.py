@@ -7,10 +7,12 @@
 
 import asyncio
 import logging
+from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
 
 from .. import db as dbmod
+from ..ai import analyst, watchdog
 from ..config import settings
 from ..db import Base, engine
 from ..migrations import run_migrations
@@ -21,6 +23,8 @@ log = logging.getLogger("homesec.bot")
 
 NOTIFY_INTERVAL = 10  # опрос журнала на новые устройства, сек
 HEALTH_INTERVAL = 60  # health-проверки, сек
+WATCHDOG_INTERVAL = 15 * 60  # эвристики аномалий, сек
+DIGEST_HOUR = 21  # ежедневный дайджест в 21:00 локального времени
 
 
 async def _broadcast(bot: Bot, chat_ids: set[int], text: str, keyboard=None) -> None:
@@ -70,6 +74,45 @@ async def health_loop(bot: Bot, chat_ids: set[int]) -> None:
         await asyncio.sleep(HEALTH_INTERVAL)
 
 
+def _watchdog_check() -> list[str]:
+    s = dbmod.session()
+    try:
+        return watchdog.check(s)
+    finally:
+        s.close()
+
+
+async def watchdog_loop(bot: Bot, chat_ids: set[int]) -> None:
+    while True:
+        try:
+            for alert in await asyncio.to_thread(_watchdog_check):
+                await _broadcast(bot, chat_ids, alert)
+        except Exception:
+            log.exception("watchdog_loop")
+        await asyncio.sleep(WATCHDOG_INTERVAL)
+
+
+def _build_digest() -> str:
+    s = dbmod.session()
+    try:
+        return analyst.daily_digest(s)
+    finally:
+        s.close()
+
+
+async def digest_loop(bot: Bot, chat_ids: set[int]) -> None:
+    while True:
+        now = datetime.now()
+        target = now.replace(hour=DIGEST_HOUR, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        await asyncio.sleep((target - now).total_seconds())
+        try:
+            await _broadcast(bot, chat_ids, await asyncio.to_thread(_build_digest))
+        except Exception:
+            log.exception("digest_loop")
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -95,6 +138,8 @@ async def main() -> None:
     tasks = [
         asyncio.create_task(notify_loop(bot, allowed)),
         asyncio.create_task(health_loop(bot, allowed)),
+        asyncio.create_task(watchdog_loop(bot, allowed)),
+        asyncio.create_task(digest_loop(bot, allowed)),
     ]
     log.info("бот запущен, чатов в allowlist: %d", len(allowed))
     try:
