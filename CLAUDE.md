@@ -55,11 +55,12 @@ MikroTik `homesec` (HS_MIKROTIK_PASSWORD). Доступ MikroTik: `ssh admin@192
 3. **ЛЮБОЙ dst-nat-заворот в той же подсети требует hairpin masquerade.**
    Простой dst-nat ломается: клиент слал на 8.8.8.8, ответ приходит с 88.2 →
    «reply from unexpected source», отвергается (симптом: часть сайтов не
-   открывается). Схема DNS: mangle mark `hs-dns` → dst-nat → srcnat masquerade
-   по метке. То же для HTTP-перехвата block-page: masquerade по
-   `connection-nat-state=dstnat` (а раз masquerade прячет IP клиента, панель
-   отвечает на перехват редиректом на HS_PANEL_LAN_URL — прямое соединение
-   приходит с настоящим IP).
+   открывается). Единственная рабочая схема — mark-connection в mangle →
+   dst-nat → srcnat masquerade по метке (DNS: метка `hs-dns`; HTTP block-page:
+   `hs-blockpage`). `connection-nat-state=dstnat` в srcnat НЕ принимается
+   RouterOS 7.23 — не пытаться снова. Раз masquerade прячет IP клиента,
+   панель отвечает на перехват редиректом на HS_PANEL_LAN_URL — прямое
+   соединение приходит с настоящим IP.
 4. **Блокировка DoH — только tcp/udp 443 к списку hs-doh.** В hs-doh входят
    1.1.1.1/8.8.8.8; блокировать к ним ВЕСЬ трафик = зарезать upstream AdGuard.
 5. **`.rsc`-скрипты одноразовые** (не идемпотентны): повторный импорт создаёт
