@@ -179,3 +179,13 @@ def test_device_pick_keyboard():
     kb = device_pick_keyboard([(i, f"dev{i}") for i in range(20)], "block_device")
     assert len(kb.inline_keyboard) == MAX_PICK_BUTTONS + 1
     assert kb.inline_keyboard[0][0].callback_data == "pick:block_device:0"
+
+
+def test_telegram_user_id_allowlist_parsing(monkeypatch):
+    """user_id-allowlist разбирается так же, как chat_id; пустой = отключён."""
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "telegram_user_ids", "545165237, 42")
+    assert settings.telegram_allowed_user_ids == {545165237, 42}
+    monkeypatch.setattr(settings, "telegram_user_ids", "")
+    assert settings.telegram_allowed_user_ids == set()

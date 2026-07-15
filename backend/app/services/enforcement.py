@@ -4,11 +4,15 @@
 Вызывается планировщиком раз в минуту и сразу после любого изменения в панели.
 Идемпотентно: применяются только отличия."""
 
+import fcntl
 import logging
+import os
 import socket
+from contextlib import contextmanager
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
+from sqlalchemy.exc import IntegrityError
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -44,8 +48,19 @@ DOH_SERVER_IPS = {
 def get_self_ips() -> set[str]:
     """IP самой малинки — их НЕЛЬЗЯ добавлять в списки контроля, иначе AdGuard
     (на этом же хосте) окажется «управляемым» и его upstream-трафик срежется
-    правилами блокировки. Определяем основной LAN-адрес по маршруту."""
+    правилами блокировки, и весь дом останется без DNS.
+
+    Автоопределение (маршрут + hostname) — основной путь, но оно может отдать
+    пустой набор (нет маршрута по умолчанию в момент старта, hostname без A-записи).
+    Пустой набор — авария: тогда снимается ЕДИНСТВЕННАЯ защита малинки. Поэтому
+    к автоопределению всегда добавляется статический якорь HS_SELF_IPS (по
+    умолчанию LAN-адрес Pi) — он работает, даже если автоопределение отвалилось.
+    Реальная защита от пустого набора — fail-closed в reconcile()."""
     ips: set[str] = set()
+    for part in settings.self_ips.split(","):  # статический якорь из конфига
+        part = part.strip()
+        if part:
+            ips.add(part)
     s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 53))  # пакет не шлётся, только выбирается маршрут
@@ -61,6 +76,44 @@ def get_self_ips() -> set[str]:
         pass
     ips.discard("127.0.0.1")
     return ips
+
+
+# Один писатель на роутере за раз: reconcile зовут планировщик и веб-хендлеры
+# панели (один процесс) И бот (отдельный процесс homesec-bot). Без межпроцессной
+# блокировки два address_list_sync (read-modify-write) наложились бы и дали дубли
+# в hs-списках. Файловый flock снимается ядром автоматически при смерти процесса.
+_RECONCILE_LOCK_PATH = os.path.join(
+    os.path.dirname(os.path.abspath(settings.database_path)) or ".",
+    ".homesec-reconcile.lock",
+)
+
+
+@contextmanager
+def _reconcile_lock():
+    f = open(_RECONCILE_LOCK_PATH, "w")
+    try:
+        fcntl.flock(f, fcntl.LOCK_EX)  # ждёт, пока освободит другой процесс
+        yield
+    finally:
+        try:
+            fcntl.flock(f, fcntl.LOCK_UN)
+        finally:
+            f.close()
+
+
+# Троттлинг журнала ошибок: когда роутер/AdGuard недоступны, reconcile-тик раз в
+# минуту иначе спамил бы событие error (→ пуш в бот) каждые 60 секунд. В journald
+# (log.warning) пишем всегда, в БД/бот — не чаще, чем раз в _ERROR_LOG_COOLDOWN.
+_last_error_log: dict[str, datetime] = {}
+_ERROR_LOG_COOLDOWN = timedelta(minutes=30)
+
+
+def _log_error_throttled(db: Session, key: str, msg: str) -> None:
+    now = datetime.now()
+    last = _last_error_log.get(key)
+    if last is None or now - last >= _ERROR_LOG_COOLDOWN:
+        _last_error_log[key] = now
+        log_event(db, "error", msg)
 
 
 def rule_is_active(rule: Rule, now: datetime | None = None) -> bool:
@@ -123,7 +176,19 @@ def discover_devices(db: Session, api) -> list[Device]:
         if dev is None:
             dev = Device(mac=mac, ip=lease["ip"], name=hostname or mac, hostname=hostname)
             db.add(dev)
-            db.commit()
+            try:
+                db.commit()
+            except IntegrityError:
+                # Другой процесс (бот или планировщик) успел создать это же
+                # устройство между нашим select и commit — UNIQUE по mac упал.
+                # Берём существующее, дублей не плодим; ip/hostname подтянет
+                # следующий тик через ветку обновления ниже.
+                db.rollback()
+                dev = db.scalar(select(Device).where(Device.mac == mac))
+                if dev is not None:
+                    known[mac] = dev
+                    by_id[dev.id] = dev
+                continue
             db.add(DeviceMac(device_id=dev.id, mac=mac))
             db.commit()
             known[mac] = dev
@@ -240,8 +305,21 @@ def reconcile(db: Session) -> dict:
     summary: dict = {"ok": True, "errors": [], "newly_blocked": []}
     quota_blocked: dict[str, Device] = {}
 
+    # Fail-closed: если не знаем собственный IP, снимается единственная защита
+    # малинки от попадания в списки блокировки — лучше НЕ трогать роутер вовсе,
+    # чем рискнуть оставить весь дом без DNS. Штатно набор непустой (в нём
+    # статический якорь HS_SELF_IPS), так что это страховка на крайний случай.
+    if not get_self_ips():
+        msg = ("не удалось определить собственный IP малинки — reconcile "
+               "пропущен, состояние роутера не тронуто (проверьте HS_SELF_IPS)")
+        log.error(msg)
+        _log_error_throttled(db, "self_ip", msg)
+        summary["ok"] = False
+        summary["errors"].append(msg)
+        return summary
+
     try:
-        with mikrotik.api_session() as api:
+        with _reconcile_lock(), mikrotik.api_session() as api:
             devices = discover_devices(db, api)
             desired = _desired_state(db, devices)
             quota_blocked = desired["quota_blocked"]
@@ -256,7 +334,7 @@ def reconcile(db: Session) -> dict:
         summary["ok"] = False
         summary["errors"].append(str(e))
         log.warning("%s", e)
-        log_event(db, "error", str(e))
+        _log_error_throttled(db, "mikrotik", str(e))
         return summary  # без роутера состояние AdGuard считать рано
 
     try:
@@ -265,7 +343,7 @@ def reconcile(db: Session) -> dict:
         summary["ok"] = False
         summary["errors"].append(str(e))
         log.warning("%s", e)
-        log_event(db, "error", str(e))
+        _log_error_throttled(db, "adguard", str(e))
 
     # События — только при ПЕРЕХОДЕ в заблокированное состояние (newly_blocked:
     # IP реально добавлен в hs-blocked), иначе бот спамил бы каждый тик.

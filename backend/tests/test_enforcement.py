@@ -118,3 +118,28 @@ def test_block_unknown_toggle(db, monkeypatch):
 
     monkeypatch.setattr(settings, "block_unknown", True)
     assert "192.168.88.50" in _desired_state(db, devices)["lists"]["hs-blocked"]
+
+
+def test_self_ips_includes_static_anchor(monkeypatch):
+    """Статический якорь HS_SELF_IPS попадает в self_ips даже без сети —
+    защита малинки не должна зависеть только от автоопределения маршрута."""
+    from app.services import enforcement
+
+    monkeypatch.setattr(settings, "self_ips", "192.168.88.2, 10.0.0.5")
+    ips = enforcement.get_self_ips()
+    assert "192.168.88.2" in ips
+    assert "10.0.0.5" in ips
+    assert "127.0.0.1" not in ips
+
+
+def test_self_ip_never_managed_or_blocked(db, monkeypatch):
+    """IP из self_ips не попадает ни в hs-managed, ни в hs-blocked, даже если
+    заведён как заблокированное устройство (fail-safe против самоблокировки)."""
+    monkeypatch.setattr(settings, "self_ips", "192.168.88.2")
+    pi = Device(mac="B8:27:EB:D5:8E:77", ip="192.168.88.2", name="Pi",
+                blocked_manual=True)
+    db.add(pi)
+    db.commit()
+    state = _desired_state(db, [pi])
+    assert "192.168.88.2" not in state["lists"]["hs-managed"]
+    assert "192.168.88.2" not in state["lists"]["hs-blocked"]

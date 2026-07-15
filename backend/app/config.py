@@ -12,6 +12,12 @@ class Settings(BaseSettings):
     mikrotik_user: str = "homesec"
     mikrotik_password: str = ""
 
+    # Статический якорь «собственных» IP малинки: они никогда не попадают в
+    # списки контроля (иначе AdGuard на этом же хосте окажется управляемым и дом
+    # останется без DNS). Дополняет автоопределение по маршруту — работает, даже
+    # если оно отвалилось. По умолчанию — LAN-адрес Pi. csv для нескольких.
+    self_ips: str = "192.168.88.2"
+
     adguard_url: str = "http://127.0.0.1:3000"
     adguard_username: str = ""
     adguard_password: str = ""
@@ -29,6 +35,10 @@ class Settings(BaseSettings):
     # Telegram-бот (отдельный процесс homesec-bot); пустой токен = бот выключен
     telegram_bot_token: str = ""
     telegram_chat_ids: str = ""  # csv chat_id: кому разрешены команды и куда слать алерты
+    # Опц. доп. защита: csv user_id, кому разрешено КОМАНДОВАТЬ ботом. В личке
+    # chat_id == user_id, так что для одиночного родителя не нужно. Задайте,
+    # если бот живёт в ГРУППЕ: иначе командовать может любой участник группы.
+    telegram_user_ids: str = ""
     panel_url: str = "http://127.0.0.1:8000"  # для health-проверки панели ботом
     # Адрес панели ИЗ домашней сети — сюда редиректим HTTP, перехваченный
     # enable-block-page.rsc: hairpin-masquerade скрывает IP клиента от панели,
@@ -37,8 +47,16 @@ class Settings(BaseSettings):
 
     @property
     def telegram_allowed_ids(self) -> set[int]:
+        return self._parse_ids(self.telegram_chat_ids)
+
+    @property
+    def telegram_allowed_user_ids(self) -> set[int]:
+        return self._parse_ids(self.telegram_user_ids)
+
+    @staticmethod
+    def _parse_ids(raw: str) -> set[int]:
         out = set()
-        for part in self.telegram_chat_ids.split(","):
+        for part in raw.split(","):
             part = part.strip()
             if part.lstrip("-").isdigit():
                 out.add(int(part))
