@@ -84,6 +84,23 @@ def rule_is_active(rule: Rule, now: datetime | None = None) -> bool:
     return False
 
 
+def _release_stale_ip(db: Session, devices: list[Device], owner: Device, ip: str) -> None:
+    """DHCP выдал ip устройству owner — забираем его у всех остальных.
+    Протухший адрес (обычно после ротации «приватного» MAC: старая запись
+    держит IP, который DHCP уже выдал новому MAC) иначе дублируется в базе,
+    а AdGuard отвергает клиентов с одинаковым ids → 400 на clients/update
+    каждый reconcile-тик. Ловили вживую (16:33–17:22, 2026-07-15)."""
+    if not ip:
+        return
+    for other in devices:
+        if other.id != owner.id and other.ip == ip:
+            other.ip = ""
+            db.commit()
+            log_event(db, "ip_conflict",
+                      f"IP {ip} переехал к «{owner.name}» ({owner.mac}); "
+                      f"у «{other.name}» ({other.mac}) адрес сброшен.")
+
+
 def discover_devices(db: Session, api) -> list[Device]:
     """Синхронизирует DHCP-lease'ы с базой: новые MAC → новые устройства.
     Матчит по ВСЕМ MAC устройства (device_macs) — телефон с рандомизацией,
@@ -130,6 +147,7 @@ def discover_devices(db: Session, api) -> list[Device]:
             if hostname and dev.hostname != hostname:
                 dev.hostname = hostname
                 db.commit()
+        _release_stale_ip(db, devices, dev, lease["ip"])
     return devices
 
 
@@ -158,6 +176,7 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
     lists["hs-doh"] = set(DOH_SERVER_IPS)
     queues: dict[str, str] = {}
     ag_clients: dict[str, dict] = {}
+    ag_client_ips: set[str] = set()
 
     quota_spent = quota.exhausted(db, devices, now)  # {device_id: категории}
     self_ips = get_self_ips()
@@ -194,11 +213,19 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
             if cat in SERVICE_CATEGORIES:
                 services += SERVICE_CATEGORIES[cat]["services"]
         if services or safe_search:
-            ag_clients[f"hs-{dev.mac.lower().replace(':', '')}"] = {
-                "ip": dev.ip,
-                "blocked_services": sorted(set(services)),
-                "safe_search": safe_search,
-            }
+            # Страховка от дублей IP (AdGuard отвергает клиентов с одинаковым
+            # ids). Нормально конфликт разруливает _release_stale_ip; сюда
+            # попадаем только в окно между тиками или при ручной правке базы.
+            if dev.ip in ag_client_ips:
+                log.warning("дубль IP %s: клиент AdGuard для «%s» (%s) пропущен",
+                            dev.ip, dev.name, dev.mac)
+            else:
+                ag_client_ips.add(dev.ip)
+                ag_clients[f"hs-{dev.mac.lower().replace(':', '')}"] = {
+                    "ip": dev.ip,
+                    "blocked_services": sorted(set(services)),
+                    "safe_search": safe_search,
+                }
 
     return {"lists": lists, "queues": queues, "ag_clients": ag_clients}
 

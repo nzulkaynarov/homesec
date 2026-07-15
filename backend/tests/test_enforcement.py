@@ -62,6 +62,24 @@ def test_groups_blocks_queues_and_adguard(db):
     assert all(d["ip"] for d in ag.values())
 
 
+def test_duplicate_ip_yields_single_adguard_client(db):
+    """Страховка: даже если в базе два устройства с одним IP (окно между
+    тиками), в AdGuard уходит ОДИН клиент — иначе 400 на clients/add."""
+    kid = Person(name="Kid", role="kid")
+    db.add(kid)
+    db.commit()
+    db.add_all([
+        Device(mac="CC:00:00:00:00:01", ip="192.168.88.248", name="старый", person_id=kid.id),
+        Device(mac="CC:00:00:00:00:02", ip="192.168.88.248", name="новый", person_id=kid.id),
+    ])
+    db.add(GroupPolicy(group="kid", blocked_services="games", safe_search=False))
+    db.commit()
+
+    ag = _desired_state(db, list(db.query(Device).all()))["ag_clients"]
+    assert len(ag) == 1
+    assert next(iter(ag.values()))["ip"] == "192.168.88.248"
+
+
 def test_block_unknown_toggle(db, monkeypatch):
     db.add(Device(mac="BB:00:00:00:00:01", ip="192.168.88.50", name="guest-laptop"))
     db.commit()

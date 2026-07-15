@@ -102,7 +102,10 @@ def test_record_activity_tick_guard(db, kid_device, monkeypatch):
     assert quota.record_activity(db, now=NOW.replace(second=5)) == {}
 
 
-def _use(db, device_id, category, minutes, date="2026-07-14"):
+def _use(db, device_id, category, minutes, date=None):
+    # По умолчанию — СЕГОДНЯ: exhausted()/_desired_state() смотрят на реальную
+    # дату, и захардкоженный день превращал тесты в тыкву назавтра.
+    date = date or datetime.now().strftime("%Y-%m-%d")
     db.add(QuotaUsage(device_id=device_id, date=date, category=category, minutes=minutes))
     db.commit()
 

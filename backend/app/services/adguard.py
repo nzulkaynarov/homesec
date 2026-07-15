@@ -49,6 +49,12 @@ def _request(method: str, url: str, **kw):
             if r.headers.get("content-type", "").startswith("application/json"):
                 return r.json()
             return None
+    except httpx.HTTPStatusError as e:
+        # В теле 400 AdGuard пишет причину («client already exists» и т.п.) —
+        # без неё в журнале бессмысленный «400 Bad Request».
+        detail = (e.response.text or "").strip()[:200]
+        suffix = f" — {detail}" if detail else ""
+        raise AdGuardError(f"AdGuard API {method} {url}: {e}{suffix}") from e
     except httpx.HTTPError as e:
         raise AdGuardError(f"AdGuard API {method} {url}: {e}") from e
 
@@ -96,24 +102,37 @@ def sync_clients(desired: dict[str, dict]) -> None:
     """Приводит hs-клиентов AdGuard к желаемому виду.
 
     desired: {name: {"ip": ..., "blocked_services": [...], "safe_search": bool}}
-    """
+
+    Ошибка по одному клиенту НЕ прерывает синхронизацию остальных: одна битая
+    запись (дубль IP и т.п.) иначе блокировала бы весь AdGuard-слой на каждом
+    reconcile-тике. Ошибки копятся и поднимаются одним AdGuardError в конце."""
     current = list_clients()
+    errors: list[str] = []
     for name in set(current) - set(desired):
-        _request("POST", "/control/clients/delete", json={"name": name})
+        try:
+            _request("POST", "/control/clients/delete", json={"name": name})
+        except AdGuardError as e:
+            errors.append(str(e))
     for name, want in desired.items():
         payload = _client_payload(name, want["ip"], want["blocked_services"], want["safe_search"])
-        if name not in current:
-            _request("POST", "/control/clients/add", json=payload)
-            continue
-        cur = current[name]
-        cur_services = cur.get("blocked_services") or []
-        if isinstance(cur_services, dict):  # новые версии: {"ids": [...], "schedule": ...}
-            cur_services = cur_services.get("ids") or []
-        legacy_safe = cur.get("safesearch_enabled", False)
-        cur_safe = (cur.get("safe_search") or {}).get("enabled", legacy_safe)
-        if (
-            sorted(cur_services) != sorted(want["blocked_services"])
-            or cur.get("ids") != [want["ip"]]
-            or bool(cur_safe) != want["safe_search"]
-        ):
-            _request("POST", "/control/clients/update", json={"name": name, "data": payload})
+        try:
+            if name not in current:
+                _request("POST", "/control/clients/add", json=payload)
+                continue
+            cur = current[name]
+            cur_services = cur.get("blocked_services") or []
+            if isinstance(cur_services, dict):  # новые версии: {"ids": [...], "schedule": ...}
+                cur_services = cur_services.get("ids") or []
+            legacy_safe = cur.get("safesearch_enabled", False)
+            cur_safe = (cur.get("safe_search") or {}).get("enabled", legacy_safe)
+            if (
+                sorted(cur_services) != sorted(want["blocked_services"])
+                or cur.get("ids") != [want["ip"]]
+                or bool(cur_safe) != want["safe_search"]
+            ):
+                _request("POST", "/control/clients/update", json={"name": name, "data": payload})
+        except AdGuardError as e:
+            errors.append(str(e))
+    if errors:
+        extra = f" (+ещё {len(errors) - 2})" if len(errors) > 2 else ""
+        raise AdGuardError("; ".join(errors[:2]) + extra)

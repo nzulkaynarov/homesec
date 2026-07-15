@@ -54,6 +54,24 @@ def test_discover_matches_alias_mac(db, monkeypatch):
     assert not any(e.kind == "device_new" for e in db.query(EventLog))
 
 
+def test_discover_releases_stale_ip(db, monkeypatch):
+    """Ротация «приватного» MAC: DHCP выдал старый IP новому MAC — протухшая
+    запись должна отдать адрес, иначе AdGuard получает двух клиентов с одним
+    ids и отвечает 400 на каждом тике (инцидент 2026-07-15)."""
+    stale = Device(mac="FE:8B:73:34:03:35", ip="192.168.88.248", name="старый iPhone")
+    db.add(stale)
+    db.commit()
+    monkeypatch.setattr(enforcement.mikrotik, "get_leases",
+                        lambda api: _leases(("56:6F:23:87:B0:71", "192.168.88.248",
+                                             "iphone")))
+    devices = enforcement.discover_devices(db, api=None)
+    fresh = next(d for d in devices if d.mac == "56:6F:23:87:B0:71")
+    assert fresh.ip == "192.168.88.248"
+    assert stale.ip == ""  # адрес отобран у протухшей записи
+    assert {d.ip for d in devices if d.ip} == {"192.168.88.248"}  # дублей нет
+    assert any(e.kind == "ip_conflict" for e in db.query(EventLog))
+
+
 def test_discover_flags_twin_by_hostname(db, monkeypatch):
     dev = Device(mac="00:11:22:33:44:55", ip="192.168.88.40",
                  name="Телефон", hostname="mishas-phone")
