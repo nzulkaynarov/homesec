@@ -1,4 +1,5 @@
-"""Синхронизация клиентов AdGuard: изоляция ошибок по отдельным клиентам."""
+"""Синхронизация клиентов AdGuard: изоляция ошибок по отдельным клиентам,
+фильтрация неизвестных сервисов, ручные клиенты."""
 
 import pytest
 
@@ -13,6 +14,8 @@ def test_sync_clients_isolates_bad_client(monkeypatch):
     def fake_request(method, url, **kw):
         if url == "/control/clients":
             return {"clients": []}
+        if url == "/control/blocked_services/all":
+            return {"blocked_services": []}
         name = kw["json"]["name"]
         calls.append(name)
         if name == "hs-bad":
@@ -42,6 +45,8 @@ def test_sync_clients_skips_ip_owned_by_manual_client(monkeypatch):
                 {"name": "Мой ноут", "ids": ["192.168.88.77"]},
                 {"name": "hs-old", "ids": ["192.168.88.5"]},
             ]}
+        if url == "/control/blocked_services/all":
+            return {"blocked_services": [{"id": "steam"}]}
         calls.append((url, kw["json"]["name"]))
         return None
 
@@ -50,3 +55,43 @@ def test_sync_clients_skips_ip_owned_by_manual_client(monkeypatch):
                           "safe_search": False}}
     adguard.sync_clients(desired)  # без исключений
     assert calls == [("/control/clients/delete", "hs-old")]  # ни add, ни update
+
+
+def test_sync_clients_filters_unknown_services(monkeypatch):
+    """id, которого нет в реестре ЭТОГО AdGuard, отбрасывается с warning
+    вместо 400 на весь запрос (инцидент 2026-07-15: unknown "ea")."""
+    sent: dict[str, list[str]] = {}
+
+    def fake_request(method, url, **kw):
+        if url == "/control/clients":
+            return {"clients": []}
+        if url == "/control/blocked_services/all":
+            return {"blocked_services": [{"id": "steam"}, {"id": "electronic_arts"}]}
+        sent[kw["json"]["name"]] = kw["json"]["blocked_services"]
+        return None
+
+    monkeypatch.setattr(adguard, "_request", fake_request)
+    adguard.sync_clients({"hs-kid": {"ip": "192.168.88.30",
+                                     "blocked_services": ["steam", "ea", "kick"],
+                                     "safe_search": False}})
+    assert sent["hs-kid"] == ["steam"]
+
+
+def test_sync_clients_without_registry_keeps_services(monkeypatch):
+    """Если /blocked_services/all недоступен (старый AdGuard) — фильтрацию
+    пропускаем, блокировки не режем."""
+    sent: dict[str, list[str]] = {}
+
+    def fake_request(method, url, **kw):
+        if url == "/control/clients":
+            return {"clients": []}
+        if url == "/control/blocked_services/all":
+            raise adguard.AdGuardError("404")
+        sent[kw["json"]["name"]] = kw["json"]["blocked_services"]
+        return None
+
+    monkeypatch.setattr(adguard, "_request", fake_request)
+    adguard.sync_clients({"hs-kid": {"ip": "192.168.88.30",
+                                     "blocked_services": ["steam"],
+                                     "safe_search": False}})
+    assert sent["hs-kid"] == ["steam"]

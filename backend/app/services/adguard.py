@@ -10,16 +10,21 @@ from ..config import settings
 
 log = logging.getLogger("homesec.adguard")
 
-# Категории, доступные в UI панели -> id сервисов AdGuard Home
+# Категории, доступные в UI панели -> id сервисов AdGuard Home.
+# id сверяются с реестром AdGuard (HostlistsRegistry/assets/services.json):
+# один неизвестный id валит ВЕСЬ clients/add|update с 400 «unknown
+# blocked-service» (инцидент 2026-07-15: несуществующий "ea"). Дополнительная
+# защита от расхождения версий — runtime-фильтр в sync_clients.
 SERVICE_CATEGORIES = {
     "games": {
         "label": "Игры",
         "services": ["steam", "epic_games", "roblox", "minecraft", "battle_net",
-                     "ea", "playstation", "xboxlive", "riot_games", "wargaming"],
+                     "electronic_arts", "origin", "playstation", "xboxlive",
+                     "riot_games", "wargaming"],
     },
     "video": {
         "label": "YouTube и видео",
-        "services": ["youtube", "netflix", "twitch", "kick", "vimeo", "hulu"],
+        "services": ["youtube", "netflix", "twitch", "vimeo", "hulu"],
     },
     "social": {
         "label": "Соцсети и мессенджеры",
@@ -78,6 +83,18 @@ def list_clients() -> dict[str, dict]:
     return {c["name"]: c for c in _all_clients() if c["name"].startswith("hs-")}
 
 
+def known_service_ids() -> set[str] | None:
+    """id сервисов, которые знает ЭТОТ AdGuard (его встроенный реестр может
+    отличаться от нашего списка по версии). None = узнать не удалось —
+    тогда фильтрацию пропускаем, чтобы не отключить блокировки зря."""
+    try:
+        data = _request("GET", "/control/blocked_services/all") or {}
+    except AdGuardError:
+        return None
+    services = data.get("blocked_services") or []
+    return {s["id"] for s in services if s.get("id")}
+
+
 def _foreign_ids(clients: list[dict]) -> set[str]:
     """Идентификаторы (IP/MAC/CIDR) клиентов, заведённых в AdGuard РУКАМИ.
     AdGuard требует уникальности id между всеми клиентами: попытка привязать
@@ -130,6 +147,7 @@ def sync_clients(desired: dict[str, dict]) -> None:
     clients = _all_clients()
     current = {c["name"]: c for c in clients if c["name"].startswith("hs-")}
     foreign = _foreign_ids(clients)
+    known = known_service_ids()
     errors: list[str] = []
     for name in set(current) - set(desired):
         try:
@@ -146,7 +164,16 @@ def sync_clients(desired: dict[str, dict]) -> None:
                 except AdGuardError as e:
                     errors.append(str(e))
             continue
-        payload = _client_payload(name, want["ip"], want["blocked_services"], want["safe_search"])
+        services = want["blocked_services"]
+        if known is not None:
+            unknown = [s for s in services if s not in known]
+            if unknown:
+                # Один неизвестный id валит весь запрос 400-кой — лучше молча
+                # отфильтровать и заблокировать остальное, чем не применить ничего.
+                log.warning("AdGuard не знает сервисы %s — пропущены для %s",
+                            unknown, name)
+                services = [s for s in services if s in known]
+        payload = _client_payload(name, want["ip"], services, want["safe_search"])
         try:
             if name not in current:
                 _request("POST", "/control/clients/add", json=payload)
@@ -158,7 +185,7 @@ def sync_clients(desired: dict[str, dict]) -> None:
             legacy_safe = cur.get("safesearch_enabled", False)
             cur_safe = (cur.get("safe_search") or {}).get("enabled", legacy_safe)
             if (
-                sorted(cur_services) != sorted(want["blocked_services"])
+                sorted(cur_services) != sorted(services)
                 or cur.get("ids") != [want["ip"]]
                 or bool(cur_safe) != want["safe_search"]
             ):
