@@ -52,8 +52,12 @@ add chain=forward action=accept protocol=udp dst-address=$piAddr dst-port=53 src
 add chain=forward action=accept protocol=tcp dst-address=$piAddr dst-port=53 src-address-list=hs-blocked comment="hs: allow block page dns tcp" place-before=[find comment="hs: drop blocked devices"]
 
 # Метка перехваченного HTTP ДО dst-nat — для hairpin masquerade по метке.
+# Правило для hs-unknown ВЫКЛЮЧЕНО, как и его NAT-пара ниже: включать их
+# строго ВМЕСТЕ, иначе перехват unknown пойдёт без hairpin и страница
+# у них не откроется (выстраданное правило №3).
 /ip firewall mangle
 add chain=prerouting action=mark-connection new-connection-mark=hs-blockpage protocol=tcp dst-port=80 src-address-list=hs-blocked dst-address=!$piAddr passthrough=yes comment="hs: mark block page"
+add chain=prerouting action=mark-connection new-connection-mark=hs-blockpage protocol=tcp dst-port=80 src-address-list=hs-unknown dst-address=!$piAddr passthrough=yes comment="hs: mark block page (unknown)" disabled=yes
 
 # Перехват HTTP -> страница на панели. Исключаем сам Pi и адреса роутера.
 /ip firewall nat

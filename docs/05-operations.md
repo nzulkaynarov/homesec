@@ -86,6 +86,19 @@ Wi-Fi: `/interface wireless monitor wlan2 once` (свойству `running` не
 Правило для портала неизвестных (`hs: block page (unknown portal)`) создаётся
 ВЫКЛЮЧЕННЫМ — включать только вместе с `HS_BLOCK_UNKNOWN=true` в `.env`,
 иначе оно заворачивает HTTP незаблокированных «неизвестных» устройств.
+Включать СТРОГО парой с mangle-меткой (иначе перехват без hairpin не работает):
+
+```routeros
+/ip firewall mangle enable [find comment="hs: mark block page (unknown)"]
+/ip firewall nat enable [find comment="hs: block page (unknown portal)"]
+```
+
+На роутере, импортировавшем скрипт ДО появления mangle-правила для unknown
+(прод 2026-07-14), перед включением добавить метку руками:
+
+```routeros
+/ip firewall mangle add chain=prerouting action=mark-connection new-connection-mark=hs-blockpage protocol=tcp dst-port=80 src-address-list=hs-unknown dst-address=!192.168.88.2 passthrough=yes comment="hs: mark block page (unknown)"
+```
 
 Откат: `/ip firewall nat disable [find comment~"hs: block page"]` и
 `/ip firewall filter disable [find comment~"hs: allow block page"]`.
