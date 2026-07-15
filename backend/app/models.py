@@ -171,6 +171,21 @@ class RegistrationRequest(Base):
     ts: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
 
 
+class PendingAction(Base):
+    """Мутация, предложенная ИИ и ожидающая кнопку подтверждения в Telegram.
+    Хранится в базе, а не в памяти бота: CD рестартит бота на каждый push,
+    и кнопки под уже отправленными сообщениями должны переживать деплой.
+    Записи старше суток чистит ежедневный _cleanup планировщика панели."""
+
+    __tablename__ = "pending_actions"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    tool: Mapped[str] = mapped_column(String(64))  # имя инструмента из реестра
+    args: Mapped[str] = mapped_column(Text, default="{}")  # аргументы, json
+    description: Mapped[str] = mapped_column(Text, default="")
+    created: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+
+
 class EventLog(Base):
     __tablename__ = "event_log"
 

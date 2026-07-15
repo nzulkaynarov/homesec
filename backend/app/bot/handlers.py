@@ -4,7 +4,6 @@
 мутации исполняются сразу; подтверждение кнопкой нужно только действиям ИИ."""
 
 import asyncio
-import itertools
 import logging
 from collections import defaultdict, deque
 from typing import Any
@@ -22,10 +21,8 @@ from . import texts
 log = logging.getLogger("homesec.bot")
 router = Router()
 
-# Мутации, предложенные ИИ и ждущие кнопку. Живут в памяти процесса бота:
-# после рестарта кнопка вежливо попросит повторить запрос.
-PENDING_ACTIONS: dict[int, orchestrator.PendingAction] = {}
-_pending_seq = itertools.count(1)
+# Мутации, предложенные ИИ и ждущие кнопку, лежат в таблице pending_actions
+# (tools.save_pending/pop_pending) — кнопки переживают рестарты и деплой.
 
 # Короткая память диалога с ИИ на чат (только текстовые реплики, без tool call'ов)
 CHAT_HISTORY: dict[int, deque] = defaultdict(lambda: deque(maxlen=6))
@@ -36,6 +33,22 @@ def run_tool_sync(name: str, args: dict, source: str = "bot") -> Any:
     s = dbmod.session()
     try:
         return tools.run_tool(s, name, args, source=source)
+    finally:
+        s.close()
+
+
+def _save_pending(action: orchestrator.PendingAction) -> int:
+    s = dbmod.session()
+    try:
+        return tools.save_pending(s, action.tool, action.args, action.description)
+    finally:
+        s.close()
+
+
+def _pop_pending(pending_id: int) -> tuple[str, dict, str] | None:
+    s = dbmod.session()
+    try:
+        return tools.pop_pending(s, pending_id)
     finally:
         s.close()
 
@@ -284,8 +297,7 @@ async def free_text(message: Message) -> None:
     CHAT_HISTORY[message.chat.id].append({"role": "assistant", "content": answer.text})
     await message.answer(answer.text)
     for action in answer.pending:
-        pending_id = next(_pending_seq)
-        PENDING_ACTIONS[pending_id] = action
+        pending_id = await asyncio.to_thread(_save_pending, action)
         await message.answer(
             f"Подтвердите действие:\n{action.description}",
             reply_markup=confirm_keyboard(pending_id),
@@ -296,22 +308,21 @@ async def free_text(message: Message) -> None:
 async def cb_confirm_action(cb: CallbackQuery) -> None:
     parts = (cb.data or "").split(":")
     pending_id, decision = int(parts[1]), parts[2]
-    action = PENDING_ACTIONS.pop(pending_id, None)
+    action = await asyncio.to_thread(_pop_pending, pending_id)
     if action is None:
-        await cb.answer("Действие устарело (бот перезапускался) — повторите запрос",
+        await cb.answer("Действие устарело или уже обработано — повторите запрос",
                         show_alert=True)
         return
+    tool_name, tool_args, _description = action
     if decision != "yes":
         result = "Отменено."
     else:
         try:
-            result = await asyncio.to_thread(
-                run_tool_sync, action.tool, action.args, "ai"
-            )
+            result = await asyncio.to_thread(run_tool_sync, tool_name, tool_args, "ai")
         except tools.ToolError as e:
             result = f"Не получилось: {e}"
         except Exception:
-            log.exception("подтверждённое действие %s упало", action.tool)
+            log.exception("подтверждённое действие %s упало", tool_name)
             result = "Ошибка при выполнении, подробности в журнале."
     await cb.answer()
     if isinstance(cb.message, Message):

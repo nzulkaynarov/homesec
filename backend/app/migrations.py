@@ -26,6 +26,19 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
         "SELECT id, mac FROM devices "
         "WHERE mac NOT IN (SELECT mac FROM device_macs)",
     ]),
+    # Отложенные мутации ИИ (кнопки подтверждения переживают деплой).
+    # IF NOT EXISTS: на живой базе таблицу обычно уже создал create_all
+    # (ensure_schema зовёт его до миграций), тогда миграция — no-op.
+    (2, [
+        "CREATE TABLE IF NOT EXISTS pending_actions ("
+        "id INTEGER NOT NULL PRIMARY KEY, "
+        "tool VARCHAR(64) NOT NULL, "
+        "args TEXT NOT NULL, "
+        "description TEXT NOT NULL, "
+        "created DATETIME NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS ix_pending_actions_created "
+        "ON pending_actions (created)",
+    ]),
 ]
 
 

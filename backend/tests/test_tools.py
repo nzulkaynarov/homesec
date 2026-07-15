@@ -6,7 +6,7 @@ import pytest
 
 from app.ai import tools
 from app.db import Base, engine, session
-from app.models import Device, EventLog, Pause, Person, active_pauses
+from app.models import Device, EventLog, Pause, PendingAction, Person, active_pauses
 from app.services.enforcement import _desired_state
 
 
@@ -14,7 +14,7 @@ from app.services.enforcement import _desired_state
 def db():
     Base.metadata.create_all(engine)
     s = session()
-    for model in (Pause, EventLog, Device, Person):
+    for model in (Pause, EventLog, PendingAction, Device, Person):
         s.query(model).delete()
     s.commit()
     yield s
@@ -127,6 +127,30 @@ def test_assign_device(db, dev, no_reconcile):
         tools.run_tool(db, "assign_device", {"device_id": dev.id, "person_name": "Дядя"})
     tools.run_tool(db, "assign_device", {"device_id": dev.id, "person_name": ""})
     assert dev.group == "unknown"
+
+
+def test_pending_actions_persist(db):
+    """Кнопки подтверждения ИИ-мутаций переживают рестарт бота: состояние в базе."""
+    pid = tools.save_pending(db, "block_device", {"device_id": 5}, "Блокировка Планшета")
+    assert tools.pop_pending(db, pid) == (
+        "block_device", {"device_id": 5}, "Блокировка Планшета"
+    )
+    assert tools.pop_pending(db, pid) is None  # одноразово: повторный тап — «устарело»
+    assert tools.pop_pending(db, 999) is None
+
+
+def test_pending_actions_cleanup_after_ttl(db):
+    """Ежедневная уборка планировщика выкидывает неподтверждённое старше суток."""
+    from app.scheduler import _cleanup
+
+    old_id = tools.save_pending(db, "block_device", {}, "старое")
+    fresh_id = tools.save_pending(db, "block_device", {}, "свежее")
+    db.get(PendingAction, old_id).created = datetime.now() - timedelta(hours=25)
+    db.commit()
+    _cleanup()  # своя сессия — сбрасываем кэш текущей
+    db.expire_all()
+    assert tools.pop_pending(db, old_id) is None
+    assert tools.pop_pending(db, fresh_id) is not None
 
 
 def test_find_device(db, dev):

@@ -13,6 +13,7 @@ Telegram-бот читают и меняют состояние системы. 
 """
 
 import inspect
+import json
 import re
 import typing
 from collections.abc import Callable
@@ -30,6 +31,7 @@ from ..models import (
     DeviceMac,
     EventLog,
     Pause,
+    PendingAction,
     Person,
     Quota,
     QuotaBonus,
@@ -125,6 +127,29 @@ def run_tool(db: Session, name: str, args: dict, source: str = "ai",
 
 
 # ---------- помощники (не инструменты) ----------
+
+def save_pending(db: Session, tool_name: str, args: dict, description: str) -> int:
+    """Сохраняет мутацию, ожидающую кнопку подтверждения в Telegram.
+    В базе, а не в памяти бота: кнопки переживают деплой (CD рестартит
+    бота на каждый push в main)."""
+    row = PendingAction(tool=tool_name, args=json.dumps(args, ensure_ascii=False),
+                        description=description)
+    db.add(row)
+    db.commit()
+    return row.id
+
+
+def pop_pending(db: Session, pending_id: int) -> tuple[str, dict, str] | None:
+    """Забирает отложенную мутацию — одноразово: повторное нажатие кнопки
+    получит None. Возвращает (tool, args, description)."""
+    row = db.get(PendingAction, pending_id)
+    if row is None:
+        return None
+    out = (row.tool, json.loads(row.args or "{}"), row.description)
+    db.delete(row)
+    db.commit()
+    return out
+
 
 def find_device(db: Session, query: str) -> Device | None:
     """Ищет устройство по id, MAC, точному или частичному имени (без регистра).

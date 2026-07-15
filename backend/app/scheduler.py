@@ -9,7 +9,7 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import delete
 
 from . import db
-from .models import EventLog, Pause, QuotaBonus, QuotaUsage
+from .models import EventLog, Pause, PendingAction, QuotaBonus, QuotaUsage
 from .services import quota
 from .services.enforcement import reconcile
 
@@ -45,13 +45,16 @@ def _quota_tick() -> None:
 
 def _cleanup() -> None:
     """Ежедневная уборка: журнал событий старше 90 дней, истёкшие паузы,
-    счётчики квот старше 30 дней."""
+    счётчики квот старше 30 дней, неподтверждённые действия ИИ старше суток."""
     session = db.session()
     try:
         now = datetime.now()
         cutoff = now - timedelta(days=EVENT_RETENTION_DAYS)
         session.execute(delete(EventLog).where(EventLog.ts < cutoff))
         session.execute(delete(Pause).where(Pause.until < now))
+        # Кнопка подтверждения старше суток бессмысленна: контекст протух
+        session.execute(delete(PendingAction)
+                        .where(PendingAction.created < now - timedelta(hours=24)))
         quota_cutoff = (now - timedelta(days=30)).strftime("%Y-%m-%d")
         session.execute(delete(QuotaUsage).where(QuotaUsage.date < quota_cutoff))
         session.execute(delete(QuotaBonus).where(QuotaBonus.date < quota_cutoff))

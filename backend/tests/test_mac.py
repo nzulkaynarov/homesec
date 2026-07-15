@@ -128,9 +128,10 @@ def test_migration_backfills_device_macs(tmp_path):
         c.execute(text("CREATE TABLE device_macs (id INTEGER PRIMARY KEY, "
                        "device_id INTEGER, mac VARCHAR(17))"))
         c.execute(text("INSERT INTO devices (mac, ip) VALUES ('AA:BB:CC:DD:EE:FF', '')"))
-    assert run_migrations(eng, MIGRATIONS) == 1
+    assert run_migrations(eng, MIGRATIONS) == len(MIGRATIONS)
     with eng.connect() as c:
         rows = c.execute(text("SELECT device_id, mac FROM device_macs")).fetchall()
         assert rows == [(1, "AA:BB:CC:DD:EE:FF")]
         c.execute(text("SELECT hostname FROM devices"))  # колонка появилась
+        c.execute(text("SELECT tool FROM pending_actions"))  # таблица из миграции №2
     assert run_migrations(eng, MIGRATIONS) == 0  # повторно — ничего
