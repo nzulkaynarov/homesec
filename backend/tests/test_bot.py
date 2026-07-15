@@ -130,6 +130,28 @@ def test_notification_cursor(db):
     assert collect_notifications(db) == []  # повторно не отдаёт
 
 
+def test_quota_block_notification_with_bonus_button(db):
+    """Блокировка по квоте не молчит: событие с MAC доходит до бота,
+    кнопка «+30 мин» ведёт в тот же callback, что и /bonus."""
+    from app.bot.handlers import bonus_keyboard
+
+    dev = Device(mac="AA:00:00:00:00:09", ip="192.168.88.79", name="Планшет")
+    db.add(dev)
+    db.commit()
+    assert collect_notifications(db) == []  # инициализация курсора
+
+    log_event(db, "quota_block",
+              f"Квота на интернет исчерпана: Планшет ({dev.mac}, {dev.ip}) — "
+              "доступ выключен до полуночи.")
+    found = collect_notifications(db)
+    assert [(n.kind, n.device.id) for n in found] == [("quota_block", dev.id)]
+
+    kb = bonus_keyboard(dev.id)
+    assert kb.inline_keyboard[0][0].callback_data == (
+        f"pick:add_bonus_time:{dev.id}:30:internet"
+    )
+
+
 def test_new_device_keyboard():
     from app.bot.handlers import new_device_keyboard
 

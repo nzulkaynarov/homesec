@@ -71,6 +71,9 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
                 elif kind == "register_request":
                     text = texts.format_registration(message)
                     kb = handlers.new_device_keyboard(dev["id"], people)
+                elif kind == "quota_block":
+                    text = f"⏳ {message}\nМожно добавить время кнопкой:"
+                    kb = handlers.bonus_keyboard(dev["id"])
                 else:
                     text = texts.format_new_device(dev)
                     kb = handlers.new_device_keyboard(dev["id"], people)

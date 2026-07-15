@@ -277,6 +277,17 @@ def new_device_keyboard(dev_id: int, people: list[tuple[int, str, str]]) -> Inli
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def bonus_keyboard(dev_id: int, minutes: int = 30) -> InlineKeyboardMarkup:
+    """Кнопка «+30 мин» под уведомлением о блокировке по квоте. Callback
+    обрабатывает cb_pick — тот же путь, что и выбор устройства для /bonus."""
+    return InlineKeyboardMarkup(inline_keyboard=[[
+        InlineKeyboardButton(
+            text=f"➕ {minutes} мин",
+            callback_data=f"pick:add_bonus_time:{dev_id}:{minutes}:internet",
+        ),
+    ]])
+
+
 def merge_keyboard(duplicate_id: int, target_id: int) -> InlineKeyboardMarkup:
     """Кнопки к подозрению «это то же устройство с новым MAC»."""
     return InlineKeyboardMarkup(inline_keyboard=[[

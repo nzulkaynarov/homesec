@@ -1,5 +1,6 @@
 """Наблюдатель журнала событий: вычитывает новые записи, требующие
-уведомления (новые устройства, заявки с портала), и отдаёт их боту. Курсор
+уведомления (новые устройства, заявки с портала, блокировки по квоте),
+и отдаёт их боту. Курсор
 (id последнего обработанного события) хранится в kv_state, поэтому переживает
 рестарты; при самом первом запуске история пропускается, чтобы не заспамить
 чат старыми событиями."""
@@ -13,14 +14,14 @@ from sqlalchemy.orm import Session
 from ..models import Device, EventLog, kv_get, kv_set
 
 CURSOR_KEY = "bot_last_event_id"
-NOTIFY_KINDS = ("device_new", "register_request", "device_maybe_same")
+NOTIFY_KINDS = ("device_new", "register_request", "device_maybe_same", "quota_block")
 
 _MAC_RE = re.compile(r"([0-9A-F]{2}(?::[0-9A-F]{2}){5})", re.IGNORECASE)
 
 
 @dataclass
 class Notification:
-    kind: str  # device_new | register_request | device_maybe_same
+    kind: str  # device_new | register_request | device_maybe_same | quota_block
     device: Device
     message: str  # исходный текст события
     extra_device: Device | None = None  # для maybe_same: устройство-оригинал

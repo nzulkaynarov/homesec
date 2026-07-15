@@ -1,11 +1,13 @@
 """Проверяет расчёт желаемого состояния сети из БД — чистая логика без сети."""
 
 
+from datetime import datetime
+
 import pytest
 
 from app.config import settings
 from app.db import Base, engine, session
-from app.models import Device, GroupPolicy, Person, Rule
+from app.models import Device, GroupPolicy, Person, Quota, QuotaUsage, Rule
 from app.services.enforcement import DOH_SERVER_IPS, _desired_state
 
 
@@ -14,7 +16,7 @@ def db():
     Base.metadata.create_all(engine)
     s = session()
     # чистим таблицы, чтобы тесты не влияли друг на друга
-    for model in (Rule, GroupPolicy, Device, Person):
+    for model in (Rule, GroupPolicy, Quota, QuotaUsage, Device, Person):
         s.query(model).delete()
     s.commit()
     yield s
@@ -78,6 +80,32 @@ def test_duplicate_ip_yields_single_adguard_client(db):
     ag = _desired_state(db, list(db.query(Device).all()))["ag_clients"]
     assert len(ag) == 1
     assert next(iter(ag.values()))["ip"] == "192.168.88.248"
+
+
+def test_quota_block_reason_marked_for_notification(db):
+    """Исчерпанная интернет-квота видна в quota_blocked — reconcile по этой
+    карте пишет событие quota_block (с MAC для notify.py) вместо безликого block."""
+    kid = Person(name="Kid", role="kid")
+    db.add(kid)
+    db.commit()
+    dev = Device(mac="AA:00:00:00:00:31", ip="192.168.88.31", name="Планшет",
+                 person_id=kid.id)
+    manual = Device(mac="AA:00:00:00:00:32", ip="192.168.88.32", name="tv",
+                    blocked_manual=True)
+    db.add_all([dev, manual])
+    db.commit()
+    db.add(Quota(target_type="device", target=str(dev.id), category="internet",
+                 minutes_per_day=30))
+    db.add(QuotaUsage(device_id=dev.id, date=datetime.now().strftime("%Y-%m-%d"),
+                      category="internet", minutes=30))
+    db.commit()
+
+    st = _desired_state(db, list(db.query(Device).all()))
+    assert dev.ip in st["lists"]["hs-blocked"]
+    assert manual.ip in st["lists"]["hs-blocked"]
+    # причина «квота» — только у квотного устройства, не у ручной блокировки
+    assert set(st["quota_blocked"]) == {dev.ip}
+    assert st["quota_blocked"][dev.ip] is dev
 
 
 def test_block_unknown_toggle(db, monkeypatch):
