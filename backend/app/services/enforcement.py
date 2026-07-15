@@ -174,6 +174,7 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
     lists["hs-blocked"] = set()
     lists["hs-managed"] = set()
     lists["hs-doh"] = set(DOH_SERVER_IPS)
+    quota_blocked: dict[str, Device] = {}  # ip -> устройство с исчерпанной интернет-квотой
     queues: dict[str, str] = {}
     ag_clients: dict[str, dict] = {}
     ag_client_ips: set[str] = set()
@@ -196,6 +197,8 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
         )
         if blocked:
             lists["hs-blocked"].add(dev.ip)
+            if "internet" in spent:  # причина известна: квота — reconcile
+                quota_blocked[dev.ip] = dev  # оформит отдельное событие для бота
         # Управляемые: все, кроме взрослых без ограничений (им — fasttrack)
         if group != "adult" or dev.speed_limit or blocked:
             lists["hs-managed"].add(dev.ip)
@@ -227,18 +230,21 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
                     "safe_search": safe_search,
                 }
 
-    return {"lists": lists, "queues": queues, "ag_clients": ag_clients}
+    return {"lists": lists, "queues": queues, "ag_clients": ag_clients,
+            "quota_blocked": quota_blocked}
 
 
 def reconcile(db: Session) -> dict:
     """Полный цикл: обнаружить устройства, применить состояние. Возвращает
     сводку; ошибки интеграций пишет в журнал, но не роняет планировщик."""
     summary: dict = {"ok": True, "errors": [], "newly_blocked": []}
+    quota_blocked: dict[str, Device] = {}
 
     try:
         with mikrotik.api_session() as api:
             devices = discover_devices(db, api)
             desired = _desired_state(db, devices)
+            quota_blocked = desired["quota_blocked"]
             for list_name, ips in desired["lists"].items():
                 added, _removed = mikrotik.address_list_sync(api, list_name, ips)
                 if list_name == "hs-blocked":
@@ -261,6 +267,16 @@ def reconcile(db: Session) -> dict:
         log.warning("%s", e)
         log_event(db, "error", str(e))
 
+    # События — только при ПЕРЕХОДЕ в заблокированное состояние (newly_blocked:
+    # IP реально добавлен в hs-blocked), иначе бот спамил бы каждый тик.
     for ip in summary["newly_blocked"]:
-        log_event(db, "block", f"Заблокирован доступ: {ip}")
+        dev = quota_blocked.get(ip)
+        if dev is not None:
+            # MAC в тексте обязателен: notify.py восстанавливает устройство
+            # регексом по MAC и вешает кнопку «+30 мин»
+            log_event(db, "quota_block",
+                      f"Квота на интернет исчерпана: {dev.name} ({dev.mac}, {ip}) — "
+                      "доступ выключен до полуночи.")
+        else:
+            log_event(db, "block", f"Заблокирован доступ: {ip}")
     return summary

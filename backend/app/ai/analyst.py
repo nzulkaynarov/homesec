@@ -12,8 +12,9 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Device, EventLog
+from ..models import Device, EventLog, QuotaUsage
 from ..services import adguard
+from ..services.quota import QUOTA_CATEGORY_LABELS
 from . import client
 
 log = logging.getLogger("homesec.ai.analyst")
@@ -45,6 +46,20 @@ def collect_digest_data(db: Session) -> dict:
         pass
 
     devices = list(db.scalars(select(Device)))
+
+    # Экранное время за день (заявлено в ТЗ фазы 2): активные минуты из
+    # QuotaUsage за сегодня, {устройство: {категория: минуты}}
+    names = {d.id: d.name for d in devices}
+    screen_time: dict[str, dict[str, int]] = {}
+    today = datetime.now().strftime("%Y-%m-%d")
+    for r in db.scalars(select(QuotaUsage).where(QuotaUsage.date == today)):
+        name = names.get(r.device_id)
+        if name is None:
+            continue
+        label = QUOTA_CATEGORY_LABELS.get(r.category, r.category)
+        per = screen_time.setdefault(name, {})
+        per[label] = per.get(label, 0) + r.minutes
+
     kid_ips = {d.ip: d.name for d in devices if d.ip and d.group == "kid"}
     kid_domains: dict[str, Counter] = {name: Counter() for name in kid_ips.values()}
     try:
@@ -64,6 +79,7 @@ def collect_digest_data(db: Session) -> dict:
         "errors": [e.message for e in events if e.kind == "error"][-5:],
         "dns_queries_today": stats.get("num_dns_queries"),
         "dns_blocked_today": stats.get("num_blocked_filtering"),
+        "screen_time": screen_time,
         "kid_top_domains": {
             name: [d for d, _ in counter.most_common(10)]
             for name, counter in kid_domains.items()
@@ -78,6 +94,9 @@ def _fallback_digest(data: dict) -> str:
             f"DNS: {data['dns_queries_today']} запросов, "
             f"{data.get('dns_blocked_today', 0)} заблокировано"
         )
+    for name, cats in data.get("screen_time", {}).items():
+        spent = ", ".join(f"{label.lower()} {minutes} мин" for label, minutes in cats.items())
+        lines.append(f"⏳ {name}: {spent}")
     for msg in data["new_devices"]:
         lines.append(f"🆕 {msg}")
     for msg in data["blocks"][-5:]:

@@ -6,7 +6,7 @@ import pytest
 
 from app.ai import tools
 from app.db import Base, engine, session
-from app.models import Device, EventLog, Pause, Person, active_pauses
+from app.models import Device, EventLog, Pause, PendingAction, Person, active_pauses
 from app.services.enforcement import _desired_state
 
 
@@ -14,7 +14,7 @@ from app.services.enforcement import _desired_state
 def db():
     Base.metadata.create_all(engine)
     s = session()
-    for model in (Pause, EventLog, Device, Person):
+    for model in (Pause, EventLog, PendingAction, Device, Person):
         s.query(model).delete()
     s.commit()
     yield s
@@ -129,6 +129,30 @@ def test_assign_device(db, dev, no_reconcile):
     assert dev.group == "unknown"
 
 
+def test_pending_actions_persist(db):
+    """Кнопки подтверждения ИИ-мутаций переживают рестарт бота: состояние в базе."""
+    pid = tools.save_pending(db, "block_device", {"device_id": 5}, "Блокировка Планшета")
+    assert tools.pop_pending(db, pid) == (
+        "block_device", {"device_id": 5}, "Блокировка Планшета"
+    )
+    assert tools.pop_pending(db, pid) is None  # одноразово: повторный тап — «устарело»
+    assert tools.pop_pending(db, 999) is None
+
+
+def test_pending_actions_cleanup_after_ttl(db):
+    """Ежедневная уборка планировщика выкидывает неподтверждённое старше суток."""
+    from app.scheduler import _cleanup
+
+    old_id = tools.save_pending(db, "block_device", {}, "старое")
+    fresh_id = tools.save_pending(db, "block_device", {}, "свежее")
+    db.get(PendingAction, old_id).created = datetime.now() - timedelta(hours=25)
+    db.commit()
+    _cleanup()  # своя сессия — сбрасываем кэш текущей
+    db.expire_all()
+    assert tools.pop_pending(db, old_id) is None
+    assert tools.pop_pending(db, fresh_id) is not None
+
+
 def test_find_device(db, dev):
     db.add(Device(mac="AA:00:00:00:00:02", ip="192.168.88.31", name="Планшет старый"))
     db.commit()
@@ -140,10 +164,39 @@ def test_find_device(db, dev):
     assert tools.find_device(db, "нет такого") is None
 
 
+def test_find_device_candidates(db, dev):
+    db.add(Device(mac="AA:00:00:00:00:02", ip="192.168.88.31", name="Планшет старый"))
+    db.commit()
+    # неоднозначный запрос, на котором find_device возвращает None
+    assert tools.find_device(db, "планш") is None
+    names = [d.name for d in tools.find_device_candidates(db, "планш")]
+    assert names == ["Планшет", "Планшет старый"]  # сортировка по имени
+    # пустой запрос — все устройства (для команды без аргумента)
+    assert len(tools.find_device_candidates(db, "")) == 2
+    assert tools.find_device_candidates(db, "нет такого") == []
+
+
 def test_list_devices_and_events(db, dev, no_reconcile):
     tools.run_tool(db, "pause_internet", {"target": "kid", "minutes": 30})
     rows = tools.run_tool(db, "list_devices", {})
     assert rows[0]["name"] == "Планшет" and rows[0]["group"] == "kid"
     assert rows[0]["paused_until"]  # пауза группы видна на устройстве
+    assert rows[0]["online"] is None  # роутер в тестах недоступен — «неизвестно»
     events = tools.run_tool(db, "get_recent_events", {"limit": 5})
     assert events and events[0]["kind"] == "ai_action"
+
+
+def test_list_devices_online_from_router(db, dev, monkeypatch):
+    import contextlib
+
+    @contextlib.contextmanager
+    def fake_session():
+        yield "api"
+
+    monkeypatch.setattr(tools.mikrotik, "api_session", fake_session)
+    monkeypatch.setattr(tools.mikrotik, "get_online_ips", lambda api: {"192.168.88.30"})
+    db.add(Device(mac="AA:00:00:00:00:03", ip="192.168.88.32", name="офлайн"))
+    db.commit()
+    rows = {r["name"]: r for r in tools.run_tool(db, "list_devices", {})}
+    assert rows["Планшет"]["online"] is True
+    assert rows["офлайн"]["online"] is False

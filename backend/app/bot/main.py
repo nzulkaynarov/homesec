@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.types import BotCommand
 
 from .. import db as dbmod
 from ..ai import analyst, watchdog
@@ -70,6 +71,9 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
                 elif kind == "register_request":
                     text = texts.format_registration(message)
                     kb = handlers.new_device_keyboard(dev["id"], people)
+                elif kind == "quota_block":
+                    text = f"⏳ {message}\nМожно добавить время кнопкой:"
+                    kb = handlers.bonus_keyboard(dev["id"])
                 else:
                     text = texts.format_new_device(dev)
                     kb = handlers.new_device_keyboard(dev["id"], people)
@@ -144,6 +148,13 @@ async def main() -> None:
     ensure_schema(engine, Base.metadata)
 
     bot = Bot(token=settings.telegram_bot_token)
+    try:
+        # Меню команд по «/» — обнаруживаемость команд без чтения /help
+        await bot.set_my_commands(
+            [BotCommand(command=c, description=d) for c, d in texts.BOT_COMMANDS]
+        )
+    except Exception:
+        log.warning("не удалось зарегистрировать меню команд", exc_info=True)
     dp = Dispatcher()
     # Доступ только из разрешённых чатов; остальные игнорируются молча
     handlers.router.message.filter(F.chat.id.in_(allowed))

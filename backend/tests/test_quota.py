@@ -215,3 +215,20 @@ def test_quota_status_tool(db, kid_device, no_reconcile):
         "category": "video", "category_label": "YouTube и видео",
         "used_minutes": 60, "limit_minutes": 60, "exhausted": True,
     }]
+
+
+def test_get_status_includes_screen_time(db, kid_device, no_reconcile):
+    """/status показывает прогресс квот: «⏳ Планшет: игры 1:20/2:00»."""
+    db.add(Quota(target_type="device", target=str(kid_device.id),
+                 category="games", minutes_per_day=120))
+    db.commit()
+    _use(db, kid_device.id, "games", 80)
+    status = tools.run_tool(db, "get_status", {})
+    assert status["screen_time"] == [{
+        "device": "Планшет", "category": "games", "label": "Игры",
+        "used_minutes": 80, "limit_minutes": 120,
+    }]
+
+    from app.bot.texts import format_status
+
+    assert "⏳ Планшет: игры 1:20/2:00" in format_status(status)

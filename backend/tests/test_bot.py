@@ -1,6 +1,8 @@
 """Логика бота без Telegram: форматирование, антидребезг health-мониторинга,
 курсор уведомлений о новых устройствах."""
 
+import re
+
 import pytest
 
 from app.bot import texts
@@ -21,6 +23,23 @@ def db():
     s.close()
 
 
+def test_bot_commands_menu():
+    commands = [c for c, _ in texts.BOT_COMMANDS]
+    assert len(commands) == len(set(commands))  # без дублей
+    for cmd, desc in texts.BOT_COMMANDS:
+        assert re.fullmatch(r"[a-z0-9_]{1,32}", cmd)  # формат Telegram
+        assert 1 <= len(desc) <= 256 and desc[0].isupper()  # описания по-русски
+        if cmd != "help":
+            assert f"/{cmd}" in texts.HELP  # меню не расходится со справкой
+
+
+def test_start_is_short_greeting():
+    # /start — короткое приветствие с главными командами, а не простыня /help
+    assert len(texts.START) < len(texts.HELP)
+    for cmd in ("/status", "/devices", "/help"):
+        assert cmd in texts.START
+
+
 def test_format_status_and_devices():
     text = texts.format_status({
         "router_ok": True, "adguard_ok": False,
@@ -29,15 +48,45 @@ def test_format_status_and_devices():
         "dns_queries_today": 1000, "dns_blocked_today": 50,
         "active_pauses": [{"target_type": "group", "target": "kid",
                            "until": "2026-07-14T21:30", "reason": ""}],
+        "screen_time": [{"device": "Планшет", "category": "games", "label": "Игры",
+                         "used_minutes": 80, "limit_minutes": 120}],
     })
     assert "✅ роутер" in text and "❌ AdGuard" in text
     assert "kid до 21:30" in text
+    assert "⏳ Планшет: игры 1:20/2:00" in text  # прогресс квоты экранного времени
+    assert texts.hhmm(0) == "0:00" and texts.hhmm(65) == "1:05"
 
     rows = [{"id": 1, "name": "Планшет", "group_label": "Дети", "owner": "Миша",
              "blocked_manual": True, "paused_until": None, "speed_limit": "5M/20M"}]
     text = texts.format_devices(rows)
     assert "Планшет" in text and "⛔" in text and "🐢 5M/20M" in text
     assert texts.format_devices([]) == "Устройств пока нет."
+
+
+def test_format_devices_groups_by_owner_with_online():
+    rows = [
+        {"id": 2, "name": "mystery", "group_label": "Неизвестные", "owner": None,
+         "blocked_manual": False, "paused_until": None, "speed_limit": "", "online": False},
+        {"id": 1, "name": "Планшет", "group_label": "Дети", "owner": "Миша",
+         "blocked_manual": False, "paused_until": None, "speed_limit": "", "online": True},
+        {"id": 3, "name": "Ноут", "group_label": "Взрослые", "owner": "Папа",
+         "blocked_manual": False, "paused_until": None, "speed_limit": "", "online": False},
+    ]
+    text = texts.format_devices(rows)
+    # люди по алфавиту, безхозные — в конце под «Неизвестные»
+    assert text.index("Миша:") < text.index("Папа:") < text.index("Неизвестные:")
+    assert "🟢 #1 Планшет (Дети)" in text
+    assert "⚪ #3 Ноут (Взрослые)" in text
+    assert "Роутер недоступен" not in text
+
+
+def test_format_devices_router_down_marks_unknown():
+    rows = [{"id": 1, "name": "Планшет", "group_label": "Дети", "owner": None,
+             "blocked_manual": False, "paused_until": None, "speed_limit": "",
+             "online": None}]
+    text = texts.format_devices(rows)
+    assert "⚪ #1 Планшет" in text
+    assert "Роутер недоступен — онлайн-статус неизвестен" in text
 
 
 def test_health_debounce():
@@ -85,6 +134,28 @@ def test_notification_cursor(db):
     assert collect_notifications(db) == []  # повторно не отдаёт
 
 
+def test_quota_block_notification_with_bonus_button(db):
+    """Блокировка по квоте не молчит: событие с MAC доходит до бота,
+    кнопка «+30 мин» ведёт в тот же callback, что и /bonus."""
+    from app.bot.handlers import bonus_keyboard
+
+    dev = Device(mac="AA:00:00:00:00:09", ip="192.168.88.79", name="Планшет")
+    db.add(dev)
+    db.commit()
+    assert collect_notifications(db) == []  # инициализация курсора
+
+    log_event(db, "quota_block",
+              f"Квота на интернет исчерпана: Планшет ({dev.mac}, {dev.ip}) — "
+              "доступ выключен до полуночи.")
+    found = collect_notifications(db)
+    assert [(n.kind, n.device.id) for n in found] == [("quota_block", dev.id)]
+
+    kb = bonus_keyboard(dev.id)
+    assert kb.inline_keyboard[0][0].callback_data == (
+        f"pick:add_bonus_time:{dev.id}:30:internet"
+    )
+
+
 def test_new_device_keyboard():
     from app.bot.handlers import new_device_keyboard
 
@@ -93,3 +164,18 @@ def test_new_device_keyboard():
     data = {b.callback_data for b in flat}
     assert {"nd:5:assign:1", "nd:5:assign:2", "nd:5:block", "nd:5:skip"} <= data
     assert any("Дети" in b.text for b in flat)
+
+
+def test_device_pick_keyboard():
+    from app.bot.handlers import MAX_PICK_BUTTONS, device_pick_keyboard
+
+    kb = device_pick_keyboard([(1, "Планшет"), (2, "Телефон")], "pause_internet", ":60")
+    flat = [b for row in kb.inline_keyboard for b in row]
+    data = [b.callback_data for b in flat]
+    assert "pick:pause_internet:1:60" in data and "pick:pause_internet:2:60" in data
+    assert data[-1] == "pick:cancel"
+
+    # длинный список обрезается, кнопка отмены остаётся
+    kb = device_pick_keyboard([(i, f"dev{i}") for i in range(20)], "block_device")
+    assert len(kb.inline_keyboard) == MAX_PICK_BUTTONS + 1
+    assert kb.inline_keyboard[0][0].callback_data == "pick:block_device:0"

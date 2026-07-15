@@ -13,6 +13,7 @@ Telegram-бот читают и меняют состояние системы. 
 """
 
 import inspect
+import json
 import re
 import typing
 from collections.abc import Callable
@@ -30,6 +31,7 @@ from ..models import (
     DeviceMac,
     EventLog,
     Pause,
+    PendingAction,
     Person,
     Quota,
     QuotaBonus,
@@ -126,6 +128,29 @@ def run_tool(db: Session, name: str, args: dict, source: str = "ai",
 
 # ---------- помощники (не инструменты) ----------
 
+def save_pending(db: Session, tool_name: str, args: dict, description: str) -> int:
+    """Сохраняет мутацию, ожидающую кнопку подтверждения в Telegram.
+    В базе, а не в памяти бота: кнопки переживают деплой (CD рестартит
+    бота на каждый push в main)."""
+    row = PendingAction(tool=tool_name, args=json.dumps(args, ensure_ascii=False),
+                        description=description)
+    db.add(row)
+    db.commit()
+    return row.id
+
+
+def pop_pending(db: Session, pending_id: int) -> tuple[str, dict, str] | None:
+    """Забирает отложенную мутацию — одноразово: повторное нажатие кнопки
+    получит None. Возвращает (tool, args, description)."""
+    row = db.get(PendingAction, pending_id)
+    if row is None:
+        return None
+    out = (row.tool, json.loads(row.args or "{}"), row.description)
+    db.delete(row)
+    db.commit()
+    return out
+
+
 def find_device(db: Session, query: str) -> Device | None:
     """Ищет устройство по id, MAC, точному или частичному имени (без регистра).
     Используется и ботом (/block <имя>), и инструментами с target-строкой."""
@@ -145,6 +170,18 @@ def find_device(db: Session, query: str) -> Device | None:
         return exact[0]
     partial = [d for d in devices if q.lower() in d.name.lower()]
     return partial[0] if len(partial) == 1 else None
+
+
+def find_device_candidates(db: Session, query: str = "") -> list[Device]:
+    """Кандидаты для выбора устройства кнопками: пустой запрос — все
+    устройства, иначе частичные совпадения по имени (без регистра).
+    Дополняет find_device: тот при 2+ совпадениях возвращает None, и бот
+    вместо ложного «не нашёл» показывает инлайн-кнопки с кандидатами."""
+    q = query.strip().lower()
+    devices = sorted(db.scalars(select(Device)), key=lambda d: d.name.lower())
+    if not q:
+        return devices
+    return [d for d in devices if q in d.name.lower()]
 
 
 def _device_or_error(db: Session, device_id: int) -> Device:
@@ -189,16 +226,28 @@ _LIMIT_RE = re.compile(r"^\d+(\.\d+)?[KMG]?/\d+(\.\d+)?[KMG]?$", re.IGNORECASE)
 @tool()
 def list_devices(db: Session) -> list[dict]:
     """Список всех известных устройств домашней сети: имя, MAC, IP, группа
-    (kid/adult/guest/unknown), владелец, ручная блокировка, лимит скорости,
+    (kid/adult/guest/unknown), владелец, онлайн (true/false; null — роутер
+    недоступен, статус неизвестен), ручная блокировка, лимит скорости,
     активная пауза."""
+    online: set[str] = set()
+    router_ok = True
+    try:
+        with mikrotik.api_session() as api:  # одна сессия на весь список
+            online = mikrotik.get_online_ips(api)
+    except mikrotik.MikrotikError:
+        router_ok = False  # пометка в ответе: online=null у всех устройств
     pauses = active_pauses(db)
-    return [_device_row(d, pauses) for d in db.scalars(select(Device))]
+    rows = [_device_row(d, pauses) for d in db.scalars(select(Device))]
+    for r in rows:
+        r["online"] = (bool(r["ip"]) and r["ip"] in online) if router_ok else None
+    return rows
 
 
 @tool()
 def get_status(db: Session) -> dict:
     """Сводка состояния системы: доступность роутера и AdGuard, счётчики
-    устройств (всего/онлайн/заблокировано), активные паузы, статистика DNS."""
+    устройств (всего/онлайн/заблокировано), активные паузы, статистика DNS,
+    прогресс квот экранного времени по устройствам (screen_time)."""
     online: set[str] = set()
     router_ok = False
     try:
@@ -216,6 +265,7 @@ def get_status(db: Session) -> dict:
         pass
     devices = list(db.scalars(select(Device)))
     pauses = active_pauses(db)
+    prog = quota_svc.progress(db, devices)  # экранное время: только у кого есть квоты
     return {
         "router_ok": router_ok,
         "adguard_ok": adguard_ok,
@@ -230,6 +280,11 @@ def get_status(db: Session) -> dict:
         ],
         "dns_queries_today": stats.get("num_dns_queries"),
         "dns_blocked_today": stats.get("num_blocked_filtering"),
+        "screen_time": [
+            {"device": dev.name, "category": p["category"], "label": p["label"],
+             "used_minutes": p["used"], "limit_minutes": p["limit"]}
+            for dev in devices for p in prog.get(dev.id, [])
+        ],
     }
 
 

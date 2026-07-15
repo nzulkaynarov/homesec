@@ -2,8 +2,9 @@
 
 from sqlalchemy import create_engine, text
 
+from app.db import Base
 from app.db import engine as app_engine
-from app.migrations import run_migrations
+from app.migrations import MIGRATIONS, run_migrations
 
 
 def test_migrations_apply_once_in_order(tmp_path):
@@ -18,6 +19,21 @@ def test_migrations_apply_once_in_order(tmp_path):
         assert c.execute(text("PRAGMA user_version")).scalar() == 2
         c.execute(text("INSERT INTO a VALUES (1)"))
         c.execute(text("INSERT INTO b VALUES (1)"))
+
+
+def test_migration_2_survives_precreated_table(tmp_path):
+    """Как на проде: ensure_schema сначала зовёт create_all (тот уже создаёт
+    pending_actions), потом миграции — №2 обязана пережить готовую таблицу."""
+    eng = create_engine(f"sqlite:///{tmp_path / 'p.db'}")
+    Base.metadata.create_all(eng)
+    migs = [m for m in MIGRATIONS if m[0] == 2]
+    assert run_migrations(eng, migs) == 1  # не упала, версия проставлена
+    with eng.begin() as c:
+        assert c.execute(text("PRAGMA user_version")).scalar() == 2
+        c.execute(text(
+            "INSERT INTO pending_actions (tool, args, description, created) "
+            "VALUES ('block_device', '{}', 'тест', '2026-07-15 12:00:00')"
+        ))
 
 
 def test_app_db_uses_wal():

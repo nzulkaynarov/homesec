@@ -10,14 +10,14 @@ import pytest
 from app.ai import analyst, client, orchestrator, watchdog
 from app.config import settings
 from app.db import Base, engine, session
-from app.models import Device, EventLog, KVState, Pause, Person, kv_set
+from app.models import Device, EventLog, KVState, Pause, Person, QuotaUsage, kv_set
 
 
 @pytest.fixture
 def db():
     Base.metadata.create_all(engine)
     s = session()
-    for model in (Pause, EventLog, KVState, Device, Person):
+    for model in (Pause, EventLog, KVState, QuotaUsage, Device, Person):
         s.query(model).delete()
     s.commit()
     yield s
@@ -191,3 +191,24 @@ def test_digest_data_collects_kid_domains(db, kid_device, monkeypatch):
     )
     data = analyst.collect_digest_data(db)
     assert data["kid_top_domains"]["Планшет"][0] == "youtube.com"
+
+
+def test_digest_data_and_fallback_include_screen_time(db, kid_device, monkeypatch):
+    """«Экранное время за день» из ТЗ фазы 2: активные минуты из QuotaUsage."""
+    monkeypatch.setattr(analyst.adguard, "get_stats", lambda: {})
+    monkeypatch.setattr(analyst.adguard, "get_query_log", lambda limit=1000: [])
+    today = datetime.now().strftime("%Y-%m-%d")
+    db.add(QuotaUsage(device_id=kid_device.id, date=today, category="games", minutes=45))
+    db.add(QuotaUsage(device_id=kid_device.id, date=today, category="internet", minutes=90))
+    # вчерашние минуты в «сегодня» не попадают
+    db.add(QuotaUsage(device_id=kid_device.id, date="2020-01-01", category="games",
+                      minutes=999))
+    db.commit()
+
+    data = analyst.collect_digest_data(db)
+    assert data["screen_time"] == {
+        "Планшет": {"Игры": 45, "Интернет целиком": 90}
+    }
+    assert not client.is_configured()
+    text = analyst.daily_digest(db)  # деградация без ключа — строка всё равно есть
+    assert "⏳ Планшет" in text and "45 мин" in text
