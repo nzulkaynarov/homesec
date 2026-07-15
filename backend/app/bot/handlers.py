@@ -63,7 +63,12 @@ async def _do_tool(message: Message, name: str, args: dict) -> None:
     await message.answer(str(result))
 
 
-@router.message(Command("start", "help"))
+@router.message(Command("start"))
+async def cmd_start(message: Message) -> None:
+    await message.answer(texts.START)
+
+
+@router.message(Command("help"))
 async def cmd_help(message: Message) -> None:
     await message.answer(texts.HELP)
 

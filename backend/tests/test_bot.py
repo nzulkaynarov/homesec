@@ -1,6 +1,8 @@
 """Логика бота без Telegram: форматирование, антидребезг health-мониторинга,
 курсор уведомлений о новых устройствах."""
 
+import re
+
 import pytest
 
 from app.bot import texts
@@ -19,6 +21,23 @@ def db():
     s.commit()
     yield s
     s.close()
+
+
+def test_bot_commands_menu():
+    commands = [c for c, _ in texts.BOT_COMMANDS]
+    assert len(commands) == len(set(commands))  # без дублей
+    for cmd, desc in texts.BOT_COMMANDS:
+        assert re.fullmatch(r"[a-z0-9_]{1,32}", cmd)  # формат Telegram
+        assert 1 <= len(desc) <= 256 and desc[0].isupper()  # описания по-русски
+        if cmd != "help":
+            assert f"/{cmd}" in texts.HELP  # меню не расходится со справкой
+
+
+def test_start_is_short_greeting():
+    # /start — короткое приветствие с главными командами, а не простыня /help
+    assert len(texts.START) < len(texts.HELP)
+    for cmd in ("/status", "/devices", "/help"):
+        assert cmd in texts.START
 
 
 def test_format_status_and_devices():

@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher, F
+from aiogram.types import BotCommand
 
 from .. import db as dbmod
 from ..ai import analyst, watchdog
@@ -144,6 +145,13 @@ async def main() -> None:
     ensure_schema(engine, Base.metadata)
 
     bot = Bot(token=settings.telegram_bot_token)
+    try:
+        # Меню команд по «/» — обнаруживаемость команд без чтения /help
+        await bot.set_my_commands(
+            [BotCommand(command=c, description=d) for c, d in texts.BOT_COMMANDS]
+        )
+    except Exception:
+        log.warning("не удалось зарегистрировать меню команд", exc_info=True)
     dp = Dispatcher()
     # Доступ только из разрешённых чатов; остальные игнорируются молча
     handlers.router.message.filter(F.chat.id.in_(allowed))
