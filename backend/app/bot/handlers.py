@@ -15,7 +15,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .. import db as dbmod
 from ..ai import client as ai_client
 from ..ai import orchestrator, tools
-from ..models import GROUP_LABELS, Person
+from ..models import GROUP_LABELS, GROUPS, Person
 from . import texts
 
 log = logging.getLogger("homesec.bot")
@@ -76,6 +76,94 @@ async def _do_tool(message: Message, name: str, args: dict) -> None:
     await message.answer(str(result))
 
 
+# ---------- выбор устройства кнопками ----------
+
+MAX_PICK_BUTTONS = 12  # длиннее список — нечитаемая простыня кнопок
+
+
+def device_pick_keyboard(devices: list[tuple[int, str]], tool: str,
+                         extra: str = "") -> InlineKeyboardMarkup:
+    """Кнопки-кандидаты. devices: (id, имя). Callback-данные:
+    pick:<tool>:<dev_id><extra>, где extra — доп. аргументы команды,
+    напр. «:60» для /pause или «:30:games» для /bonus."""
+    rows = [
+        [InlineKeyboardButton(text=name, callback_data=f"pick:{tool}:{dev_id}{extra}")]
+        for dev_id, name in devices[:MAX_PICK_BUTTONS]
+    ]
+    rows.append([InlineKeyboardButton(text="✖ Отмена", callback_data="pick:cancel")])
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+def _find_candidates(query: str) -> list[tuple[int, str]]:
+    s = dbmod.session()
+    try:
+        return [(d.id, d.name) for d in tools.find_device_candidates(s, query)]
+    finally:
+        s.close()
+
+
+async def _pick_device(message: Message, query: str, tool: str, extra: str = "") -> None:
+    """Когда имя не задано или неоднозначно — кнопки с кандидатами вместо
+    ложного «не нашёл»."""
+    candidates = await asyncio.to_thread(_find_candidates, query)
+    if not candidates:
+        await message.answer(f"Не нашёл устройство «{query}». /devices покажет список.")
+        return
+    text = (f"Нашлось несколько устройств по «{query}» — выберите:" if query
+            else "Выберите устройство:")
+    if len(candidates) > MAX_PICK_BUTTONS:
+        text += f"\n(показаны первые {MAX_PICK_BUTTONS} — уточните имя)"
+    await message.answer(text, reply_markup=device_pick_keyboard(candidates, tool, extra))
+
+
+async def _target_command(message: Message, tool_name: str, target: str,
+                          args: dict, extra: str = "") -> None:
+    """Команды с целью-строкой (пауза/резюм/бонус): группа исполняется сразу,
+    устройство — с кнопками выбора при пустом или неоднозначном имени."""
+    if target in GROUPS:
+        await _do_tool(message, tool_name, {"target": target, **args})
+        return
+    if target:
+        dev_id = await asyncio.to_thread(_find_device_id, target)
+        if dev_id is not None:
+            await _do_tool(message, tool_name, {"target": str(dev_id), **args})
+            return
+    await _pick_device(message, target, tool_name, extra)
+
+
+@router.callback_query(F.data.startswith("pick:"))
+async def cb_pick(cb: CallbackQuery) -> None:
+    parts = (cb.data or "").split(":")
+    if parts[1] == "cancel":
+        await cb.answer()
+        if isinstance(cb.message, Message):
+            await cb.message.edit_text("Отменено.", reply_markup=None)
+        return
+    tool_name, dev_id = parts[1], int(parts[2])
+    args: dict[str, Any]
+    if tool_name in ("block_device", "unblock_device"):
+        args = {"device_id": dev_id}
+    elif tool_name == "pause_internet":
+        args = {"target": str(dev_id), "minutes": int(parts[3])}
+    elif tool_name == "resume_internet":
+        args = {"target": str(dev_id)}
+    elif tool_name == "add_bonus_time":
+        args = {"target": str(dev_id), "minutes": int(parts[3]), "category": parts[4]}
+    else:
+        await cb.answer()
+        return
+    try:
+        result = await asyncio.to_thread(run_tool_sync, tool_name, args)
+    except tools.ToolError as e:
+        result = f"Не получилось: {e}"
+    except Exception:
+        log.exception("инструмент %s упал", tool_name)
+        result = "Ошибка при выполнении, подробности в журнале."
+    await cb.answer()
+    if isinstance(cb.message, Message):
+        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
+
+
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     await message.answer(texts.START)
@@ -115,12 +203,12 @@ async def cmd_digest(message: Message) -> None:
 
 async def _device_command(message: Message, command: CommandObject, tool_name: str) -> None:
     query = (command.args or "").strip()
-    if not query:
-        await message.answer(f"Использование: /{command.command} <имя|id>")
+    if not query:  # без аргумента — выбор из всех устройств кнопками
+        await _pick_device(message, "", tool_name)
         return
     dev_id = await asyncio.to_thread(_find_device_id, query)
-    if dev_id is None:
-        await message.answer(f"Не нашёл устройство «{query}». /devices покажет список.")
+    if dev_id is None:  # неоднозначно или не найдено — кнопки с кандидатами
+        await _pick_device(message, query, tool_name)
         return
     await _do_tool(message, tool_name, {"device_id": dev_id})
 
@@ -138,20 +226,19 @@ async def cmd_unblock(message: Message, command: CommandObject) -> None:
 @router.message(Command("pause"))
 async def cmd_pause(message: Message, command: CommandObject) -> None:
     parts = (command.args or "").split()
-    if len(parts) < 2 or not parts[-1].isdigit():
-        await message.answer("Использование: /pause <имя|группа> <минут>\nНапример: /pause kid 60")
+    if not parts or not parts[-1].isdigit():
+        await message.answer("Использование: /pause [имя|группа] <минут>\n"
+                             "Например: /pause kid 60 или просто /pause 60 — выбор кнопками")
         return
     target, minutes = " ".join(parts[:-1]), int(parts[-1])
-    await _do_tool(message, "pause_internet", {"target": target, "minutes": minutes})
+    await _target_command(message, "pause_internet", target,
+                          {"minutes": minutes}, extra=f":{minutes}")
 
 
 @router.message(Command("resume"))
 async def cmd_resume(message: Message, command: CommandObject) -> None:
     target = (command.args or "").strip()
-    if not target:
-        await message.answer("Использование: /resume <имя|группа>")
-        return
-    await _do_tool(message, "resume_internet", {"target": target})
+    await _target_command(message, "resume_internet", target, {})
 
 
 @router.message(Command("bonus"))
@@ -159,18 +246,19 @@ async def cmd_bonus(message: Message, command: CommandObject) -> None:
     from ..services.quota import QUOTA_CATEGORIES
 
     parts = (command.args or "").split()
-    usage = ("Использование: /bonus <кто> <минут> [категория]\n"
-             "Например: /bonus Миша 30 games\n"
+    usage = ("Использование: /bonus [кто] <минут> [категория]\n"
+             "Например: /bonus Миша 30 games (без имени — выбор кнопками)\n"
              f"Категории: {', '.join(QUOTA_CATEGORIES)} (по умолчанию internet)")
     category = "internet"
     if parts and parts[-1].lower() in QUOTA_CATEGORIES:
         category = parts.pop().lower()
-    if len(parts) < 2 or not parts[-1].isdigit():
+    if not parts or not parts[-1].isdigit():
         await message.answer(usage)
         return
     target, minutes = " ".join(parts[:-1]), int(parts[-1])
-    await _do_tool(message, "add_bonus_time",
-                   {"target": target, "minutes": minutes, "category": category})
+    await _target_command(message, "add_bonus_time", target,
+                          {"minutes": minutes, "category": category},
+                          extra=f":{minutes}:{category}")
 
 
 # ---------- кнопки под уведомлением о новом устройстве ----------

@@ -164,6 +164,18 @@ def test_find_device(db, dev):
     assert tools.find_device(db, "нет такого") is None
 
 
+def test_find_device_candidates(db, dev):
+    db.add(Device(mac="AA:00:00:00:00:02", ip="192.168.88.31", name="Планшет старый"))
+    db.commit()
+    # неоднозначный запрос, на котором find_device возвращает None
+    assert tools.find_device(db, "планш") is None
+    names = [d.name for d in tools.find_device_candidates(db, "планш")]
+    assert names == ["Планшет", "Планшет старый"]  # сортировка по имени
+    # пустой запрос — все устройства (для команды без аргумента)
+    assert len(tools.find_device_candidates(db, "")) == 2
+    assert tools.find_device_candidates(db, "нет такого") == []
+
+
 def test_list_devices_and_events(db, dev, no_reconcile):
     tools.run_tool(db, "pause_internet", {"target": "kid", "minutes": 30})
     rows = tools.run_tool(db, "list_devices", {})

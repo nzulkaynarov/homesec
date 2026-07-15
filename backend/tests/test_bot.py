@@ -112,3 +112,18 @@ def test_new_device_keyboard():
     data = {b.callback_data for b in flat}
     assert {"nd:5:assign:1", "nd:5:assign:2", "nd:5:block", "nd:5:skip"} <= data
     assert any("Дети" in b.text for b in flat)
+
+
+def test_device_pick_keyboard():
+    from app.bot.handlers import MAX_PICK_BUTTONS, device_pick_keyboard
+
+    kb = device_pick_keyboard([(1, "Планшет"), (2, "Телефон")], "pause_internet", ":60")
+    flat = [b for row in kb.inline_keyboard for b in row]
+    data = [b.callback_data for b in flat]
+    assert "pick:pause_internet:1:60" in data and "pick:pause_internet:2:60" in data
+    assert data[-1] == "pick:cancel"
+
+    # длинный список обрезается, кнопка отмены остаётся
+    kb = device_pick_keyboard([(i, f"dev{i}") for i in range(20)], "block_device")
+    assert len(kb.inline_keyboard) == MAX_PICK_BUTTONS + 1
+    assert kb.inline_keyboard[0][0].callback_data == "pick:block_device:0"

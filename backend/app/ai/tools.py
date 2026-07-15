@@ -172,6 +172,18 @@ def find_device(db: Session, query: str) -> Device | None:
     return partial[0] if len(partial) == 1 else None
 
 
+def find_device_candidates(db: Session, query: str = "") -> list[Device]:
+    """Кандидаты для выбора устройства кнопками: пустой запрос — все
+    устройства, иначе частичные совпадения по имени (без регистра).
+    Дополняет find_device: тот при 2+ совпадениях возвращает None, и бот
+    вместо ложного «не нашёл» показывает инлайн-кнопки с кандидатами."""
+    q = query.strip().lower()
+    devices = sorted(db.scalars(select(Device)), key=lambda d: d.name.lower())
+    if not q:
+        return devices
+    return [d for d in devices if q in d.name.lower()]
+
+
 def _device_or_error(db: Session, device_id: int) -> Device:
     dev = db.get(Device, device_id)
     if dev is None:
