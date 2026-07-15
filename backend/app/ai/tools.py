@@ -226,10 +226,21 @@ _LIMIT_RE = re.compile(r"^\d+(\.\d+)?[KMG]?/\d+(\.\d+)?[KMG]?$", re.IGNORECASE)
 @tool()
 def list_devices(db: Session) -> list[dict]:
     """Список всех известных устройств домашней сети: имя, MAC, IP, группа
-    (kid/adult/guest/unknown), владелец, ручная блокировка, лимит скорости,
+    (kid/adult/guest/unknown), владелец, онлайн (true/false; null — роутер
+    недоступен, статус неизвестен), ручная блокировка, лимит скорости,
     активная пауза."""
+    online: set[str] = set()
+    router_ok = True
+    try:
+        with mikrotik.api_session() as api:  # одна сессия на весь список
+            online = mikrotik.get_online_ips(api)
+    except mikrotik.MikrotikError:
+        router_ok = False  # пометка в ответе: online=null у всех устройств
     pauses = active_pauses(db)
-    return [_device_row(d, pauses) for d in db.scalars(select(Device))]
+    rows = [_device_row(d, pauses) for d in db.scalars(select(Device))]
+    for r in rows:
+        r["online"] = (bool(r["ip"]) and r["ip"] in online) if router_ok else None
+    return rows
 
 
 @tool()

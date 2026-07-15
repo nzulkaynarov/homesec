@@ -181,5 +181,22 @@ def test_list_devices_and_events(db, dev, no_reconcile):
     rows = tools.run_tool(db, "list_devices", {})
     assert rows[0]["name"] == "Планшет" and rows[0]["group"] == "kid"
     assert rows[0]["paused_until"]  # пауза группы видна на устройстве
+    assert rows[0]["online"] is None  # роутер в тестах недоступен — «неизвестно»
     events = tools.run_tool(db, "get_recent_events", {"limit": 5})
     assert events and events[0]["kind"] == "ai_action"
+
+
+def test_list_devices_online_from_router(db, dev, monkeypatch):
+    import contextlib
+
+    @contextlib.contextmanager
+    def fake_session():
+        yield "api"
+
+    monkeypatch.setattr(tools.mikrotik, "api_session", fake_session)
+    monkeypatch.setattr(tools.mikrotik, "get_online_ips", lambda api: {"192.168.88.30"})
+    db.add(Device(mac="AA:00:00:00:00:03", ip="192.168.88.32", name="офлайн"))
+    db.commit()
+    rows = {r["name"]: r for r in tools.run_tool(db, "list_devices", {})}
+    assert rows["Планшет"]["online"] is True
+    assert rows["офлайн"]["online"] is False

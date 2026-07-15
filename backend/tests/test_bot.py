@@ -59,6 +59,32 @@ def test_format_status_and_devices():
     assert texts.format_devices([]) == "Устройств пока нет."
 
 
+def test_format_devices_groups_by_owner_with_online():
+    rows = [
+        {"id": 2, "name": "mystery", "group_label": "Неизвестные", "owner": None,
+         "blocked_manual": False, "paused_until": None, "speed_limit": "", "online": False},
+        {"id": 1, "name": "Планшет", "group_label": "Дети", "owner": "Миша",
+         "blocked_manual": False, "paused_until": None, "speed_limit": "", "online": True},
+        {"id": 3, "name": "Ноут", "group_label": "Взрослые", "owner": "Папа",
+         "blocked_manual": False, "paused_until": None, "speed_limit": "", "online": False},
+    ]
+    text = texts.format_devices(rows)
+    # люди по алфавиту, безхозные — в конце под «Неизвестные»
+    assert text.index("Миша:") < text.index("Папа:") < text.index("Неизвестные:")
+    assert "🟢 #1 Планшет (Дети)" in text
+    assert "⚪ #3 Ноут (Взрослые)" in text
+    assert "Роутер недоступен" not in text
+
+
+def test_format_devices_router_down_marks_unknown():
+    rows = [{"id": 1, "name": "Планшет", "group_label": "Дети", "owner": None,
+             "blocked_manual": False, "paused_until": None, "speed_limit": "",
+             "online": None}]
+    text = texts.format_devices(rows)
+    assert "⚪ #1 Планшет" in text
+    assert "Роутер недоступен — онлайн-статус неизвестен" in text
+
+
 def test_health_debounce():
     up = {"ok": False}
     monitor = HealthMonitor(checks={"svc": lambda: up["ok"]}, fail_after=3, ok_after=2)

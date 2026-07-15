@@ -65,19 +65,32 @@ def format_status(s: dict) -> str:
 
 
 def format_devices(rows: list[dict]) -> str:
+    """Группировка по владельцам (люди по алфавиту, безхозные — в конце под
+    «Неизвестные»), метка онлайн 🟢/⚪ (online=None — роутер недоступен)."""
     if not rows:
         return "Устройств пока нет."
-    lines = ["Устройства"]
+    by_owner: dict[str, list[dict]] = {}
     for r in rows:
-        marks = ""
-        if r["blocked_manual"]:
-            marks += " ⛔"
-        if r["paused_until"]:
-            marks += f" ⏸ до {r['paused_until'][11:16]}"
-        if r["speed_limit"]:
-            marks += f" 🐢 {r['speed_limit']}"
-        owner = f", {r['owner']}" if r["owner"] else ""
-        lines.append(f"• #{r['id']} {r['name']} ({r['group_label']}{owner}){marks}")
+        by_owner.setdefault(r.get("owner") or "", []).append(r)
+    owners = sorted(k for k in by_owner if k)
+    if "" in by_owner:
+        owners.append("")
+
+    lines = ["Устройства"]
+    for owner in owners:
+        lines += ["", f"{owner or 'Неизвестные'}:"]
+        for r in by_owner[owner]:
+            marks = ""
+            if r["blocked_manual"]:
+                marks += " ⛔"
+            if r["paused_until"]:
+                marks += f" ⏸ до {r['paused_until'][11:16]}"
+            if r["speed_limit"]:
+                marks += f" 🐢 {r['speed_limit']}"
+            dot = "🟢" if r.get("online") else "⚪"
+            lines.append(f"{dot} #{r['id']} {r['name']} ({r['group_label']}){marks}")
+    if any(r.get("online") is None for r in rows):
+        lines += ["", "⚠️ Роутер недоступен — онлайн-статус неизвестен"]
     return "\n".join(lines)
 
 
