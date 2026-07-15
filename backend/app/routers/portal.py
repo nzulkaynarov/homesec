@@ -49,7 +49,7 @@ async def blocked_page(request: Request, db: Session = Depends(get_db)):
     dev = db.scalar(select(Device).where(Device.ip == ip)) if ip else None
     ctx = {"info": info, "device": dev,
            "pending": bonus.has_fresh_pending(db, dev.id) if dev else False,
-           "can_request": bool(dev) and bonus.can_request(db, dev.id)}
+           "can_request": dev is not None and bonus.can_request(db, dev.id)}
     return templates.TemplateResponse(request, "blocked.html", ctx)
 
 

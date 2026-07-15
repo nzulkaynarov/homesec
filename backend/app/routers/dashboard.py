@@ -1,4 +1,5 @@
 import logging
+from datetime import datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
@@ -18,9 +19,9 @@ router = APIRouter()
 _ROLE_ORDER = {"kid": 0, "adult": 1, "guest": 2}
 
 
-def _pause_map(db: Session, devices: list[Device]) -> dict[int, object]:
+def _pause_map(db: Session, devices: list[Device]) -> dict[int, datetime]:
     """{device_id: до какого времени пауза} — учитывает и личные, и групповые."""
-    out: dict[int, object] = {}
+    out: dict[int, datetime] = {}
     for p in active_pauses(db):
         for d in devices:
             hit = (p.target_type == "device" and p.target == str(d.id)) or (
