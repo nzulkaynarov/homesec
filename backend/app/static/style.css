@@ -71,6 +71,38 @@ form.inline { display: inline; }
 .error { color: var(--bad); }
 code { background: var(--panel); padding: 1px 6px; border-radius: 6px; }
 
+/* Родительская консоль на дашборде */
+.console-card {
+  background: var(--panel); border: 1px solid var(--border); border-radius: 12px;
+  padding: 12px 16px; margin: 12px 0;
+}
+.console-head { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-bottom: 8px; }
+.console-head .group-qa { margin-left: auto; display: flex; gap: 6px; flex-wrap: wrap; }
+.dev-line { border-top: 1px solid var(--border); padding: 10px 0; }
+.dev-line:first-of-type { border-top: none; }
+.dev-line.paused { opacity: .72; }
+.dev-name { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.dev-name a { color: var(--text); text-decoration: none; font-weight: 600; }
+.dev-name a:hover { color: var(--accent); }
+.badge {
+  font-size: 11px; padding: 1px 8px; border-radius: 20px;
+  background: var(--border); color: var(--muted);
+}
+.badge.bad { background: rgba(231,76,60,.18); color: var(--bad); }
+.qbars { margin: 8px 0 6px; display: flex; flex-direction: column; gap: 4px; max-width: 460px; }
+.qbar-row { display: flex; align-items: center; gap: 8px; font-size: 12px; }
+.qbar-label { color: var(--muted); width: 120px; flex: none; }
+.qbar-track {
+  flex: 1; height: 8px; background: var(--bg);
+  border: 1px solid var(--border); border-radius: 6px; overflow: hidden;
+}
+.qbar-fill { display: block; height: 100%; background: var(--good); }
+.qbar-fill.over { background: var(--bad); }
+.qbar-num { width: 62px; flex: none; text-align: right; color: var(--muted); }
+.qbar-num.over { color: var(--bad); }
+.qa { display: flex; gap: 6px; flex-wrap: wrap; margin-top: 6px; }
+.qa button { padding: 4px 10px; font-size: 13px; }
+
 .login-page { display: flex; min-height: 100vh; align-items: center; justify-content: center; }
 .login-box {
   background: var(--panel); border: 1px solid var(--border); border-radius: 16px;

@@ -2,7 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from fastapi import FastAPI
+from fastapi import FastAPI, Request
 from fastapi.staticfiles import StaticFiles
 from sqlalchemy import select
 
@@ -43,6 +43,26 @@ async def lifespan(app: FastAPI):
 
 
 app = FastAPI(title="HomeSec", lifespan=lifespan)
+
+# Security-заголовки: панель за NAT и только для одного админа, но глубина
+# защиты дешёвая. CSP запрещает подгрузку чужих ресурсов и вложение во фрейм
+# (кликджекинг); 'unsafe-inline' оставлен из-за инлайновых стилей блок-страницы
+# и onsubmit-подтверждений — без него они бы отвалились.
+_CSP = ("default-src 'self'; style-src 'self' 'unsafe-inline'; "
+        "script-src 'self' 'unsafe-inline'; img-src 'self' data:; "
+        "frame-ancestors 'none'; base-uri 'self'; form-action 'self'")
+
+
+@app.middleware("http")
+async def security_headers(request: Request, call_next):
+    resp = await call_next(request)
+    resp.headers.setdefault("Content-Security-Policy", _CSP)
+    resp.headers.setdefault("X-Content-Type-Options", "nosniff")
+    resp.headers.setdefault("X-Frame-Options", "DENY")
+    resp.headers.setdefault("Referrer-Policy", "same-origin")
+    return resp
+
+
 app.middleware("http")(auth_middleware)
 app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")), name="static")
 

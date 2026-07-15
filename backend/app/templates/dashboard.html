@@ -20,6 +20,96 @@
   AdGuard Home: {% if adguard_ok %}<span class="ok">✔ подключён</span>{% else %}<span class="bad">✘ недоступен</span>{% endif %}
 </p>
 
+{# ——— Родительская консоль: карточки по людям, дети сверху ——— #}
+{% macro quota_bar(q) %}
+  {% set pct = 100 if q.limit == 0 else (q.used * 100 // q.limit) %}
+  {% set over = q.used >= q.limit %}
+  <div class="qbar-row">
+    <span class="qbar-label">{{ q.label }}</span>
+    <span class="qbar-track"><span class="qbar-fill {{ 'over' if over }}"
+          style="width: {{ 100 if pct > 100 else pct }}%"></span></span>
+    <span class="qbar-num {{ 'over' if over }}">{{ q.used }}/{{ q.limit }}м</span>
+  </div>
+{% endmacro %}
+
+{% macro dev_actions(card) %}
+  {% set d = card.dev %}
+  <div class="qa">
+    {% if card.paused_until or d.blocked_manual %}
+      <form method="post" action="/devices/{{ d.id }}/unpause" class="inline">
+        <input type="hidden" name="redirect_to" value="/"><button class="good">▶ Снять паузу</button>
+      </form>
+    {% else %}
+      <form method="post" action="/devices/{{ d.id }}/pause" class="inline">
+        <input type="hidden" name="redirect_to" value="/">
+        <input type="hidden" name="preset" value="30"><button>⏸ 30м</button>
+      </form>
+      <form method="post" action="/devices/{{ d.id }}/pause" class="inline">
+        <input type="hidden" name="redirect_to" value="/">
+        <input type="hidden" name="preset" value="60"><button>⏸ 1ч</button>
+      </form>
+      <form method="post" action="/devices/{{ d.id }}/pause" class="inline">
+        <input type="hidden" name="redirect_to" value="/">
+        <input type="hidden" name="preset" value="morning"><button>⏸ до утра</button>
+      </form>
+    {% endif %}
+    {% for q in card.quota %}
+    <form method="post" action="/devices/{{ d.id }}/bonus" class="inline">
+      <input type="hidden" name="redirect_to" value="/">
+      <input type="hidden" name="category" value="{{ q.category }}">
+      <input type="hidden" name="minutes" value="30">
+      <button title="Добавить 30 минут к «{{ q.label }}» на сегодня">＋30 {{ q.label|truncate(10, True, '') }}</button>
+    </form>
+    {% endfor %}
+  </div>
+{% endmacro %}
+
+<h2>Консоль</h2>
+{% for section in console %}
+<div class="console-card">
+  <div class="console-head">
+    <span class="tag g-{{ section.group }}">{{ GROUP_LABELS[section.group] }}</span>
+    <strong>{{ section.person.name if section.person else 'Без владельца' }}</strong>
+    <span class="hint">· {{ section.devices|length }} устр.</span>
+    {% if section.person and section.group in ['kid', 'guest'] %}
+      <span class="group-qa">
+      {% if section.group in group_paused %}
+        <form method="post" action="/groups/{{ section.group }}/unpause" class="inline">
+          <input type="hidden" name="redirect_to" value="/"><button class="good">▶ Снять со всей группы</button>
+        </form>
+      {% else %}
+        <form method="post" action="/groups/{{ section.group }}/pause" class="inline">
+          <input type="hidden" name="redirect_to" value="/">
+          <input type="hidden" name="preset" value="60"><button>⏸ Пауза группе 1ч</button>
+        </form>
+        <form method="post" action="/groups/{{ section.group }}/pause" class="inline">
+          <input type="hidden" name="redirect_to" value="/">
+          <input type="hidden" name="preset" value="30"><button title="Пауза на ужин">🍽 Ужин (30м)</button>
+        </form>
+      {% endif %}
+      </span>
+    {% endif %}
+  </div>
+
+  {% for card in section.devices %}
+  <div class="dev-line {{ 'paused' if card.paused_until or card.dev.blocked_manual }}">
+    <div class="dev-name">
+      <span title="{{ 'онлайн' if card.online else 'офлайн' }}">{{ '🟢' if card.online else '⚪' }}</span>
+      <a href="/devices">{{ card.dev.name }}</a>
+      {% if card.dev.blocked_manual %}<span class="badge bad">⛔ заблокирован</span>
+      {% elif card.paused_until %}<span class="badge">⏸ до {{ card.paused_until.strftime('%H:%M') }}</span>{% endif %}
+    </div>
+    {% if card.quota %}<div class="qbars">{% for q in card.quota %}{{ quota_bar(q) }}{% endfor %}</div>{% endif %}
+    {{ dev_actions(card) }}
+  </div>
+  {% else %}
+  <div class="hint">Нет устройств.</div>
+  {% endfor %}
+</div>
+{% else %}
+<p class="hint">Пока никого нет. Добавьте людей на странице «Пользователи» и назначьте им устройства.</p>
+{% endfor %}
+
 <h2>Последние события</h2>
 <table>
   <tr><th>Время</th><th>Тип</th><th>Событие</th></tr>

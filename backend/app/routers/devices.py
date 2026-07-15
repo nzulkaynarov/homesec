@@ -1,5 +1,5 @@
 import logging
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from fastapi import APIRouter, BackgroundTasks, Depends, Form, Request
 from fastapi.concurrency import run_in_threadpool
@@ -9,13 +9,38 @@ from sqlalchemy.orm import Session
 
 from .. import db as dbmod
 from ..db import get_db
-from ..models import Device, Person, active_pauses, log_event
+from ..models import (
+    GROUP_LABELS,
+    Device,
+    Pause,
+    Person,
+    QuotaBonus,
+    active_pauses,
+    log_event,
+)
 from ..services import mikrotik, quota
 from ..services.enforcement import reconcile
+from ..services.quota import QUOTA_CATEGORIES
 from ..templates_env import templates
 
 log = logging.getLogger("homesec.devices")
 router = APIRouter()
+
+# Пресеты паузы для кнопок в один тап (минуты). "morning" считается отдельно.
+PAUSE_PRESETS = {"30": 30, "60": 60, "180": 180}
+MORNING_HOUR = 7  # «до утра» = ближайшие 07:00
+
+
+def _pause_until(preset: str, now: datetime | None = None) -> datetime:
+    """Момент окончания паузы по пресету. 'morning' → ближайшие 07:00."""
+    now = now or datetime.now()
+    if preset == "morning":
+        target = now.replace(hour=MORNING_HOUR, minute=0, second=0, microsecond=0)
+        if target <= now:
+            target += timedelta(days=1)
+        return target
+    minutes = PAUSE_PRESETS.get(preset, 60)
+    return now + timedelta(minutes=minutes)
 
 
 def _reconcile_bg() -> None:
@@ -128,3 +153,108 @@ async def delete_device(device_id: int, tasks: BackgroundTasks, db: Session = De
         db.commit()
     tasks.add_task(_reconcile_bg)
     return RedirectResponse("/devices", status_code=302)
+
+
+# ---------- быстрые действия родителя (с дашборда) ----------
+# Пауза и бонус — те же сущности, что создаёт бот; здесь панель даёт их в один
+# тап. redirect_to позволяет вернуть родителя на дашборд, откуда он нажал.
+
+@router.post("/devices/{device_id}/pause")
+async def pause_device(
+    device_id: int,
+    tasks: BackgroundTasks,
+    preset: str = Form("60"),
+    redirect_to: str = Form("/"),
+    db: Session = Depends(get_db),
+):
+    dev = db.get(Device, device_id)
+    if dev:
+        until = _pause_until(preset)
+        db.add(Pause(target_type="device", target=str(dev.id), until=until,
+                     reason="пауза с дашборда"))
+        db.commit()
+        log_event(db, "pause",
+                  f"Пауза: {dev.name} до {until.strftime('%d.%m %H:%M')}")
+    tasks.add_task(_reconcile_bg)
+    return RedirectResponse(_safe_redirect(redirect_to), status_code=302)
+
+
+@router.post("/devices/{device_id}/unpause")
+async def unpause_device(
+    device_id: int,
+    tasks: BackgroundTasks,
+    redirect_to: str = Form("/"),
+    db: Session = Depends(get_db),
+):
+    dev = db.get(Device, device_id)
+    if dev:
+        for p in list(db.scalars(select(Pause).where(
+                Pause.target_type == "device", Pause.target == str(dev.id)))):
+            db.delete(p)
+        db.commit()
+        log_event(db, "unpause", f"Пауза снята: {dev.name}")
+    tasks.add_task(_reconcile_bg)
+    return RedirectResponse(_safe_redirect(redirect_to), status_code=302)
+
+
+@router.post("/devices/{device_id}/bonus")
+async def bonus_device(
+    device_id: int,
+    tasks: BackgroundTasks,
+    category: str = Form("internet"),
+    minutes: int = Form(30),
+    redirect_to: str = Form("/"),
+    db: Session = Depends(get_db),
+):
+    dev = db.get(Device, device_id)
+    if dev and category in QUOTA_CATEGORIES:
+        minutes = max(1, min(int(minutes), 600))
+        db.add(QuotaBonus(target_type="device", target=str(dev.id),
+                          date=datetime.now().strftime("%Y-%m-%d"),
+                          category=category, minutes=minutes,
+                          comment="бонус с дашборда"))
+        db.commit()
+        log_event(db, "bonus", f"Бонус +{minutes} мин ({category}): {dev.name}")
+    tasks.add_task(_reconcile_bg)
+    return RedirectResponse(_safe_redirect(redirect_to), status_code=302)
+
+
+@router.post("/groups/{group}/pause")
+async def pause_group(
+    group: str,
+    tasks: BackgroundTasks,
+    preset: str = Form("60"),
+    redirect_to: str = Form("/"),
+    db: Session = Depends(get_db),
+):
+    if group in GROUP_LABELS:
+        until = _pause_until(preset)
+        db.add(Pause(target_type="group", target=group, until=until,
+                     reason="пауза группы с дашборда"))
+        db.commit()
+        log_event(db, "pause",
+                  f"Пауза группы «{GROUP_LABELS[group]}» до {until.strftime('%d.%m %H:%M')}")
+    tasks.add_task(_reconcile_bg)
+    return RedirectResponse(_safe_redirect(redirect_to), status_code=302)
+
+
+@router.post("/groups/{group}/unpause")
+async def unpause_group(
+    group: str,
+    tasks: BackgroundTasks,
+    redirect_to: str = Form("/"),
+    db: Session = Depends(get_db),
+):
+    for p in list(db.scalars(select(Pause).where(
+            Pause.target_type == "group", Pause.target == group))):
+        db.delete(p)
+    db.commit()
+    if group in GROUP_LABELS:
+        log_event(db, "unpause", f"Пауза группы «{GROUP_LABELS[group]}» снята")
+    tasks.add_task(_reconcile_bg)
+    return RedirectResponse(_safe_redirect(redirect_to), status_code=302)
+
+
+def _safe_redirect(target: str) -> str:
+    """Только локальные пути — защита от open-redirect через redirect_to."""
+    return target if target.startswith("/") and not target.startswith("//") else "/"
