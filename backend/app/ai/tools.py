@@ -246,7 +246,8 @@ def list_devices(db: Session) -> list[dict]:
 @tool()
 def get_status(db: Session) -> dict:
     """Сводка состояния системы: доступность роутера и AdGuard, счётчики
-    устройств (всего/онлайн/заблокировано), активные паузы, статистика DNS."""
+    устройств (всего/онлайн/заблокировано), активные паузы, статистика DNS,
+    прогресс квот экранного времени по устройствам (screen_time)."""
     online: set[str] = set()
     router_ok = False
     try:
@@ -264,6 +265,7 @@ def get_status(db: Session) -> dict:
         pass
     devices = list(db.scalars(select(Device)))
     pauses = active_pauses(db)
+    prog = quota_svc.progress(db, devices)  # экранное время: только у кого есть квоты
     return {
         "router_ok": router_ok,
         "adguard_ok": adguard_ok,
@@ -278,6 +280,11 @@ def get_status(db: Session) -> dict:
         ],
         "dns_queries_today": stats.get("num_dns_queries"),
         "dns_blocked_today": stats.get("num_blocked_filtering"),
+        "screen_time": [
+            {"device": dev.name, "category": p["category"], "label": p["label"],
+             "used_minutes": p["used"], "limit_minutes": p["limit"]}
+            for dev in devices for p in prog.get(dev.id, [])
+        ],
     }
 
 

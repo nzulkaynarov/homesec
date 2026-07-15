@@ -48,9 +48,13 @@ def test_format_status_and_devices():
         "dns_queries_today": 1000, "dns_blocked_today": 50,
         "active_pauses": [{"target_type": "group", "target": "kid",
                            "until": "2026-07-14T21:30", "reason": ""}],
+        "screen_time": [{"device": "Планшет", "category": "games", "label": "Игры",
+                         "used_minutes": 80, "limit_minutes": 120}],
     })
     assert "✅ роутер" in text and "❌ AdGuard" in text
     assert "kid до 21:30" in text
+    assert "⏳ Планшет: игры 1:20/2:00" in text  # прогресс квоты экранного времени
+    assert texts.hhmm(0) == "0:00" and texts.hhmm(65) == "1:05"
 
     rows = [{"id": 1, "name": "Планшет", "group_label": "Дети", "owner": "Миша",
              "blocked_manual": True, "paused_until": None, "speed_limit": "5M/20M"}]

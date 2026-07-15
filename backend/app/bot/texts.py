@@ -44,6 +44,11 @@ def yes_no(ok: bool) -> str:
     return "✅" if ok else "❌"
 
 
+def hhmm(minutes: int) -> str:
+    """Минуты -> «Ч:ММ»: 80 -> 1:20."""
+    return f"{minutes // 60}:{minutes % 60:02d}"
+
+
 def format_status(s: dict) -> str:
     lines = [
         "Состояние HomeSec",
@@ -61,6 +66,9 @@ def format_status(s: dict) -> str:
     for p in s.get("active_pauses", []):
         until = p["until"][11:16] if len(p["until"]) >= 16 else p["until"]
         lines.append(f"⏸ пауза: {p['target']} до {until}")
+    for q in s.get("screen_time", []):  # экранное время: «игры 1:20/2:00»
+        lines.append(f"⏳ {q['device']}: {q['label'].lower()} "
+                     f"{hhmm(q['used_minutes'])}/{hhmm(q['limit_minutes'])}")
     return "\n".join(lines)
 
 
