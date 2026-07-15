@@ -68,10 +68,27 @@ def get_query_log(limit: int = 50) -> list[dict]:
     return data.get("data", [])
 
 
+def _all_clients() -> list[dict]:
+    data = _request("GET", "/control/clients") or {}
+    return data.get("clients") or []
+
+
 def list_clients() -> dict[str, dict]:
     """Наши (hs-*) клиенты AdGuard по имени."""
-    data = _request("GET", "/control/clients") or {}
-    return {c["name"]: c for c in (data.get("clients") or []) if c["name"].startswith("hs-")}
+    return {c["name"]: c for c in _all_clients() if c["name"].startswith("hs-")}
+
+
+def _foreign_ids(clients: list[dict]) -> set[str]:
+    """Идентификаторы (IP/MAC/CIDR) клиентов, заведённых в AdGuard РУКАМИ.
+    AdGuard требует уникальности id между всеми клиентами: попытка привязать
+    hs-клиента к IP ручного клиента даёт 400 «another client uses the same IP»
+    на каждом reconcile-тике."""
+    return {
+        i
+        for c in clients
+        if not c["name"].startswith("hs-")
+        for i in (c.get("ids") or [])
+    }
 
 
 def _client_payload(name: str, ip: str, blocked_services: list[str], safe_search: bool) -> dict:
@@ -105,8 +122,14 @@ def sync_clients(desired: dict[str, dict]) -> None:
 
     Ошибка по одному клиенту НЕ прерывает синхронизацию остальных: одна битая
     запись (дубль IP и т.п.) иначе блокировала бы весь AdGuard-слой на каждом
-    reconcile-тике. Ошибки копятся и поднимаются одним AdGuardError в конце."""
-    current = list_clients()
+    reconcile-тике. Ошибки копятся и поднимаются одним AdGuardError в конце.
+
+    IP, занятые РУЧНЫМИ клиентами AdGuard, пропускаются (см. _foreign_ids):
+    такой клиент — осознанная настройка владельца, панель её не перебивает;
+    per-client политика для устройства в этом случае не применится."""
+    clients = _all_clients()
+    current = {c["name"]: c for c in clients if c["name"].startswith("hs-")}
+    foreign = _foreign_ids(clients)
     errors: list[str] = []
     for name in set(current) - set(desired):
         try:
@@ -114,6 +137,15 @@ def sync_clients(desired: dict[str, dict]) -> None:
         except AdGuardError as e:
             errors.append(str(e))
     for name, want in desired.items():
+        if want["ip"] in foreign:
+            log.warning("IP %s занят ручным клиентом AdGuard — %s пропущен "
+                        "(политика панели для устройства не применится)", want["ip"], name)
+            if name in current:  # не оставляем hs-клиента висеть на старом IP
+                try:
+                    _request("POST", "/control/clients/delete", json={"name": name})
+                except AdGuardError as e:
+                    errors.append(str(e))
+            continue
         payload = _client_payload(name, want["ip"], want["blocked_services"], want["safe_search"])
         try:
             if name not in current:
