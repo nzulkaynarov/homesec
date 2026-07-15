@@ -158,6 +158,25 @@ def active_pauses(db, now: datetime | None = None) -> list["Pause"]:
     return [p for p in db.query(Pause).all() if p.until > now]
 
 
+class BonusRequest(Base):
+    """Заявка ребёнка «попросить ещё времени» со страницы /me или /blocked.
+    Родитель одобряет кнопкой в Telegram (+15/+30/до конца дня) или отклоняет.
+    Живёт своей таблицей (а не через EventLog), чтобы страница ребёнка могла
+    показать статус и автообновиться, когда родитель ответил."""
+
+    __tablename__ = "bonus_requests"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    device_id: Mapped[int] = mapped_column(index=True)
+    category: Mapped[str] = mapped_column(String(16))  # internet | games | video | social
+    reason: Mapped[str] = mapped_column(Text, default="")
+    # pending | approved | denied
+    status: Mapped[str] = mapped_column(String(12), default="pending", index=True)
+    minutes: Mapped[int] = mapped_column(default=0)  # сколько одобрено (0 у pending/denied)
+    created: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    resolved: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+
+
 class RegistrationRequest(Base):
     """Заявка с портала: человек на неизвестном устройстве представился,
     владелец сети подтверждает кнопкой в Telegram."""

@@ -173,3 +173,43 @@ def test_unknown_device_redirected_to_register(db, monkeypatch):
         assert r.status_code == 302 and r.headers["location"] == "/register"
     db.delete(dev)
     db.commit()
+
+
+# ---------- киллер-фича: «попросить ещё времени» ----------
+
+def test_me_page_request_and_ratelimit(db):
+    from app.models import BonusRequest, EventLog
+    db.query(BonusRequest).delete()
+    db.query(EventLog).delete()
+    db.commit()
+    kid = Person(name="Катя", role="kid")
+    db.add(kid)
+    db.commit()
+    d = Device(mac="AB:00:00:00:00:10", ip="testclient", name="Катин-планшет",
+               person_id=kid.id)
+    db.add(d)
+    db.add(Quota(target_type="group", target="kid", category="games", minutes_per_day=120))
+    db.commit()
+    with TestClient(app) as c:
+        r = c.get("/me")
+        assert r.status_code == 200
+        assert "Катин-планшет" in r.text and "Попросить ещё" in r.text
+        r = c.post("/me/ask", data={"category": "games", "reason": "доиграть"})
+        assert r.status_code == 200 and "Заявка отправлена" in r.text
+        req = db.query(BonusRequest).one()
+        assert req.device_id == d.id and req.category == "games" and req.status == "pending"
+        ev = [e for e in db.query(EventLog) if e.kind == "bonus_request"]
+        assert len(ev) == 1 and d.mac in ev[0].message and f"req#{req.id}" in ev[0].message
+        # антиспам: пока заявка висит pending — новая не создаётся
+        c.post("/me/ask", data={"category": "games"})
+        assert db.query(BonusRequest).count() == 1
+    db.query(BonusRequest).delete()
+    db.query(EventLog).delete()
+    db.commit()
+
+
+def test_me_no_device_shows_greeting(db):
+    # нет устройства с ip клиента -> дружелюбное приветствие, а не ошибка
+    with TestClient(app) as c:
+        r = c.get("/me")
+        assert r.status_code == 200 and "распознан" in r.text

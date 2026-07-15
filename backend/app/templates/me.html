@@ -1,0 +1,106 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# Автообновление: когда родитель одобрит, бонус применится и страница сама
+     покажет новое время / вернувшийся интернет. #}
+  <meta http-equiv="refresh" content="20">
+  <title>Моё время — HomeSec</title>
+  <style>
+    body { font-family: system-ui, sans-serif; background: #f4f6fb; margin: 0;
+           display: flex; min-height: 100vh; align-items: center; justify-content: center; }
+    .card { background: #fff; border-radius: 16px; padding: 28px; max-width: 440px;
+            margin: 16px; box-shadow: 0 2px 16px rgba(0,0,0,.08); }
+    h1 { font-size: 1.35em; margin: 0 0 4px; }
+    .sub { color: #888; font-size: .9em; margin: 0 0 16px; }
+    .emoji { font-size: 2.6em; text-align: center; }
+    .q { margin: 12px 0; }
+    .q-head { display: flex; justify-content: space-between; font-size: .92em; margin-bottom: 4px; }
+    .q-over { color: #e74c3c; font-weight: 600; }
+    .track { height: 12px; background: #eef0f5; border-radius: 8px; overflow: hidden; }
+    .fill { height: 100%; background: #2ecc71; }
+    .fill.over { background: #e74c3c; }
+    .status { border-radius: 10px; padding: 12px; margin: 16px 0; font-size: .95em; }
+    .status.blocked { background: #fdecea; color: #a33; }
+    .status.ok { background: #eafaf1; color: #237a49; }
+    .status.wait { background: #fff6e5; color: #9a6a12; }
+    form { margin-top: 8px; }
+    select, textarea, button { font: inherit; width: 100%; box-sizing: border-box;
+           border: 1px solid #d5d9e2; border-radius: 10px; padding: 10px; margin-top: 8px; }
+    textarea { resize: vertical; min-height: 48px; }
+    button { background: #4f8ef7; color: #fff; border: none; font-weight: 600;
+             cursor: pointer; font-size: 1.05em; }
+    button:disabled { background: #b9c4d6; cursor: default; }
+    .hint { color: #999; font-size: .82em; text-align: center; margin-top: 14px; }
+  </style>
+</head>
+<body>
+<div class="card">
+  {% if device is none %}
+  <div class="emoji">👋</div>
+  <h1>Привет!</h1>
+  <p class="sub">Это страница «Моё время» домашней сети. Твоё устройство пока не
+     распознано — открой её из домашнего Wi-Fi по адресу
+     <b>http://192.168.88.2:8000/me</b> (или иконкой «Время» на экране).</p>
+  {% else %}
+  <div class="emoji">⏱️</div>
+  <h1>Моё время</h1>
+  <p class="sub">{{ device.name }}</p>
+
+  {# Полосы экранного времени #}
+  {% for q in quota %}
+  {% set over = q.used >= q.limit %}
+  <div class="q">
+    <div class="q-head">
+      <span>{{ q.label }}</span>
+      <span class="{{ 'q-over' if over }}">{{ q.used }} / {{ q.limit }} мин{{ ' — всё' if over }}</span>
+    </div>
+    <div class="track"><div class="fill {{ 'over' if over }}"
+         style="width: {{ 100 if q.used >= q.limit else (q.used * 100 // q.limit if q.limit else 0) }}%"></div></div>
+  </div>
+  {% else %}
+  <p class="sub">Лимитов по времени сейчас нет — пользуйся 🙂</p>
+  {% endfor %}
+
+  {# Статус ограничения / заявки #}
+  {% if just_sent and pending %}
+  <div class="status wait">✅ Заявка отправлена родителям. Как ответят — страница
+     обновится сама.</div>
+  {% elif pending %}
+  <div class="status wait">⏳ Заявка уже отправлена, ждём ответа родителей.</div>
+  {% elif last_request and last_request.status == 'approved' %}
+  <div class="status ok">🎉 Родители добавили +{{ last_request.minutes }} мин. Приятного времени!</div>
+  {% elif last_request and last_request.status == 'denied' %}
+  <div class="status blocked">Родители пока отказали. Можно попросить позже.</div>
+  {% elif restriction %}
+  <div class="status blocked">
+    {% if restriction.kind == 'quota' %}⏰ Время на сегодня вышло.
+    {% elif restriction.kind == 'pause' %}⏸ Интернет на паузе до {{ restriction.until.strftime('%H:%M') }}.
+    {% elif restriction.kind == 'rule' %}🌙 Сейчас по расписанию интернета нет.
+    {% else %}⛔ Доступ выключен.{% endif %}
+  </div>
+  {% endif %}
+
+  {# Форма запроса времени — только если есть что продлевать и антиспам разрешает #}
+  {% if can_request and not pending %}
+  <form method="post" action="/me/ask">
+    {% if quota|length > 1 %}
+    <select name="category">
+      {% for q in quota %}<option value="{{ q.category }}">Ещё времени: {{ q.label }}</option>{% endfor %}
+    </select>
+    {% else %}
+    <input type="hidden" name="category" value="{{ quota[0].category }}">
+    {% endif %}
+    <textarea name="reason" placeholder="Почему? (необязательно, но родителям приятно)"></textarea>
+    <button type="submit">🙏 Попросить ещё времени</button>
+  </form>
+  {% elif not quota %}
+  {# нечего продлевать — блок не квотный (пауза/расписание/ручной) #}
+  <p class="hint">Вернуть доступ может только родитель.</p>
+  {% endif %}
+  {% endif %}
+  <p class="hint">HomeSec · домашняя сеть</p>
+</div>
+</body>
+</html>

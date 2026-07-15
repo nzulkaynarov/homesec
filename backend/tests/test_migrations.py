@@ -40,3 +40,18 @@ def test_app_db_uses_wal():
     with app_engine.connect() as c:
         assert c.execute(text("PRAGMA journal_mode")).scalar() == "wal"
         assert c.execute(text("PRAGMA busy_timeout")).scalar() == 5000
+
+
+def test_migration_3_survives_precreated_table(tmp_path):
+    """№3 (bonus_requests) — как на проде: create_all уже создал таблицу,
+    миграция обязана быть no-op и проставить версию."""
+    eng = create_engine(f"sqlite:///{tmp_path / 'b.db'}")
+    Base.metadata.create_all(eng)
+    migs = [m for m in MIGRATIONS if m[0] == 3]
+    assert run_migrations(eng, migs) == 1
+    with eng.begin() as c:
+        assert c.execute(text("PRAGMA user_version")).scalar() == 3
+        c.execute(text(
+            "INSERT INTO bonus_requests (device_id, category, reason, status, "
+            "minutes, created) VALUES (1, 'games', '', 'pending', 0, '2026-07-16 12:00:00')"
+        ))

@@ -3,6 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
+  {# Когда родитель одобрит запрос, ограничение снимется — страница обновится сама #}
+  <meta http-equiv="refresh" content="20">
   <title>HomeSec — доступ ограничен</title>
   <style>
     body { font-family: system-ui, sans-serif; background: #f4f4f4; margin: 0;
@@ -15,6 +17,15 @@
     .quota { text-align: left; margin: 16px 0; padding: 12px;
              background: #f8f8f8; border-radius: 8px; font-size: .95em; }
     .hint { color: #888; font-size: .85em; }
+    form.ask { margin: 16px 0 4px; }
+    form.ask select, form.ask textarea, form.ask button { font: inherit; width: 100%;
+      box-sizing: border-box; border: 1px solid #d5d9e2; border-radius: 10px;
+      padding: 10px; margin-top: 8px; }
+    form.ask textarea { resize: vertical; min-height: 44px; }
+    form.ask button { background: #4f8ef7; color: #fff; border: none; font-weight: 600;
+      cursor: pointer; }
+    .wait { background: #fff6e5; color: #9a6a12; border-radius: 10px;
+            padding: 10px; margin: 16px 0; font-size: .92em; }
   </style>
 </head>
 <body>
@@ -59,8 +70,24 @@
   </div>
   {% endif %}
 
-  {% if info %}
-  <p class="hint">Добавить время может владелец сети — команда /bonus в Telegram.</p>
+  {% if pending %}
+  <div class="wait">⏳ Заявка на добавление времени уже отправлена — ждём ответа родителей.
+     Страница обновится сама.</div>
+  {% elif info and info.quota and can_request %}
+  {# Киллер-фича: попросить ещё времени прямо отсюда (видно и через captive-portal) #}
+  <form method="post" action="/me/ask" class="ask">
+    {% if info.quota|length > 1 %}
+    <select name="category">
+      {% for q in info.quota %}<option value="{{ q.category }}">Ещё времени: {{ q.label }}</option>{% endfor %}
+    </select>
+    {% else %}
+    <input type="hidden" name="category" value="{{ info.quota[0].category }}">
+    {% endif %}
+    <textarea name="reason" placeholder="Почему? (необязательно)"></textarea>
+    <button type="submit">🙏 Попросить ещё времени</button>
+  </form>
+  {% elif info %}
+  <p class="hint">Вернуть доступ может владелец сети.</p>
   {% endif %}
 </div>
 </body>

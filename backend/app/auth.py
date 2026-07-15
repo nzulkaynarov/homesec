@@ -39,7 +39,8 @@ def is_authenticated(request: Request) -> bool:
 
 
 def _is_public(path: str) -> bool:
-    return path in ("/login", "/blocked", "/register") or path.startswith("/static/")
+    return path in ("/login", "/blocked", "/register", "/me", "/me/ask") \
+        or path.startswith("/static/")
 
 
 def _is_intercepted(request: Request) -> bool:

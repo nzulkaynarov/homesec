@@ -189,3 +189,66 @@ def test_telegram_user_id_allowlist_parsing(monkeypatch):
     assert settings.telegram_allowed_user_ids == {545165237, 42}
     monkeypatch.setattr(settings, "telegram_user_ids", "")
     assert settings.telegram_allowed_user_ids == set()
+
+
+def test_bonus_request_notification_carries_id(db):
+    dev = Device(mac="AA:00:00:00:00:22", ip="192.168.88.92", name="Планшет")
+    db.add(dev)
+    db.commit()
+    assert collect_notifications(db) == []  # инициализация курсора
+    log_event(db, "bonus_request",
+              f"Запрос времени: Планшет ({dev.mac}, {dev.ip}) просит «Игры» [req#77]")
+    found = collect_notifications(db)
+    assert len(found) == 1 and found[0].kind == "bonus_request"
+    assert found[0].device.id == dev.id and found[0].request_id == 77
+
+
+def test_bonus_request_approve_deny_idempotent(db):
+    from app.bot.handlers import _resolve_bonus_request, bonus_request_keyboard
+    from app.models import BonusRequest, Person, Quota, QuotaBonus
+
+    for m in (BonusRequest, QuotaBonus, Quota, Person):
+        db.query(m).delete()
+    db.commit()
+    kid = Person(name="Дима", role="kid")
+    db.add(kid)
+    db.commit()
+    d = Device(mac="AA:00:00:00:00:21", ip="192.168.88.91", name="Димин-пк",
+               person_id=kid.id)
+    db.add(d)
+    db.add(Quota(target_type="group", target="kid", category="games", minutes_per_day=120))
+    db.commit()  # чтобы у d появился id до создания заявки
+    req = BonusRequest(device_id=d.id, category="games", reason="доиграть", status="pending")
+    db.add(req)
+    db.commit()
+    req_id = req.id
+
+    kb = bonus_request_keyboard(req_id)
+    data = {b.callback_data for row in kb.inline_keyboard for b in row}
+    assert {f"br:{req_id}:15", f"br:{req_id}:30", f"br:{req_id}:day",
+            f"br:{req_id}:no"} == data
+
+    # одобрение +30 -> заявка approved, создан QuotaBonus
+    assert "Одобрено" in _resolve_bonus_request(req_id, "30")
+    db.expire_all()
+    assert db.get(BonusRequest, req_id).status == "approved"
+    assert db.get(BonusRequest, req_id).minutes == 30
+    bonus_row = db.query(QuotaBonus).filter_by(target=str(d.id), category="games").one()
+    assert bonus_row.minutes == 30
+
+    # повторное нажатие по обработанной — идемпотентно
+    assert "обработана" in _resolve_bonus_request(req_id, "15")
+
+    # отказ по новой заявке
+    req2 = BonusRequest(device_id=d.id, category="games", status="pending")
+    db.add(req2)
+    db.commit()
+    assert "Отказано" in _resolve_bonus_request(req2.id, "no")
+    db.expire_all()
+    assert db.get(BonusRequest, req2.id).status == "denied"
+
+    for m in (BonusRequest, QuotaBonus, Quota):
+        db.query(m).delete()
+    db.delete(d)
+    db.query(Person).delete()
+    db.commit()

@@ -11,6 +11,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Device, RegistrationRequest, log_event
+from ..services import bonus, quota
 from ..services.restrictions import restriction_for_ip
 from ..templates_env import templates
 
@@ -23,10 +24,55 @@ def _client_ip(request: Request) -> str:
     return request.client.host if request.client else ""
 
 
+def _me_context(db: Session, ip: str) -> dict:
+    """Данные детской страницы: устройство по IP, остаток квот, действующее
+    ограничение и статус последней заявки на бонус."""
+    dev = db.scalar(select(Device).where(Device.ip == ip)) if ip else None
+    if dev is None:
+        return {"device": None}
+    quota_rows = quota.progress(db, [dev]).get(dev.id, [])
+    last = bonus.latest_request(db, dev.id)
+    return {
+        "device": dev,
+        "quota": quota_rows,
+        "restriction": restriction_for_ip(db, ip),
+        "can_request": bonus.can_request(db, dev.id) and bool(quota_rows),
+        "pending": bonus.has_fresh_pending(db, dev.id),
+        "last_request": last,
+    }
+
+
 @router.get("/blocked")
 async def blocked_page(request: Request, db: Session = Depends(get_db)):
-    info = restriction_for_ip(db, _client_ip(request))
-    return templates.TemplateResponse(request, "blocked.html", {"info": info})
+    ip = _client_ip(request)
+    info = restriction_for_ip(db, ip)
+    dev = db.scalar(select(Device).where(Device.ip == ip)) if ip else None
+    ctx = {"info": info, "device": dev,
+           "pending": bonus.has_fresh_pending(db, dev.id) if dev else False,
+           "can_request": bool(dev) and bonus.can_request(db, dev.id)}
+    return templates.TemplateResponse(request, "blocked.html", ctx)
+
+
+@router.get("/me")
+async def me_page(request: Request, db: Session = Depends(get_db)):
+    return templates.TemplateResponse(request, "me.html",
+                                      _me_context(db, _client_ip(request)))
+
+
+@router.post("/me/ask")
+async def me_ask(
+    request: Request,
+    category: str = Form("internet"),
+    reason: str = Form(""),
+    db: Session = Depends(get_db),
+):
+    ip = _client_ip(request)
+    dev = db.scalar(select(Device).where(Device.ip == ip)) if ip else None
+    if dev is not None:
+        bonus.create_request(db, dev, category, reason)  # None при антиспаме — молча
+    ctx = _me_context(db, ip)
+    ctx["just_sent"] = dev is not None
+    return templates.TemplateResponse(request, "me.html", ctx)
 
 
 def _register_state(db: Session, ip: str) -> tuple[str, Device | None]:

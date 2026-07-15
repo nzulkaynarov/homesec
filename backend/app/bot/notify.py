@@ -14,17 +14,20 @@ from sqlalchemy.orm import Session
 from ..models import Device, EventLog, kv_get, kv_set
 
 CURSOR_KEY = "bot_last_event_id"
-NOTIFY_KINDS = ("device_new", "register_request", "device_maybe_same", "quota_block")
+NOTIFY_KINDS = ("device_new", "register_request", "device_maybe_same",
+                "quota_block", "bonus_request")
 
 _MAC_RE = re.compile(r"([0-9A-F]{2}(?::[0-9A-F]{2}){5})", re.IGNORECASE)
+_REQ_RE = re.compile(r"req#(\d+)")
 
 
 @dataclass
 class Notification:
-    kind: str  # device_new | register_request | device_maybe_same | quota_block
+    kind: str  # device_new | register_request | device_maybe_same | quota_block | bonus_request
     device: Device
     message: str  # исходный текст события
     extra_device: Device | None = None  # для maybe_same: устройство-оригинал
+    request_id: int | None = None  # для bonus_request: id заявки на бонус
 
 
 def collect_notifications(db: Session) -> list[Notification]:
@@ -54,8 +57,14 @@ def collect_notifications(db: Session) -> list[Notification]:
             extra = db.scalar(select(Device).where(Device.mac == macs[1]))
             if extra is None:
                 continue  # оригинал уже объединили/удалили
+        req_id = None
+        if e.kind == "bonus_request":
+            m = _REQ_RE.search(e.message)
+            if m is None:
+                continue  # без id заявки одобрять нечего
+            req_id = int(m.group(1))
         out.append(Notification(kind=e.kind, device=dev, message=e.message,
-                                extra_device=extra))
+                                extra_device=extra, request_id=req_id))
     if max_id > last:
         kv_set(db, CURSOR_KEY, str(max_id))
     return out

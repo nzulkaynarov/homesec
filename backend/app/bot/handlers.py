@@ -288,6 +288,73 @@ def bonus_keyboard(dev_id: int, minutes: int = 30) -> InlineKeyboardMarkup:
     ]])
 
 
+# ---------- запрос ребёнка «попросить ещё времени» ----------
+
+# Пресеты одобрения родителем. "day" ≈ до конца дня (add_bonus_time режет по 720).
+BONUS_PRESETS = {"15": 15, "30": 30, "day": 720}
+
+
+def bonus_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
+    """Кнопки под заявкой ребёнка: +15 / +30 / до конца дня / Отказать."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="➕ 15 мин", callback_data=f"br:{request_id}:15"),
+            InlineKeyboardButton(text="➕ 30 мин", callback_data=f"br:{request_id}:30"),
+        ],
+        [
+            InlineKeyboardButton(text="🌞 До конца дня", callback_data=f"br:{request_id}:day"),
+            InlineKeyboardButton(text="🚫 Отказать", callback_data=f"br:{request_id}:no"),
+        ],
+    ])
+
+
+def _resolve_bonus_request(request_id: int, choice: str) -> str:
+    """Одобряет (add_bonus_time) или отклоняет заявку и помечает её. Одноразово:
+    повторное нажатие по обработанной заявке вернёт пометку об этом."""
+    from ..models import BonusRequest
+    from ..services import bonus
+    from ..services.quota import QUOTA_CATEGORY_LABELS
+
+    s = dbmod.session()
+    try:
+        req = s.get(BonusRequest, request_id)
+        if req is None:
+            return "Заявка не найдена."
+        if req.status != "pending":
+            return f"Заявка уже обработана ({req.status})."
+        if choice == "no":
+            bonus.resolve(s, req, "denied")
+            return "Отказано. Ребёнок увидит это на своей странице."
+        minutes = BONUS_PRESETS.get(choice, 30)
+        cat_label = QUOTA_CATEGORY_LABELS.get(req.category, req.category)
+        try:
+            tools.run_tool(s, "add_bonus_time",
+                           {"target": str(req.device_id), "minutes": minutes,
+                            "category": req.category, "comment": "одобрено из Telegram"},
+                           source="bot")
+        except tools.ToolError as e:
+            return f"Не получилось добавить время: {e}"
+        bonus.resolve(s, req, "approved", minutes)
+        label = "до конца дня" if choice == "day" else f"+{minutes} мин"
+        return f"✅ Одобрено ({label}, {cat_label}). Время добавлено."
+    finally:
+        s.close()
+
+
+@router.callback_query(F.data.startswith("br:"))
+async def cb_bonus_request(cb: CallbackQuery) -> None:
+    parts = (cb.data or "").split(":")
+    request_id, choice = int(parts[1]), parts[2]
+    try:
+        result = await asyncio.to_thread(_resolve_bonus_request, request_id, choice)
+    except Exception:
+        log.exception("обработка заявки на бонус упала")
+        result = "Ошибка при обработке заявки, подробности в журнале."
+    await cb.answer()
+    if isinstance(cb.message, Message):
+        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
+
+
 def merge_keyboard(duplicate_id: int, target_id: int) -> InlineKeyboardMarkup:
     """Кнопки к подозрению «это то же устройство с новым MAC»."""
     return InlineKeyboardMarkup(inline_keyboard=[[

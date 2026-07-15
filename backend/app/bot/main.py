@@ -36,8 +36,8 @@ async def _broadcast(bot: Bot, chat_ids: set[int], text: str, keyboard=None) -> 
             log.exception("не удалось отправить сообщение в чат %s", chat_id)
 
 
-def _collect_notifications() -> list[tuple[str, dict, str, int | None, list]]:
-    """(kind, устройство, текст события, id оригинала, люди) по каждому событию."""
+def _collect_notifications() -> list[tuple[str, dict, str, int | None, list, int | None]]:
+    """(kind, устройство, текст события, id оригинала, люди, id заявки) по событию."""
     s = dbmod.session()
     try:
         items = notify.collect_notifications(s)
@@ -52,7 +52,8 @@ def _collect_notifications() -> list[tuple[str, dict, str, int | None, list]]:
               "ip": n.device.ip, "random_mac": n.device.mac_is_random},
              n.message,
              n.extra_device.id if n.extra_device else None,
-             people)
+             people,
+             n.request_id)
             for n in items
         ]
     finally:
@@ -62,7 +63,7 @@ def _collect_notifications() -> list[tuple[str, dict, str, int | None, list]]:
 async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
     while True:
         try:
-            for kind, dev, message, extra_id, people in await asyncio.to_thread(
+            for kind, dev, message, extra_id, people, request_id in await asyncio.to_thread(
                 _collect_notifications
             ):
                 if kind == "device_maybe_same" and extra_id is not None:
@@ -74,6 +75,9 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
                 elif kind == "quota_block":
                     text = f"⏳ {message}\nМожно добавить время кнопкой:"
                     kb = handlers.bonus_keyboard(dev["id"])
+                elif kind == "bonus_request" and request_id is not None:
+                    text = f"🙏 {message}"
+                    kb = handlers.bonus_request_keyboard(request_id)
                 else:
                     text = texts.format_new_device(dev)
                     kb = handlers.new_device_keyboard(dev["id"], people)

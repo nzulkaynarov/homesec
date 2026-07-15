@@ -39,6 +39,25 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
         "CREATE INDEX IF NOT EXISTS ix_pending_actions_created "
         "ON pending_actions (created)",
     ]),
+    # Заявки ребёнка «попросить ещё времени» (киллер-фича). IF NOT EXISTS:
+    # на живой базе таблицу обычно уже создал create_all, тогда миграция — no-op.
+    (3, [
+        "CREATE TABLE IF NOT EXISTS bonus_requests ("
+        "id INTEGER NOT NULL PRIMARY KEY, "
+        "device_id INTEGER NOT NULL, "
+        "category VARCHAR(16) NOT NULL, "
+        "reason TEXT NOT NULL, "
+        "status VARCHAR(12) NOT NULL, "
+        "minutes INTEGER NOT NULL, "
+        "created DATETIME NOT NULL, "
+        "resolved DATETIME)",
+        "CREATE INDEX IF NOT EXISTS ix_bonus_requests_device_id "
+        "ON bonus_requests (device_id)",
+        "CREATE INDEX IF NOT EXISTS ix_bonus_requests_status "
+        "ON bonus_requests (status)",
+        "CREATE INDEX IF NOT EXISTS ix_bonus_requests_created "
+        "ON bonus_requests (created)",
+    ]),
 ]
 
 
