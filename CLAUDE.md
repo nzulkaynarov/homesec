@@ -105,8 +105,12 @@ MikroTik `homesec` (HS_MIKROTIK_PASSWORD). Доступ MikroTik: `ssh admin@192
 
 ## Рабочий процесс
 
-- Тесты: `cd backend && pytest` (16 тестов; интеграции замоканы недоступными портами).
-- CI: GitHub Actions на каждый push (`.github/workflows/ci.yml`).
+- Проверка перед пушем — ВСЁ, что гоняет CI: `cd backend && pytest && ruff check app tests && mypy app`
+  (105 тестов; интеграции замоканы недоступными портами). Ловили вживую: CI был
+  красным из-за mypy, который локально не гоняли.
+- CI: GitHub Actions на каждый push (`.github/workflows/ci.yml`): pytest + ruff + mypy.
+  **CD НЕ ждёт зелёного CI** — малинка тянет main безусловно; сцепка «деплой только
+  зелёных» — возможная доработка update.sh (владельцу предложено, не решено).
 - **CD: push в `main` = деплой в прод.** Малинка раз в минуту тянет `main`
   (systemd `homesec-update.timer` → `deploy/update.sh`, read-only deploy key)
   и перезапускает панель. Рискованные изменения — через ветку, в main только зелёное.
