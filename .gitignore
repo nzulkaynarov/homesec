@@ -5,3 +5,4 @@ __pycache__/
 *.db
 .DS_Store
 mikrotik/homesec-configured.rsc
+.claude/
