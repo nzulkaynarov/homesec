@@ -13,6 +13,10 @@ ExecStart=/opt/homesec/backend/.venv/bin/python -m app.bot
 # on-failure не даст systemd бесконечно его перезапускать.
 Restart=on-failure
 RestartSec=10
+# См. комментарий в homesec.service: OOM должен убивать сервис, а не малинку.
+MemoryHigh=120M
+MemoryMax=200M
+TimeoutStartSec=60
 
 [Install]
 WantedBy=multi-user.target
