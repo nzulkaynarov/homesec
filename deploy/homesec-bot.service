@@ -14,8 +14,11 @@ ExecStart=/opt/homesec/backend/.venv/bin/python -m app.bot
 Restart=on-failure
 RestartSec=10
 # См. комментарий в homesec.service: OOM должен убивать сервис, а не малинку.
-MemoryHigh=120M
-MemoryMax=200M
+# Замерено на проде 2026-07-28: бот держит ~141 МБ (aiogram + SQLAlchemy +
+# SDK Anthropic), поэтому потолки выше панели. Проверить у себя:
+# systemctl show homesec-bot -p MemoryCurrent
+MemoryHigh=220M
+MemoryMax=350M
 TimeoutStartSec=60
 
 [Install]

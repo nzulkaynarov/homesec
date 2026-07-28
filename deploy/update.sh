@@ -37,7 +37,8 @@ sync_units() {
       changed=1
     fi
   done
-  for name in homesec-update.service homesec-update.timer; do
+  for name in homesec-update.service homesec-update.timer \
+              homesec-dnscheck.service homesec-dnscheck.timer; do
     [ -f "$APP_DIR/deploy/$name" ] || continue
     if ! cmp -s "$APP_DIR/deploy/$name" "/etc/systemd/system/$name"; then
       cp "$APP_DIR/deploy/$name" "/etc/systemd/system/$name"
@@ -47,7 +48,8 @@ sync_units() {
   done
   if [ "$changed" = 1 ]; then
     systemctl daemon-reload
-    systemctl enable --now homesec homesec-bot homesec-update.timer >/dev/null 2>&1 || true
+    systemctl enable --now homesec homesec-bot homesec-update.timer \
+      homesec-dnscheck.timer >/dev/null 2>&1 || true
   fi
 }
 

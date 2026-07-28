@@ -1,0 +1,7 @@
+[Unit]
+Description=HomeSec: проверка, что AdGuard отвечает на DNS (и перезапуск, если нет)
+After=AdGuardHome.service
+
+[Service]
+Type=oneshot
+ExecStart=/bin/bash /opt/homesec/deploy/dns-selfheal.sh

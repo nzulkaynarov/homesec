@@ -1,0 +1,11 @@
+[Unit]
+Description=HomeSec: сторож DNS раз в минуту
+
+[Timer]
+OnBootSec=3min
+OnUnitActiveSec=1min
+AccuracySec=10s
+Unit=homesec-dnscheck.service
+
+[Install]
+WantedBy=timers.target

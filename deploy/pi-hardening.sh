@@ -56,6 +56,15 @@ diagnose() {
   hr "Сервисы HomeSec"
   systemctl --no-pager --lines=0 status homesec homesec-bot AdGuardHome 2>/dev/null | grep -E "●|Active:|Memory:" || true
 
+  hr "DNS — то, что реально отказало в ЧП 2026-07-27"
+  if bash "$APP_DIR/deploy/dns-selfheal.sh" --dry-run 2>/dev/null; then
+    echo "DNS отвечает"
+  fi
+  systemctl is-active homesec-dnscheck.timer >/dev/null 2>&1 \
+    && echo "сторож DNS (homesec-dnscheck.timer): включён" \
+    || echo "сторож DNS (homesec-dnscheck.timer): ВЫКЛЮЧЕН — приедет с деплоем"
+  journalctl -t homesec-dnscheck --no-pager -n 5 2>/dev/null | tail -5
+
   hr "Watchdog"
   if [ -e /dev/watchdog ]; then echo "/dev/watchdog есть"; else echo "/dev/watchdog НЕТ — нужен dtparam=watchdog=on и перезагрузка"; fi
   grep -hE "^RuntimeWatchdogSec" /etc/systemd/system.conf /etc/systemd/system.conf.d/*.conf 2>/dev/null || echo "RuntimeWatchdogSec не задан"

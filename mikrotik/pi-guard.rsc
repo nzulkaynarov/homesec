@@ -6,9 +6,14 @@
 # Скрипт МОЖНО импортировать повторно: он сначала удаляет свои прежние
 # сущности по именам/комментариям (правило №5 про дубли к нему не относится).
 #
-# Что делает: раз в минуту пингует малинку. Три неудачи подряд (≈3 минуты) —
-# роутер САМ берёт DNS на себя и шлёт алерт в Telegram; малинка вернулась —
-# сам возвращает контроль на AdGuard и пишет об этом.
+# Что делает: раз в минуту СПРАШИВАЕТ У МАЛИНКИ DNS-ИМЯ. Три неудачи подряд
+# (≈3 минуты) — роутер САМ берёт DNS на себя и шлёт алерт в Telegram; малинка
+# ответила — сам возвращает контроль на AdGuard и пишет об этом.
+#
+# Почему проба именно DNS, а не пинг: в ЧП 2026-07-27 малинка была ЖИВА и
+# пинговалась (панель и бот писали в журнал), но AdGuard перестал отвечать —
+# и дом сидел без интернета час. Пинг такую аварию не увидел бы вовсе.
+# Синтаксис `:resolve ... server=` проверен на этом роутере (RouterOS 7.23.2).
 #
 # Почему «спасательный круг», а не переключение DHCP: клиенты узнают о новом
 # DNS только при продлении аренды (до 10 минут), а тут дом уже сидит без
@@ -19,18 +24,20 @@
 # (выстраданное правило №3) — поэтому правил четыре, а не одно.
 #
 # В обычной жизни ВСЕ правила ниже ВЫКЛЮЧЕНЫ и ни на что не влияют:
-# включает их только сам сторож и только когда малинка не отвечает.
+# включает их только сам сторож и только когда DNS малинки не отвечает.
 #
 # ПЕРЕД ИМПОРТОМ: подставь токен бота и chat_id родителя (иначе алертов не
 # будет, переключение всё равно работает). Взять из /opt/homesec/backend/.env
 # на малинке: HS_TELEGRAM_BOT_TOKEN и HS_TELEGRAM_CHAT_IDS (первый id).
 #
-# ПРОВЕРКА после импорта (делать при владельце, а не ночью):
-#   1) выключи малинку;
-#   2) через ~3 минуты: /log print where message~"hs:" — должно быть
-#      «hs: малинка не отвечает», в Telegram — алерт, интернет дома жив,
+# ПРОВЕРКА после импорта (делать при владельце, а не ночью). Лучше повторять
+# ровно ту аварию, что была: остановить AdGuard, не трогая саму малинку —
+#   на малинке: sudo systemctl stop AdGuardHome
+#   1) через ~3 минуты: /log print where message~"hs:" — должно быть
+#      «hs: DNS малинки не отвечает», в Telegram — алерт, интернет дома жив,
 #      сайты открываются, реклама больше не режется (контроль снят — так и надо);
-#   3) включи малинку — через ~1-2 минуты вернётся «hs: малинка вернулась».
+#   2) на малинке: sudo systemctl start AdGuardHome — через минуту в журнале
+#      «hs: DNS малинки вернулся».
 #   Состояние в любой момент: /system script environment print (hsPiFails).
 #
 # УДАЛИТЬ сторожа: /system scheduler remove [find name="hs-pi-guard"]
@@ -66,6 +73,7 @@ add chain=input action=accept protocol=udp dst-port=53 in-interface=bridge-guest
 add name="hs-pi-guard" policy=read,write,test source={
   :local piAddr "192.168.88.2"
   :local publicDns "1.1.1.1,8.8.8.8"
+  :local probeName "example.com"
   # Подставь свои значения, иначе алертов не будет (переключение всё равно работает).
   :local tgToken "CHANGE_ME_BOT_TOKEN"
   :local tgChat "CHANGE_ME_CHAT_ID"
@@ -84,8 +92,14 @@ add name="hs-pi-guard" policy=read,write,test source={
   :local controlOn true
   :if ([/ip firewall nat get [:pick $natIds 0] disabled]) do={ :set controlOn false }
 
+  # Проба: спрашиваем у малинки настоящее имя. Отвечает (в том числе 0.0.0.0
+  # для заблокированного домена) — значит DNS дома жив, а это и есть услуга,
+  # ради которой всё построено. Молчит или ошибка — считаем аварией.
   :local alive false
-  :if ([/ping $piAddr count=3] > 0) do={ :set alive true }
+  :do {
+    :resolve $probeName server=$piAddr
+    :set alive true
+  } on-error={ :set alive false }
   :if ($alive) do={ :set hsPiFails 0 } else={ :set hsPiFails ($hsPiFails + 1) }
 
   # ---- малинка умерла: роутер берёт DNS на себя ----
@@ -97,10 +111,10 @@ add name="hs-pi-guard" policy=read,write,test source={
     /ip firewall mangle enable [find comment~"hs: lifeboat"]
     /ip firewall nat enable [find comment~"hs: lifeboat"]
     /ip firewall filter enable [find comment~"hs: lifeboat"]
-    :log warning "hs: малинка не отвечает — роутер взял DNS на себя, контроль снят"
+    :log warning "hs: DNS малинки не отвечает — роутер взял DNS на себя, контроль снят"
     :if ($tgToken != "CHANGE_ME_BOT_TOKEN") do={
       :do {
-        /tool fetch mode=https check-certificate=no output=none http-method=post  url="https://api.telegram.org/bot$tgToken/sendMessage"  http-data="chat_id=$tgChat&text=%E2%9A%A0%EF%B8%8F%20HomeSec%3A%20%D0%BC%D0%B0%D0%BB%D0%B8%D0%BD%D0%BA%D0%B0%20192.168.88.2%20%D0%BD%D0%B5%20%D0%BE%D1%82%D0%B2%D0%B5%D1%87%D0%B0%D0%B5%D1%82%20%D1%83%D0%B6%D0%B5%203%20%D0%BC%D0%B8%D0%BD%D1%83%D1%82%D1%8B.%20%D0%A0%D0%BE%D1%83%D1%82%D0%B5%D1%80%20%D0%B2%D0%B7%D1%8F%D0%BB%20DNS%20%D0%BD%D0%B0%20%D1%81%D0%B5%D0%B1%D1%8F%20%E2%80%94%20%D0%B8%D0%BD%D1%82%D0%B5%D1%80%D0%BD%D0%B5%D1%82%20%D0%B4%D0%BE%D0%BC%D0%B0%20%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%B0%D0%B5%D1%82%2C%20%D0%BD%D0%BE%20%D1%80%D0%BE%D0%B4%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D1%81%D0%BA%D0%B8%D0%B9%20%D0%BA%D0%BE%D0%BD%D1%82%D1%80%D0%BE%D0%BB%D1%8C%20%D1%81%D0%B5%D0%B9%D1%87%D0%B0%D1%81%20%D0%9D%D0%95%20%D0%B4%D0%B5%D0%B9%D1%81%D1%82%D0%B2%D1%83%D0%B5%D1%82.%20%D0%9F%D1%80%D0%BE%D0%B2%D0%B5%D1%80%D1%8C%20%D0%BC%D0%B0%D0%BB%D0%B8%D0%BD%D0%BA%D1%83."
+        /tool fetch mode=https check-certificate=no output=none http-method=post  url="https://api.telegram.org/bot$tgToken/sendMessage"  http-data="chat_id=$tgChat&text=%E2%9A%A0%EF%B8%8F%20HomeSec%3A%20%D0%BC%D0%B0%D0%BB%D0%B8%D0%BD%D0%BA%D0%B0%20%D0%BD%D0%B5%20%D0%BE%D1%82%D0%B2%D0%B5%D1%87%D0%B0%D0%B5%D1%82%20%D0%BD%D0%B0%20DNS%20%D1%83%D0%B6%D0%B5%203%20%D0%BC%D0%B8%D0%BD%D1%83%D1%82%D1%8B.%20%D0%A0%D0%BE%D1%83%D1%82%D0%B5%D1%80%20%D0%B2%D0%B7%D1%8F%D0%BB%20DNS%20%D0%BD%D0%B0%20%D1%81%D0%B5%D0%B1%D1%8F%20%E2%80%94%20%D0%B8%D0%BD%D1%82%D0%B5%D1%80%D0%BD%D0%B5%D1%82%20%D0%B4%D0%BE%D0%BC%D0%B0%20%D1%80%D0%B0%D0%B1%D0%BE%D1%82%D0%B0%D0%B5%D1%82%2C%20%D0%BD%D0%BE%20%D1%80%D0%BE%D0%B4%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D1%81%D0%BA%D0%B8%D0%B9%20%D0%BA%D0%BE%D0%BD%D1%82%D1%80%D0%BE%D0%BB%D1%8C%20%D1%81%D0%B5%D0%B9%D1%87%D0%B0%D1%81%20%D0%9D%D0%95%20%D0%B4%D0%B5%D0%B9%D1%81%D1%82%D0%B2%D1%83%D0%B5%D1%82.%20%D0%9F%D1%80%D0%BE%D0%B2%D0%B5%D1%80%D1%8C%20AdGuard%20%D0%BD%D0%B0%20%D0%BC%D0%B0%D0%BB%D0%B8%D0%BD%D0%BA%D0%B5."
       } on-error={ :log error "hs: алерт в Telegram не ушёл" }
     }
   }
@@ -114,7 +128,7 @@ add name="hs-pi-guard" policy=read,write,test source={
     /ip firewall nat enable [find comment="hs: hairpin DNS"]
     /ip dns set servers=$piAddr
     /ip dns cache flush
-    :log warning "hs: малинка вернулась — DNS снова через AdGuard, контроль восстановлен"
+    :log warning "hs: DNS малинки вернулся — DNS снова через AdGuard, контроль восстановлен"
     :if ($tgToken != "CHANGE_ME_BOT_TOKEN") do={
       :do {
         /tool fetch mode=https check-certificate=no output=none http-method=post  url="https://api.telegram.org/bot$tgToken/sendMessage"  http-data="chat_id=$tgChat&text=%E2%9C%85%20HomeSec%3A%20%D0%BC%D0%B0%D0%BB%D0%B8%D0%BD%D0%BA%D0%B0%20%D1%81%D0%BD%D0%BE%D0%B2%D0%B0%20%D0%BE%D1%82%D0%B2%D0%B5%D1%87%D0%B0%D0%B5%D1%82.%20DNS%20%D0%B2%D0%BE%D0%B7%D0%B2%D1%80%D0%B0%D1%89%D1%91%D0%BD%20%D0%BD%D0%B0%20AdGuard%2C%20%D1%80%D0%BE%D0%B4%D0%B8%D1%82%D0%B5%D0%BB%D1%8C%D1%81%D0%BA%D0%B8%D0%B9%20%D0%BA%D0%BE%D0%BD%D1%82%D1%80%D0%BE%D0%BB%D1%8C%20%D0%B2%D0%BE%D1%81%D1%81%D1%82%D0%B0%D0%BD%D0%BE%D0%B2%D0%BB%D0%B5%D0%BD."
@@ -127,6 +141,6 @@ add name="hs-pi-guard" policy=read,write,test source={
 /system scheduler
 add name="hs-pi-guard" interval=1m on-event="/system script run hs-pi-guard" policy=read,write,test,policy comment="hs: сторож малинки"
 
-:put "Сторож малинки установлен: проверка раз в минуту, переключение после 3 неудач."
+:put "Сторож малинки установлен: DNS-проба раз в минуту, переключение после 3 неудач."
 :put "НЕ ЗАБУДЬ подставить токен бота и chat_id: /system script edit hs-pi-guard source"
 :put "Проверить вживую: выключить малинку и через 3 минуты посмотреть /log print where message~\"hs:\""
