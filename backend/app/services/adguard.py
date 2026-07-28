@@ -3,6 +3,8 @@
 устройства. Управляем только клиентами с именами hs-* — ручные не трогаем."""
 
 import logging
+import re
+from datetime import datetime
 
 import httpx
 
@@ -71,6 +73,28 @@ def get_stats() -> dict:
 def get_query_log(limit: int = 50) -> list[dict]:
     data = _request("GET", f"/control/querylog?limit={limit}") or {}
     return data.get("data", [])
+
+
+_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(.*)$")
+
+
+def parse_ts(raw: str) -> datetime | None:
+    """Метка времени записи журнала (RFC3339 с наносекундами) -> локальное
+    наивное время. None, если разобрать не вышло.
+
+    Живёт здесь, потому что это формат AdGuard: им пользуются и учёт квот, и
+    сторож аномалий — второй раньше время записей просто игнорировал."""
+    m = _TS_RE.match((raw or "").strip())
+    if not m:
+        return None
+    frac = (m.group(2) or "0")[:6].ljust(6, "0")
+    try:
+        dt = datetime.fromisoformat(f"{m.group(1)}.{frac}{m.group(3) or ''}")
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
 
 
 def _all_clients() -> list[dict]:

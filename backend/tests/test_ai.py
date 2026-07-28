@@ -2,7 +2,7 @@
 мутаций, эвристики watchdog, деградация дайджеста без ключа."""
 
 import json
-from datetime import datetime
+from datetime import datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -131,15 +131,20 @@ def test_orchestrator_tool_error_reported_to_model(db, monkeypatch):
 
 # ---------- watchdog: эвристики без LLM ----------
 
-def _querylog(entries):
-    return [{"client": ip, "question": {"name": domain}} for ip, domain in entries]
+def _querylog(entries, ts=None):
+    """Записи журнала AdGuard. Время обязательно: сторож считает только свежие
+    записи, иначе вечерний трафик ребёнка давал «ночную активность» в 00:0x."""
+    stamp = (ts or datetime.now()).strftime("%Y-%m-%dT%H:%M:%S.000000")
+    return [{"client": ip, "question": {"name": domain}, "time": stamp}
+            for ip, domain in entries]
 
 
 def test_watchdog_night_activity(db, kid_device, monkeypatch):
     night = datetime(2026, 7, 14, 2, 30)
     monkeypatch.setattr(
         watchdog.adguard, "get_query_log",
-        lambda limit=500: _querylog([("192.168.88.30", f"site{i}.com") for i in range(20)]),
+        lambda limit=500: _querylog([("192.168.88.30", f"site{i}.com") for i in range(20)],
+                                    ts=night - timedelta(minutes=5)),
     )
     alerts = watchdog.find_anomalies(db, now=night)
     assert len(alerts) == 1 and "Ночная активность" in alerts[0] and "Планшет" in alerts[0]
@@ -148,18 +153,35 @@ def test_watchdog_night_activity(db, kid_device, monkeypatch):
     assert watchdog.find_anomalies(db, now=night) == []
 
 
+def test_watchdog_ignores_stale_log_entries(db, kid_device, monkeypatch):
+    """Ребёнок сидел в интернете вечером и лёг спать. В 00:07 сторож читает
+    последние 500 записей журнала — вечерние среди них есть, но они СТАРЫЕ.
+    Раньше время записей игнорировалось, и родители получали «ночную
+    активность» каждую ночь, хотя ребёнок спит."""
+    just_after_midnight = datetime(2026, 7, 15, 0, 7)
+    evening = datetime(2026, 7, 14, 22, 40)
+    monkeypatch.setattr(
+        watchdog.adguard, "get_query_log",
+        lambda limit=500: _querylog([("192.168.88.30", f"site{i}.com") for i in range(30)],
+                                    ts=evening),
+    )
+    assert watchdog.find_anomalies(db, now=just_after_midnight) == []
+
+
 def test_watchdog_doh_spike_and_quiet_day(db, kid_device, monkeypatch):
     day = datetime(2026, 7, 14, 15, 0)
     monkeypatch.setattr(
         watchdog.adguard, "get_query_log",
-        lambda limit=500: _querylog([("192.168.88.30", "dns.google")] * 12),
+        lambda limit=500: _querylog([("192.168.88.30", "dns.google")] * 12,
+                                    ts=day - timedelta(minutes=5)),
     )
     alerts = watchdog.find_anomalies(db, now=day)
     assert len(alerts) == 1 and "обхода" in alerts[0]
 
     monkeypatch.setattr(
         watchdog.adguard, "get_query_log",
-        lambda limit=500: _querylog([("192.168.88.30", "youtube.com")] * 12),
+        lambda limit=500: _querylog([("192.168.88.30", "youtube.com")] * 12,
+                                    ts=day - timedelta(minutes=5)),
     )
     assert watchdog.find_anomalies(db, now=day) == []  # обычный трафик днём — тишина
 
@@ -178,7 +200,8 @@ def test_watchdog_hides_device_name_from_llm(db, kid_device, monkeypatch):
     night = datetime(2026, 7, 14, 3, 0)
     monkeypatch.setattr(
         watchdog.adguard, "get_query_log",
-        lambda limit=500: _querylog([("192.168.88.30", f"s{i}.com") for i in range(20)]),
+        lambda limit=500: _querylog([("192.168.88.30", f"s{i}.com") for i in range(20)],
+                                    ts=night - timedelta(minutes=5)),
     )
     anomaly = watchdog.find_anomalies(db, now=night)[0]
     assert kid_device.name not in anomaly.text

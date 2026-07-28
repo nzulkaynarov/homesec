@@ -7,7 +7,6 @@
 на конкретный день."""
 
 import logging
-import re
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
@@ -68,22 +67,11 @@ def domain_category(domain: str) -> str | None:
     return None
 
 
-_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(.*)$")
-
-
 def _parse_ts(raw: str) -> datetime | None:
-    """RFC3339 из AdGuard (наносекунды!) -> локальное наивное время."""
-    m = _TS_RE.match(raw.strip())
-    if not m:
-        return None
-    frac = (m.group(2) or "0")[:6].ljust(6, "0")
-    try:
-        dt = datetime.fromisoformat(f"{m.group(1)}.{frac}{m.group(3) or ''}")
-    except ValueError:
-        return None
-    if dt.tzinfo is not None:
-        dt = dt.astimezone().replace(tzinfo=None)
-    return dt
+    """RFC3339 из AdGuard (наносекунды!) -> локальное наивное время.
+    Разбор живёт в adguard.py — это его формат; здесь остаётся тонкая обёртка,
+    чтобы тесты по-прежнему могли её подменять."""
+    return adguard.parse_ts(raw)
 
 
 def _bump(db: Session, device_id: int, date: str, category: str) -> None:

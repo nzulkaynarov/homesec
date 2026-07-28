@@ -20,6 +20,9 @@ log = logging.getLogger("homesec.ai.watchdog")
 NIGHT_HOURS = range(0, 6)  # 00:00–05:59
 NIGHT_MIN_QUERIES = 15  # столько DNS-запросов за окно = устройство реально активно
 DOH_SPIKE_THRESHOLD = 10  # запросов к DoH-доменам за окно
+# Окно, за которое смотрим журнал. Чуть больше интервала проверки (15 мин в
+# bot/main.py), чтобы записи не проваливались между запусками.
+WINDOW_SECONDS = 20 * 60
 
 # Домены публичных DoH-резолверов: запрос к ним = клиент ищет обход фильтра
 DOH_DOMAINS = (
@@ -83,9 +86,18 @@ def find_anomalies(db: Session, now: datetime | None = None) -> list[Anomaly]:
     devices = {d.ip: d for d in db.scalars(select(Device)) if d.ip}
     per_device: dict[str, int] = {}
     doh_per_device: dict[str, int] = {}
+    # Считаем только СВЕЖИЕ записи. Раньше время записей игнорировалось, и
+    # последние 500 строк журнала давали две ложные тревоги: в 00:0x в окно
+    # попадал вечерний трафик ребёнка («ночная активность», хотя он спит), а
+    # разовый всплеск DoH висел в журнале часами и повторял алерт каждые 6
+    # часов, пока не вытеснится.
+    window_start = now - timedelta(seconds=WINDOW_SECONDS)
     for entry in entries:
         ip = entry.get("client", "")
         if ip not in devices:
+            continue
+        ts = adguard.parse_ts(entry.get("time", "") or "")
+        if ts is None or ts < window_start or ts > now + timedelta(seconds=5):
             continue
         per_device[ip] = per_device.get(ip, 0) + 1
         domain = ((entry.get("question") or {}).get("name", "")).lower().rstrip(".")
