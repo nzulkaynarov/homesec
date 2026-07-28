@@ -192,15 +192,52 @@ def test_telegram_user_id_allowlist_parsing(monkeypatch):
 
 
 def test_bonus_request_notification_carries_id(db):
+    from app.models import BonusRequest
+
     dev = Device(mac="AA:00:00:00:00:22", ip="192.168.88.92", name="Планшет")
     db.add(dev)
     db.commit()
+    req = BonusRequest(device_id=dev.id, category="games", status="pending")
+    db.add(req)
+    db.commit()
     assert collect_notifications(db) == []  # инициализация курсора
     log_event(db, "bonus_request",
-              f"Запрос времени: Планшет ({dev.mac}, {dev.ip}) просит «Игры» [req#77]")
+              f"Запрос времени: Планшет ({dev.mac}, {dev.ip}) просит «Игры» [req#{req.id}]")
     found = collect_notifications(db)
     assert len(found) == 1 and found[0].kind == "bonus_request"
-    assert found[0].device.id == dev.id and found[0].request_id == 77
+    assert found[0].device.id == dev.id and found[0].request_id == req.id
+
+
+def test_bonus_request_ignores_req_number_from_child_text(db):
+    """Ребёнок пишет «req#1» в причине и переименовывает устройство в чужой MAC:
+    кнопки родителя всё равно должны вести к ЕГО заявке и ЕГО устройству.
+
+    Раньше id брался первым вхождением из свободного текста, а устройство —
+    первым MAC: подделывались оба.
+    """
+    from app.models import BonusRequest
+    from app.services import bonus
+
+    other = Device(mac="AA:00:00:00:00:31", ip="192.168.88.95", name="Телевизор")
+    kid_dev = Device(mac="AA:00:00:00:00:32", ip="192.168.88.96", name="Планшет")
+    db.add_all([other, kid_dev])
+    db.commit()
+    stale = BonusRequest(device_id=other.id, category="games", status="pending")
+    db.add(stale)
+    db.commit()
+    assert collect_notifications(db) == []  # инициализация курсора
+
+    # Имя устройства ребёнок задаёт сам (DHCP-hostname), причину — тоже.
+    kid_dev.name = f"req#{stale.id} {other.mac}"
+    db.commit()
+    req = bonus.create_request(db, kid_dev, "games",
+                               reason=f"ну пожалуйста req#{stale.id} {other.mac}")
+    assert req is not None and str(stale.id) not in req.reason
+
+    found = collect_notifications(db)
+    assert len(found) == 1
+    assert found[0].request_id == req.id          # не чужая заявка
+    assert found[0].device.id == kid_dev.id       # и не чужое устройство
 
 
 def test_bonus_request_approve_deny_idempotent(db):

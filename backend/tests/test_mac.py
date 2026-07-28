@@ -117,6 +117,89 @@ def test_merge_devices_tool(db, monkeypatch):
                        {"duplicate_id": target.id, "target_id": target.id})
 
 
+def test_merge_keeps_screen_time_bonuses_and_request(db, monkeypatch):
+    """Объединение переносит на настоящее устройство всё, что накопил дубль:
+    минуты за сегодня, выданный бонус, висящую заявку и паузу.
+
+    Без этого телефон, сменивший «приватный» MAC днём, после нажатия
+    «объединить» терял часть экранного времени, а кнопка родителя под заявкой
+    падала с «Не нашёл устройство»."""
+    from datetime import datetime, timedelta
+
+    from app.models import BonusRequest, Pause, QuotaBonus, QuotaUsage
+
+    monkeypatch.setattr(tools.enforcement, "reconcile", lambda s: None)
+    for m in (BonusRequest, QuotaBonus, QuotaUsage, Pause):
+        db.query(m).delete()
+    db.commit()
+
+    target = Device(mac="00:11:22:33:44:55", ip="192.168.88.40", name="Телефон")
+    dup = Device(mac="D2:BB:BB:BB:BB:02", ip="192.168.88.42", name="дубль")
+    db.add_all([target, dup])
+    db.commit()
+    today = datetime.now().strftime("%Y-%m-%d")
+    db.add_all([
+        QuotaUsage(device_id=target.id, date=today, category="games", minutes=10),
+        QuotaUsage(device_id=dup.id, date=today, category="games", minutes=25),
+        QuotaUsage(device_id=dup.id, date=today, category="video", minutes=7),
+        QuotaBonus(target_type="device", target=str(dup.id), date=today,
+                   category="games", minutes=30),
+        BonusRequest(device_id=dup.id, category="games", status="pending"),
+        Pause(target_type="device", target=str(dup.id),
+              until=datetime.now() + timedelta(hours=1)),
+    ])
+    db.commit()
+
+    tools.run_tool(db, "merge_devices", {"duplicate_id": dup.id, "target_id": target.id})
+
+    usage = {u.category: u.minutes for u in db.query(QuotaUsage)}
+    assert usage == {"games": 35, "video": 7}  # минуты сложились, ничего не потеряно
+    assert db.query(QuotaBonus).one().target == str(target.id)
+    assert db.query(BonusRequest).one().device_id == target.id
+    assert db.query(Pause).one().target == str(target.id)
+
+
+def test_deleted_device_does_not_break_next_tick(db, monkeypatch):
+    """Удаление устройства чистит связанные строки; даже если осиротевшая
+    строка device_macs осталась от старой версии панели, тот же MAC в DHCP не
+    должен ронять тик (раньше IntegrityError улетал наружу и пропускал ВЕСЬ
+    reconcile: в эту минуту не применялись ни блокировки, ни квоты)."""
+    from app.services.device_links import purge_device_rows
+
+    dev = Device(mac="00:11:22:33:44:55", ip="192.168.88.40", name="Телефон")
+    db.add(dev)
+    db.commit()
+    db.add(DeviceMac(device_id=dev.id, mac=dev.mac))
+    db.commit()
+
+    purge_device_rows(db, dev.id)
+    db.delete(dev)
+    db.commit()
+    assert db.query(DeviceMac).count() == 0  # сирот не осталось
+
+    # Имитируем базу, испорченную старой версией: сирота на месте.
+    db.add(DeviceMac(device_id=999, mac="00:11:22:33:44:55"))
+    db.commit()
+    monkeypatch.setattr(enforcement.mikrotik, "get_leases",
+                        lambda api: _leases(("00:11:22:33:44:55", "192.168.88.40", "phone")))
+    devices = enforcement.discover_devices(db, api=None)  # не должно бросать
+    assert len(devices) == 1
+    assert db.query(DeviceMac).one().device_id == devices[0].id  # сирота перевешена
+
+
+def test_hostname_from_device_is_sanitized(db, monkeypatch):
+    """Имя из DHCP задаёт само устройство: MAC и «req#N» в нём — попытка
+    подделать якоря, по которым бот разбирает свои же уведомления."""
+    monkeypatch.setattr(
+        enforcement.mikrotik, "get_leases",
+        lambda api: _leases(("00:11:22:33:44:66", "192.168.88.43",
+                             "req#7 AA:BB:CC:DD:EE:FF [взлом]")))
+    devices = enforcement.discover_devices(db, api=None)
+    name = devices[0].name
+    assert "AA:BB:CC:DD:EE:FF" not in name and "req#7" not in name
+    assert "[" not in name and "]" not in name
+
+
 def test_migration_backfills_device_macs(tmp_path):
     """Миграция №1 на «старой» базе: добавляет hostname и переносит MAC."""
     eng = create_engine(f"sqlite:///{tmp_path / 'old.db'}")

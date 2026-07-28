@@ -105,12 +105,14 @@ def record_activity(db: Session, now: datetime | None = None) -> dict[int, set[s
     окне. Возвращает {device_id: категории}, пустой dict если тик пропущен."""
     now = now or datetime.now()
     raw = kv_get(db, _TICK_GUARD_KEY, "")
+    prev_tick: datetime | None = None
     if raw:
         try:
-            if (now - datetime.fromisoformat(raw)).total_seconds() < _MIN_TICK_GAP:
-                return {}
+            prev_tick = datetime.fromisoformat(raw)
         except ValueError:
-            pass
+            prev_tick = None
+        if prev_tick is not None and (now - prev_tick).total_seconds() < _MIN_TICK_GAP:
+            return {}
     kv_set(db, _TICK_GUARD_KEY, now.isoformat())
 
     try:
@@ -119,7 +121,14 @@ def record_activity(db: Session, now: datetime | None = None) -> dict[int, set[s
         return {}
 
     devices = {d.ip: d for d in db.scalars(select(Device)) if d.ip}
+    # Окно — «с прошлого тика», а не фиксированные 90 секунд: при тике раз в
+    # 60с фиксированное окно перекрывалось соседним на ~30с, и записи из зоны
+    # перекрытия считались ДВАЖДЫ (короткий всплеск активности сжигал две
+    # минуты квоты вместо одной). _WINDOW остаётся верхней границей — запас на
+    # случай, если тик опоздал или панель перезапускалась.
     window_start = now - timedelta(seconds=_WINDOW)
+    if prev_tick is not None and prev_tick > window_start:
+        window_start = prev_tick
     counts: dict[int, int] = {}
     cats: dict[int, set[str]] = {}
     for entry in entries:

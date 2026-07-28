@@ -102,6 +102,50 @@ def test_record_activity_tick_guard(db, kid_device, monkeypatch):
     assert quota.record_activity(db, now=NOW.replace(second=5)) == {}
 
 
+def test_record_activity_no_double_count_between_ticks(db, kid_device, monkeypatch):
+    """Один всплеск активности = одна минута, даже если он попал в журнал,
+    который панель читает на двух соседних тиках подряд.
+
+    Раньше окно было фиксированным (90с) при тике раз в 60с: перекрытие в 30с
+    считалось дважды, и квота ребёнка сгорала быстрее реального времени.
+    Здесь метки времени НЕ подменяются — проверяется именно арифметика окна.
+    """
+    burst_at = NOW.replace(second=30)
+    log = _qlog(
+        "192.168.88.30",
+        ["roblox.com", "a.com", "b.com", "c.com", "d.com", "e.com"],
+        burst_at.strftime("%Y-%m-%dT%H:%M:%S.000000"),
+    )
+    monkeypatch.setattr(quota.adguard, "get_query_log", lambda limit=500: log)
+
+    # Тик 1: всплеск свежий — считаем.
+    first = NOW.replace(minute=1)
+    assert quota.record_activity(db, now=first) == {kid_device.id: {"games", "internet"}}
+
+    # Тик 2 через 60 секунд: журнал тот же, но эти записи уже учтены — они
+    # старше прошлого тика и в новое окно попадать не должны.
+    assert quota.record_activity(db, now=first.replace(minute=2)) == {}
+
+    usage = {u.category: u.minutes for u in db.query(QuotaUsage)}
+    assert usage == {"games": 1, "internet": 1}
+
+
+def test_record_activity_window_capped_after_long_pause(db, kid_device, monkeypatch):
+    """После долгого простоя (панель лежала час) окно не растягивается на весь
+    простой: считаем максимум последние _WINDOW секунд, иначе первый же тик
+    после рестарта списал бы кучу минут за один раз."""
+    monkeypatch.setattr(quota.adguard, "get_query_log", lambda limit=500: [])
+    quota.record_activity(db, now=NOW)  # ставим метку прошлого тика
+
+    hour_later = NOW.replace(hour=16)
+    stale = NOW.replace(minute=30)  # 15:30 — за полчаса до тика в 16:00
+    log = _qlog("192.168.88.30", ["roblox.com"], stale.strftime("%Y-%m-%dT%H:%M:%S.000000"))
+    monkeypatch.setattr(quota.adguard, "get_query_log", lambda limit=500: log)
+
+    assert quota.record_activity(db, now=hour_later) == {}
+    assert db.query(QuotaUsage).count() == 0
+
+
 def _use(db, device_id, category, minutes, date=None):
     # По умолчанию — СЕГОДНЯ: exhausted()/_desired_state() смотрят на реальную
     # дату, и захардкоженный день превращал тесты в тыкву назавтра.

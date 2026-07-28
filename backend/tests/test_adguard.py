@@ -77,6 +77,28 @@ def test_sync_clients_filters_unknown_services(monkeypatch):
     assert sent["hs-kid"] == ["steam"]
 
 
+def test_sync_clients_keeps_services_when_registry_is_empty(monkeypatch):
+    """Пустой (или не той формы) ответ реестра — это «узнать не удалось», а не
+    «AdGuard не знает ни одного сервиса». Иначе фильтр вырезал бы ВСЕ id, и
+    блокировки игр/видео/соцсетей детям тихо переставали применяться."""
+    sent: dict[str, list[str]] = {}
+
+    def fake_request(method, url, **kw):
+        if url == "/control/clients":
+            return {"clients": []}
+        if url == "/control/blocked_services/all":
+            return {"blocked_services": []}  # так отвечает версия с другим эндпоинтом
+        sent[kw["json"]["name"]] = kw["json"]["blocked_services"]
+        return None
+
+    monkeypatch.setattr(adguard, "_request", fake_request)
+    assert adguard.known_service_ids() is None
+    adguard.sync_clients({"hs-kid": {"ip": "192.168.88.30",
+                                     "blocked_services": ["steam", "roblox"],
+                                     "safe_search": False}})
+    assert sent["hs-kid"] == ["roblox", "steam"]
+
+
 def test_sync_clients_without_registry_keeps_services(monkeypatch):
     """Если /blocked_services/all недоступен (старый AdGuard) — фильтрацию
     пропускаем, блокировки не режем."""

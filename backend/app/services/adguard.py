@@ -92,7 +92,15 @@ def known_service_ids() -> set[str] | None:
     except AdGuardError:
         return None
     services = data.get("blocked_services") or []
-    return {s["id"] for s in services if s.get("id")}
+    known = {s["id"] for s in services if isinstance(s, dict) and s.get("id")}
+    if not known:
+        # Пустой реестр = ответ не той формы (эндпоинт переехал между версиями
+        # AdGuard). Вернуть пустое множество нельзя: тогда фильтр ниже вырежет
+        # ВСЕ сервисы, и блокировки игр/видео/соцсетей детям молча перестанут
+        # применяться — с одним warning'ом в журнале и зелёной панелью.
+        log.warning("AdGuard вернул пустой реестр сервисов — фильтрацию id пропускаем")
+        return None
+    return known
 
 
 def _foreign_ids(clients: list[dict]) -> set[str]:

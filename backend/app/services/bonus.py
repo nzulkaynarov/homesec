@@ -10,6 +10,7 @@ from sqlalchemy.orm import Session
 
 from ..models import BonusRequest, Device, log_event
 from . import quota
+from .safetext import REASON_LIMIT, clean_label
 
 # Антиспам: не чаще одной заявки с устройства за это окно (как cooldown портала).
 REQUEST_COOLDOWN = timedelta(minutes=10)
@@ -54,8 +55,11 @@ def create_request(db: Session, dev: Device, category: str,
         category = "internet"
     if not can_request(db, dev.id):
         return None
+    # Причину пишет ребёнок на публичной странице — из неё убираем формы,
+    # которые бот использует как якоря разбора (MAC, req#N, скобки): иначе
+    # «req#7» в причине привязывал кнопки родителя к ЧУЖОЙ заявке.
     req = BonusRequest(device_id=dev.id, category=category,
-                       reason=reason.strip()[:200], status="pending")
+                       reason=clean_label(reason, REASON_LIMIT), status="pending")
     db.add(req)
     db.commit()
     cat_label = quota.QUOTA_CATEGORY_LABELS.get(category, category)
