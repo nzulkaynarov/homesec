@@ -19,15 +19,24 @@ router = APIRouter()
 _ROLE_ORDER = {"kid": 0, "adult": 1, "guest": 2}
 
 
-def _pause_map(db: Session, devices: list[Device]) -> dict[int, datetime]:
-    """{device_id: до какого времени пауза} — учитывает и личные, и групповые."""
-    out: dict[int, datetime] = {}
+def _pause_map(db: Session, devices: list[Device]) -> dict[int, dict[str, datetime]]:
+    """{device_id: {"device": до…, "group": до…}} — источник паузы важен:
+    кнопка «Снять паузу» на карточке устройства снимает только личную паузу,
+    групповую снимают отдельной кнопкой в шапке секции. Раньше источники были
+    слиты, и родитель жал кнопку, которая для групповой паузы ничего не
+    делала — страница просто перезагружалась без изменений."""
+    out: dict[int, dict[str, datetime]] = {}
     for p in active_pauses(db):
         for d in devices:
-            hit = (p.target_type == "device" and p.target == str(d.id)) or (
-                p.target_type == "group" and p.target == d.group)
-            if hit and (d.id not in out or p.until > out[d.id]):
-                out[d.id] = p.until
+            if p.target_type == "device" and p.target == str(d.id):
+                source = "device"
+            elif p.target_type == "group" and p.target == d.group:
+                source = "group"
+            else:
+                continue
+            current = out.setdefault(d.id, {})
+            if source not in current or p.until > current[source]:
+                current[source] = p.until
     return out
 
 
@@ -45,11 +54,15 @@ def _console(db: Session, devices: list[Device], online_ips: set[str]) -> list[d
     people.sort(key=lambda p: (_ROLE_ORDER.get(p.role, 9), p.name.lower()))
 
     def card_for(dev: Device) -> dict:
-        until = pauses.get(dev.id)
+        sources = pauses.get(dev.id, {})
+        personal = sources.get("device")
+        group_until = sources.get("group")
         return {
             "dev": dev,
             "online": dev.ip in online_ips,
-            "paused_until": until,
+            "paused_until": max(filter(None, (personal, group_until)), default=None),
+            # Пауза пришла только от группы — личной кнопкой её не снять.
+            "group_pause_only": group_until is not None and personal is None,
             "quota": progress.get(dev.id, []),
         }
 

@@ -38,24 +38,54 @@ Wi-Fi: `/interface wireless monitor wlan2 once` (свойству `running` не
 
 ## Аварийный откат DNS (дом без интернета, виновата фильтрация)
 
-В терминале winbox/ssh MikroTik — возвращает DNS на роутер, минуя малинку:
+Один шаг в терминале winbox/ssh MikroTik (файл заливается в Files один раз,
+запускать можно повторно — он только set/disable, дублей не плодит):
 
 ```routeros
-/ip firewall nat disable [find comment~"hs:"]
-/ip dhcp-server network set [find address=192.168.88.0/24] dns-server=192.168.88.1
-/ip dns set servers=1.1.1.1,8.8.8.8
+/import file-name=emergency-dns-rollback.rsc
 ```
 
-Обратно (малинка должна пинговаться!): импорт `mikrotik/enable-adguard.rsc`
-или `enable` тех же правил + вернуть dns-server=192.168.88.2.
+Скрипт печатает 4 шага и **падает с понятной ошибкой, если DHCP-сеть не
+нашлась** — молчаливого «всё хорошо» при неработающем откате больше нет.
+
+То же руками, если файла на роутере нет:
+
+```routeros
+/ip firewall nat disable [find comment="hs: force DNS -> AdGuard"]
+/ip firewall nat disable [find comment="hs: hairpin DNS"]
+/ip dhcp-server network set [find comment=defconf] dns-server=192.168.88.1
+/ip dhcp-server network set [find comment="hs: guest network"] dns-server=1.1.1.1,8.8.8.8
+/ip dns set servers=1.1.1.1,8.8.8.8
+/ip dns cache flush
+```
+
+⚠️ Селектор — **по comment, не по address**: `find address=192.168.88.0/24` на
+RouterOS 7.23 не матчит IP-префикс, find возвращает пусто, а `set` по пустому
+списку — тихий no-op (ловили в проде 2026-07-15). Гостевую сеть переводим на
+публичный DNS, а не на роутер: гостям вход на роутер закрыт правилом
+«hs: guest no router access».
+
+Клиенты подхватят новый DNS при продлении аренды (до часа). Быстрее —
+`/ip dhcp-server lease remove [find dynamic]` или переподключить Wi-Fi.
+
+Обратно (малинка должна пинговаться!): импорт `mikrotik/enable-adguard.rsc` —
+он сам проверяет пинг малинки и что dns-server реально записался.
 
 ## Частые операции
 
 - **Обновить панель вручную, не дожидаясь таймера:** на Pi
   `sudo systemctl start homesec-update`.
 - **Откатить панель на коммит:** `sudo git -C /opt/homesec reset --hard <sha>`
-  (следующий tick таймера не перезатрёт: update.sh сравнивает с origin/main —
+  (следующий tick таймера не перезатрёт: деплой сравнивает origin/main с меткой
+  последнего успешного выката `/var/lib/homesec/deployed_sha`, а не с HEAD —
   для настоящего отката revert'ни коммит в main).
+- **Заставить деплой перевыкатить тот же коммит** (например, после ручного
+  reset или сломанного venv): `sudo rm /var/lib/homesec/deployed_sha` — ближайший
+  тик поставит зависимости, сбросит дерево на origin/main и перезапустит сервисы.
+- **Понять, доехал ли деплой:** `cat /var/lib/homesec/deployed_sha` —
+  метка пишется ПОСЛЕДНЕЙ, только после успешных pip + рестартов. Если она
+  отстаёт от origin/main, деплой падает и ретраится каждую минуту:
+  `journalctl -u homesec-update -n 50`.
 - **Посмотреть, что панель делает с роутером:** таблица «Журнал» в панели
   или `/ip firewall address-list print where list~"hs"` на MikroTik.
 - **Перезапуск всего на Pi:** `sudo systemctl restart AdGuardHome homesec`.

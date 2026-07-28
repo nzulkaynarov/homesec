@@ -3,8 +3,8 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  {# Когда родитель одобрит запрос, ограничение снимется — страница обновится сама #}
-  <meta http-equiv="refresh" content="20">
+  {# Автообновление — скриптом внизу: meta-refresh стирал текст, который
+     ребёнок набирал в поле «Почему?». #}
   <title>HomeSec — доступ ограничен</title>
   <style>
     body { font-family: system-ui, sans-serif; background: #f4f4f4; margin: 0;
@@ -90,5 +90,14 @@
   <p class="hint">Вернуть доступ может владелец сети.</p>
   {% endif %}
 </div>
+<script>
+  // Обновляемся, пока ребёнок ничего не печатает: как только родитель ответит,
+  // страница сама покажет вернувшийся интернет.
+  setInterval(function () {
+    var reason = document.querySelector('textarea[name=reason]');
+    var typing = reason && (document.activeElement === reason || reason.value.trim() !== '');
+    if (!typing) { location.replace(location.pathname); }
+  }, 20000);
+</script>
 </body>
 </html>

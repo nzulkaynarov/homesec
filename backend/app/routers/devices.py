@@ -19,6 +19,7 @@ from ..models import (
     log_event,
 )
 from ..services import mikrotik, quota
+from ..services.device_links import purge_device_rows
 from ..services.enforcement import reconcile
 from ..services.quota import QUOTA_CATEGORIES
 from ..templates_env import templates
@@ -149,6 +150,7 @@ async def unblock_device(device_id: int, tasks: BackgroundTasks, db: Session = D
 async def delete_device(device_id: int, tasks: BackgroundTasks, db: Session = Depends(get_db)):
     dev = db.get(Device, device_id)
     if dev:
+        purge_device_rows(db, dev.id)
         db.delete(dev)
         db.commit()
     tasks.add_task(_reconcile_bg)
@@ -191,8 +193,17 @@ async def unpause_device(
         for p in list(db.scalars(select(Pause).where(
                 Pause.target_type == "device", Pause.target == str(dev.id)))):
             db.delete(p)
+        # Кнопка на дашборде показывается и для устройства, заблокированного
+        # вручную (пресеты пауз в этом случае скрыты) — значит она обязана
+        # снимать и ручную блокировку, иначе это единственное предложенное
+        # действие не делает ничего и пишет в журнал ложное «Пауза снята».
+        # Групповую паузу отсюда не трогаем: она про всю группу, для неё на
+        # карточке есть отдельная кнопка.
+        was_blocked = dev.blocked_manual
+        dev.blocked_manual = False
         db.commit()
-        log_event(db, "unpause", f"Пауза снята: {dev.name}")
+        log_event(db, "unpause",
+                  f"Разблокировано: {dev.name}" if was_blocked else f"Пауза снята: {dev.name}")
     tasks.add_task(_reconcile_bg)
     return RedirectResponse(_safe_redirect(redirect_to), status_code=302)
 

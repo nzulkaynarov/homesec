@@ -7,7 +7,6 @@
 на конкретный день."""
 
 import logging
-import re
 from datetime import datetime, timedelta
 
 from sqlalchemy import select
@@ -68,22 +67,11 @@ def domain_category(domain: str) -> str | None:
     return None
 
 
-_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(.*)$")
-
-
 def _parse_ts(raw: str) -> datetime | None:
-    """RFC3339 из AdGuard (наносекунды!) -> локальное наивное время."""
-    m = _TS_RE.match(raw.strip())
-    if not m:
-        return None
-    frac = (m.group(2) or "0")[:6].ljust(6, "0")
-    try:
-        dt = datetime.fromisoformat(f"{m.group(1)}.{frac}{m.group(3) or ''}")
-    except ValueError:
-        return None
-    if dt.tzinfo is not None:
-        dt = dt.astimezone().replace(tzinfo=None)
-    return dt
+    """RFC3339 из AdGuard (наносекунды!) -> локальное наивное время.
+    Разбор живёт в adguard.py — это его формат; здесь остаётся тонкая обёртка,
+    чтобы тесты по-прежнему могли её подменять."""
+    return adguard.parse_ts(raw)
 
 
 def _bump(db: Session, device_id: int, date: str, category: str) -> None:
@@ -105,12 +93,14 @@ def record_activity(db: Session, now: datetime | None = None) -> dict[int, set[s
     окне. Возвращает {device_id: категории}, пустой dict если тик пропущен."""
     now = now or datetime.now()
     raw = kv_get(db, _TICK_GUARD_KEY, "")
+    prev_tick: datetime | None = None
     if raw:
         try:
-            if (now - datetime.fromisoformat(raw)).total_seconds() < _MIN_TICK_GAP:
-                return {}
+            prev_tick = datetime.fromisoformat(raw)
         except ValueError:
-            pass
+            prev_tick = None
+        if prev_tick is not None and (now - prev_tick).total_seconds() < _MIN_TICK_GAP:
+            return {}
     kv_set(db, _TICK_GUARD_KEY, now.isoformat())
 
     try:
@@ -119,7 +109,14 @@ def record_activity(db: Session, now: datetime | None = None) -> dict[int, set[s
         return {}
 
     devices = {d.ip: d for d in db.scalars(select(Device)) if d.ip}
+    # Окно — «с прошлого тика», а не фиксированные 90 секунд: при тике раз в
+    # 60с фиксированное окно перекрывалось соседним на ~30с, и записи из зоны
+    # перекрытия считались ДВАЖДЫ (короткий всплеск активности сжигал две
+    # минуты квоты вместо одной). _WINDOW остаётся верхней границей — запас на
+    # случай, если тик опоздал или панель перезапускалась.
     window_start = now - timedelta(seconds=_WINDOW)
+    if prev_tick is not None and prev_tick > window_start:
+        window_start = prev_tick
     counts: dict[int, int] = {}
     cats: dict[int, set[str]] = {}
     for entry in entries:

@@ -40,6 +40,7 @@ from ..models import (
 )
 from ..services import adguard, enforcement, mikrotik
 from ..services import quota as quota_svc
+from ..services.device_links import move_device_rows
 
 
 class ToolError(Exception):
@@ -571,6 +572,11 @@ def merge_devices(
         db.add(DeviceMac(device_id=target.id, mac=dup.mac))
     if dup.ip:  # дубль — более свежий lease, актуальный адрес у него
         target.ip = dup.ip
+    # Учёт минут, бонусы, заявки и паузы дубля переезжают вместе с MAC —
+    # иначе телефон, сменивший «приватный» MAC днём, после объединения терял
+    # накопленное за день экранное время, а висящая заявка ребёнка указывала
+    # на удалённую запись (кнопка родителя падала с «Не нашёл устройство»).
+    move_device_rows(db, dup.id, target.id)
     dup_label = f"{dup.name} ({dup.mac})"
     db.delete(dup)
     db.commit()

@@ -196,6 +196,7 @@ def test_me_page_request_and_ratelimit(db):
         assert "Катин-планшет" in r.text and "Попросить ещё" in r.text
         r = c.post("/me/ask", data={"category": "games", "reason": "доиграть"})
         assert r.status_code == 200 and "Заявка отправлена" in r.text
+        assert str(r.url).endswith("/me?sent=1")  # PRG: сидим на GET-странице
         req = db.query(BonusRequest).one()
         assert req.device_id == d.id and req.category == "games" and req.status == "pending"
         ev = [e for e in db.query(EventLog) if e.kind == "bonus_request"]
@@ -213,3 +214,25 @@ def test_me_no_device_shows_greeting(db):
     with TestClient(app) as c:
         r = c.get("/me")
         assert r.status_code == 200 and "распознан" in r.text
+
+
+def test_me_ask_survives_page_refresh(db):
+    """После отправки заявки страница обновляется каждые 20 секунд. Раньше она
+    стояла на POST-адресе /me/ask, и обновление приходило GET'ом → ребёнок
+    видел голый JSON «405 Method Not Allowed» вместо своих полос времени."""
+    with TestClient(app) as c:
+        r = c.post("/me/ask", data={"category": "games"}, follow_redirects=False)
+        assert r.status_code == 303  # Post/Redirect/Get, а не рендер на POST-URL
+        r = c.get("/me/ask", follow_redirects=False)
+        assert r.status_code == 303 and r.headers["location"] == "/me"
+
+
+def test_child_pages_do_not_meta_refresh_over_typing(db):
+    """Автообновление не должно стирать текст, который ребёнок набирает в поле
+    «Почему?»: meta-refresh перезагружал страницу вслепую, скрипт — только
+    когда поле пустое и не в фокусе."""
+    with TestClient(app) as c:
+        for url in ("/me", "/blocked"):
+            html = c.get(url).text
+            assert "http-equiv=\"refresh\"" not in html
+            assert "activeElement" in html and "location.replace" in html

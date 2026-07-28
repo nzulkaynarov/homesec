@@ -6,6 +6,7 @@
 from datetime import datetime, timedelta
 
 from fastapi import APIRouter, Depends, Form, Request
+from fastapi.responses import RedirectResponse
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -54,9 +55,18 @@ async def blocked_page(request: Request, db: Session = Depends(get_db)):
 
 
 @router.get("/me")
-async def me_page(request: Request, db: Session = Depends(get_db)):
-    return templates.TemplateResponse(request, "me.html",
-                                      _me_context(db, _client_ip(request)))
+async def me_page(request: Request, sent: int = 0, db: Session = Depends(get_db)):
+    ctx = _me_context(db, _client_ip(request))
+    ctx["just_sent"] = bool(sent)
+    return templates.TemplateResponse(request, "me.html", ctx)
+
+
+@router.get("/me/ask")
+async def me_ask_get():
+    """Страница сама обновляется раз в 20 секунд, а после отправки формы
+    браузер стоял на /me/ask — обновление приходило GET'ом на POST-адрес и
+    ребёнок видел голый JSON «405 Method Not Allowed». Отправляем на /me."""
+    return RedirectResponse("/me", status_code=303)
 
 
 @router.post("/me/ask")
@@ -70,9 +80,10 @@ async def me_ask(
     dev = db.scalar(select(Device).where(Device.ip == ip)) if ip else None
     if dev is not None:
         bonus.create_request(db, dev, category, reason)  # None при антиспаме — молча
-    ctx = _me_context(db, ip)
-    ctx["just_sent"] = dev is not None
-    return templates.TemplateResponse(request, "me.html", ctx)
+    # Post/Redirect/Get: после отправки браузер стоит на обычной GET-странице,
+    # F5 не предлагает отправить заявку повторно.
+    return RedirectResponse("/me?sent=1" if dev is not None else "/me",
+                            status_code=303)
 
 
 def _register_state(db: Session, ip: str) -> tuple[str, Device | None]:

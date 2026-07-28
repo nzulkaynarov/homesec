@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
-from ..models import Device, EventLog, kv_get, kv_set
+from ..models import BonusRequest, Device, EventLog, kv_get, kv_set
 
 CURSOR_KEY = "bot_last_event_id"
 NOTIFY_KINDS = ("device_new", "register_request", "device_maybe_same",
@@ -46,23 +46,36 @@ def collect_notifications(db: Session) -> list[Notification]:
     )
     out = []
     for e in events:
+        req_id = None
+        dev = None
+        if e.kind == "bonus_request":
+            # Номер заявки — машинная метка «[req#N]» в КОНЦЕ сообщения, а до
+            # неё идёт текст ребёнка. Берём последнее вхождение и, главное,
+            # устройство определяем по самой заявке в БД, а не по MAC из
+            # текста: и то и другое ребёнок мог бы подделать через имя
+            # устройства или поле «почему» (см. services/safetext.py).
+            found = _REQ_RE.findall(e.message)
+            if not found:
+                continue  # без id заявки одобрять нечего
+            req_id = int(found[-1])
+            req = db.get(BonusRequest, req_id)
+            if req is None:
+                continue
+            dev = db.get(Device, req.device_id)
+            if dev is None:
+                continue  # устройство удалили, пока заявка ждала
         macs = [m.upper() for m in _MAC_RE.findall(e.message)]
-        if not macs:
-            continue
-        dev = db.scalar(select(Device).where(Device.mac == macs[0]))
         if dev is None:
-            continue
+            if not macs:
+                continue
+            dev = db.scalar(select(Device).where(Device.mac == macs[0]))
+            if dev is None:
+                continue
         extra = None
         if e.kind == "device_maybe_same" and len(macs) > 1:
             extra = db.scalar(select(Device).where(Device.mac == macs[1]))
             if extra is None:
                 continue  # оригинал уже объединили/удалили
-        req_id = None
-        if e.kind == "bonus_request":
-            m = _REQ_RE.search(e.message)
-            if m is None:
-                continue  # без id заявки одобрять нечего
-            req_id = int(m.group(1))
         out.append(Notification(kind=e.kind, device=dev, message=e.message,
                                 extra_device=extra, request_id=req_id))
     if max_id > last:

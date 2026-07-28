@@ -102,6 +102,68 @@ def test_dashboard_quick_actions_pause_and_bonus():
             s.close()
 
 
+def test_unpause_button_actually_unblocks():
+    """«▶ Снять паузу» — единственное действие, которое дашборд предлагает для
+    заблокированного устройства (пресеты пауз в этом случае скрыты). Раньше оно
+    удаляло только Pause: флаг ручной блокировки оставался, устройство —
+    заблокированным, а в журнал писалось ложное «Пауза снята»."""
+    from app.db import session
+    from app.models import Device, Person
+
+    with TestClient(app) as c:
+        c.post("/login", data={"username": "admin", "password": "testpass"})
+        s = session()
+        try:
+            kid = Person(name="Petya", role="kid")
+            s.add(kid)
+            s.commit()
+            dev = Device(mac="CC:00:00:00:00:12", ip="192.168.88.56",
+                         name="Petya-phone", person_id=kid.id, blocked_manual=True)
+            s.add(dev)
+            s.commit()
+            dev_id = dev.id
+        finally:
+            s.close()
+
+        assert "Разблокировать" in c.get("/").text  # кнопка честно названа
+        c.post(f"/devices/{dev_id}/unpause", data={"redirect_to": "/"},
+               follow_redirects=False)
+
+        s = session()
+        try:
+            assert s.get(Device, dev_id).blocked_manual is False
+        finally:
+            s.close()
+
+
+def test_group_paused_device_shows_group_hint_not_dead_button():
+    """Паузу поставили всей группе — на карточке устройства вместо кнопки,
+    которая ничего не сделает, показываем, где её снимать."""
+    from datetime import datetime, timedelta
+
+    from app.db import session
+    from app.models import Device, Pause, Person
+
+    with TestClient(app) as c:
+        c.post("/login", data={"username": "admin", "password": "testpass"})
+        s = session()
+        try:
+            kid = Person(name="Sonya", role="kid")
+            s.add(kid)
+            s.commit()
+            s.add(Device(mac="CC:00:00:00:00:13", ip="192.168.88.57",
+                         name="Sonya-tablet", person_id=kid.id))
+            s.add(Pause(target_type="group", target="kid",
+                        until=datetime.now() + timedelta(hours=1)))
+            s.commit()
+        finally:
+            s.close()
+
+        html = c.get("/").text
+        assert "пауза всей группы" in html
+        assert "Снять со всей группы" in html  # рабочая кнопка — в шапке секции
+
+
 def test_quick_action_redirect_rejects_external():
     from app.routers.devices import _safe_redirect
     assert _safe_redirect("/") == "/"

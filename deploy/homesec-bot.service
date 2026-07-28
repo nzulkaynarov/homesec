@@ -13,6 +13,13 @@ ExecStart=/opt/homesec/backend/.venv/bin/python -m app.bot
 # on-failure не даст systemd бесконечно его перезапускать.
 Restart=on-failure
 RestartSec=10
+# См. комментарий в homesec.service: OOM должен убивать сервис, а не малинку.
+# Замерено на проде 2026-07-28: бот держит ~141 МБ (aiogram + SQLAlchemy +
+# SDK Anthropic), поэтому потолки выше панели. Проверить у себя:
+# systemctl show homesec-bot -p MemoryCurrent
+MemoryHigh=220M
+MemoryMax=350M
+TimeoutStartSec=60
 
 [Install]
 WantedBy=multi-user.target

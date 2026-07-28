@@ -3,6 +3,8 @@
 устройства. Управляем только клиентами с именами hs-* — ручные не трогаем."""
 
 import logging
+import re
+from datetime import datetime
 
 import httpx
 
@@ -73,6 +75,28 @@ def get_query_log(limit: int = 50) -> list[dict]:
     return data.get("data", [])
 
 
+_TS_RE = re.compile(r"^(\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2})(?:\.(\d+))?(.*)$")
+
+
+def parse_ts(raw: str) -> datetime | None:
+    """Метка времени записи журнала (RFC3339 с наносекундами) -> локальное
+    наивное время. None, если разобрать не вышло.
+
+    Живёт здесь, потому что это формат AdGuard: им пользуются и учёт квот, и
+    сторож аномалий — второй раньше время записей просто игнорировал."""
+    m = _TS_RE.match((raw or "").strip())
+    if not m:
+        return None
+    frac = (m.group(2) or "0")[:6].ljust(6, "0")
+    try:
+        dt = datetime.fromisoformat(f"{m.group(1)}.{frac}{m.group(3) or ''}")
+    except ValueError:
+        return None
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
+
+
 def _all_clients() -> list[dict]:
     data = _request("GET", "/control/clients") or {}
     return data.get("clients") or []
@@ -92,7 +116,15 @@ def known_service_ids() -> set[str] | None:
     except AdGuardError:
         return None
     services = data.get("blocked_services") or []
-    return {s["id"] for s in services if s.get("id")}
+    known = {s["id"] for s in services if isinstance(s, dict) and s.get("id")}
+    if not known:
+        # Пустой реестр = ответ не той формы (эндпоинт переехал между версиями
+        # AdGuard). Вернуть пустое множество нельзя: тогда фильтр ниже вырежет
+        # ВСЕ сервисы, и блокировки игр/видео/соцсетей детям молча перестанут
+        # применяться — с одним warning'ом в журнале и зелёной панелью.
+        log.warning("AdGuard вернул пустой реестр сервисов — фильтрацию id пропускаем")
+        return None
+    return known
 
 
 def _foreign_ids(clients: list[dict]) -> set[str]:

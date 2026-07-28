@@ -11,6 +11,15 @@ EnvironmentFile=/opt/homesec/backend/.env
 ExecStart=/opt/homesec/backend/.venv/bin/uvicorn app.main:app --host 0.0.0.0 --port 8000
 Restart=always
 RestartSec=5
+# Потолок памяти (ЧП 2026-07-27: малинка зависла, подозрение на нехватку памяти
+# на 1 ГБ). Смысл — чтобы ядро убило один сервис, а не всю малинку: MemoryHigh
+# сначала придавит и заставит отдать кэши, MemoryMax убивает, Restart поднимает.
+# Замерено на проде 2026-07-28: панель держит ~65 МБ, запас трёхкратный.
+# Если начнёт упираться — смотреть `systemctl show homesec -p MemoryPeak` и
+# разбираться с утечкой, а не поднимать потолок.
+MemoryHigh=180M
+MemoryMax=300M
+TimeoutStartSec=60
 
 [Install]
 WantedBy=multi-user.target

@@ -28,6 +28,7 @@ from ..models import (
 )
 from . import adguard, mikrotik, quota
 from .adguard import SERVICE_CATEGORIES
+from .safetext import clean_label
 
 log = logging.getLogger("homesec.enforce")
 
@@ -171,7 +172,9 @@ def discover_devices(db: Session, api) -> list[Device]:
         mac = lease["mac"].upper()
         if not mac:
             continue
-        hostname = (lease["hostname"] or "").strip()
+        # hostname задаёт само устройство — чистим, иначе он попадёт в текст
+        # события, из которого бот достаёт MAC и номер заявки (см. safetext).
+        hostname = clean_label(lease["hostname"])
         dev = known.get(mac)
         if dev is None:
             dev = Device(mac=mac, ip=lease["ip"], name=hostname or mac, hostname=hostname)
@@ -189,8 +192,22 @@ def discover_devices(db: Session, api) -> list[Device]:
                     known[mac] = dev
                     by_id[dev.id] = dev
                 continue
-            db.add(DeviceMac(device_id=dev.id, mac=mac))
-            db.commit()
+            try:
+                db.add(DeviceMac(device_id=dev.id, mac=mac))
+                db.commit()
+            except IntegrityError:
+                # Строка device_macs с этим MAC осталась от удалённого раньше
+                # устройства (FK в SQLite выключены, каскада нет). Раньше этот
+                # commit не был защищён, IntegrityError улетал наружу и ронял
+                # ВЕСЬ reconcile-тик: в эту минуту не применялись ни блокировки,
+                # ни квоты. Перевешиваем осиротевшую строку на новое устройство.
+                db.rollback()
+                orphan = db.scalar(select(DeviceMac).where(DeviceMac.mac == mac))
+                if orphan is not None:
+                    orphan.device_id = dev.id
+                    db.commit()
+                    log.info("device_macs: осиротевшая строка %s перевешена на #%s",
+                             mac, dev.id)
             known[mac] = dev
             by_id[dev.id] = dev
             note = " ⚠️ случайный MAC" if is_random_mac(mac) else ""
