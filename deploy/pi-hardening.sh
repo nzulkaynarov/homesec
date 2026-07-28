@@ -105,6 +105,39 @@ systemctl daemon-reexec
 echo "  RuntimeWatchdogSec=15 применён"
 
 # ---------------------------------------------------------------------------
+# 1б. Контроллер памяти cgroup: на Raspberry Pi он ВЫКЛЮЧЕН по умолчанию, и без
+# него MemoryHigh/MemoryMax в юнитах — пустая декларация: systemd их принимает,
+# ядро не применяет (признак — MemoryCurrent=[not set] и отсутствие строки
+# memory в /proc/cgroups). Проверено на проде 2026-07-28.
+# ---------------------------------------------------------------------------
+hr "1б/5 Контроллер памяти cgroup"
+if grep -q '^memory' /proc/cgroups 2>/dev/null; then
+  echo "  контроллер памяти включён"
+else
+  cmdline=""
+  for f in /boot/firmware/cmdline.txt /boot/cmdline.txt; do
+    [ -f "$f" ] && cmdline="$f" && break
+  done
+  if [ -z "$cmdline" ]; then
+    echo "  ⚠️  cmdline.txt не найден — лимиты памяти работать не будут"
+  elif grep -q 'cgroup_enable=memory' "$cmdline"; then
+    echo "  параметры уже прописаны — заработают после перезагрузки"
+  else
+    cp "$cmdline" "$cmdline.homesec-backup"
+    # ВАЖНО: cmdline.txt обязан остаться ОДНОЙ строкой, иначе Pi не загрузится.
+    printf '%s cgroup_enable=memory cgroup_memory=1\n' \
+      "$(tr -d '\n' < "$cmdline.homesec-backup")" > "$cmdline"
+    if [ "$(wc -l < "$cmdline")" = "1" ]; then
+      echo "  добавлено в $cmdline (копия рядом: $cmdline.homesec-backup)"
+      echo "  ⚠️  ЗАРАБОТАЕТ ПОСЛЕ ПЕРЕЗАГРУЗКИ малинки"
+    else
+      cp "$cmdline.homesec-backup" "$cmdline"
+      echo "  ⚠️  правка отменена (получилось не одной строкой) — сделай вручную"
+    fi
+  fi
+fi
+
+# ---------------------------------------------------------------------------
 # 2. Журналы systemd не должны съедать карту.
 # ---------------------------------------------------------------------------
 hr "2/4 Потолок журналов systemd"
