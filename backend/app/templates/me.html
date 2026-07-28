@@ -3,9 +3,9 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  {# Автообновление: когда родитель одобрит, бонус применится и страница сама
-     покажет новое время / вернувшийся интернет. #}
-  <meta http-equiv="refresh" content="20">
+  {# Автообновление живёт в скрипте внизу страницы: <meta http-equiv="refresh">
+     перезагружал страницу прямо во время набора текста в поле «Почему?» и
+     ребёнок терял написанное. #}
   <title>Моё время — HomeSec</title>
   <style>
     body { font-family: system-ui, sans-serif; background: #f4f6fb; margin: 0;
@@ -102,5 +102,14 @@
   {% endif %}
   <p class="hint">HomeSec · домашняя сеть</p>
 </div>
+<script>
+  // Ждём ответа родителей: обновляемся сами, но НЕ пока ребёнок печатает
+  // причину (иначе текст пропадает на середине набора).
+  setInterval(function () {
+    var reason = document.querySelector('textarea[name=reason]');
+    var typing = reason && (document.activeElement === reason || reason.value.trim() !== '');
+    if (!typing) { location.replace(location.pathname); }
+  }, 20000);
+</script>
 </body>
 </html>
