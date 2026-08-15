@@ -98,7 +98,10 @@ add name=guest-pool ranges=192.168.90.10-192.168.90.254
 /ip dhcp-server
 add name=guest-dhcp interface=bridge-guest address-pool=guest-pool lease-time=1h disabled=no
 /ip dhcp-server network
-add address=192.168.90.0/24 gateway=192.168.90.1 dns-server=$piAddr comment="hs: guest network"
+# Второй резолвер (192.168.90.1 — роутер со стороны гостей) на случай смерти
+# малинки: гость сам уйдёт на него, а сторож в аварии откроет гостям udp/53
+# правилом "hs: lifeboat guest DNS". Подробности — выстраданное правило №9.
+add address=192.168.90.0/24 gateway=192.168.90.1 dns-server="$piAddr,192.168.90.1" comment="hs: guest network"
 
 # Гости: к роутеру — только DHCP, в домашнюю сеть — только DNS на Pi
 /ip firewall filter
