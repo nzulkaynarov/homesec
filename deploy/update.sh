@@ -63,6 +63,24 @@ if [ "$deployed_sha" = "$remote_sha" ]; then
   exit 0
 fi
 
+# Опциональный гейт на зелёный CI: если коммит свежий, проверяем GitHub Actions
+# перед установкой. Если CI ещё бежит (in_progress/queued) — подождём следующий тик.
+# Если CI упал (failure) — не деплоим сломанный коммит на роутер/Pi.
+if [ "${CHECK_CI:-1}" = "1" ]; then
+  ci_api="https://api.github.com/repos/nzulkaynarov/homesec/commits/$remote_sha/check-runs"
+  ci_json=$(curl -s -m 5 -H "Accept: application/vnd.github+json" "$ci_api" 2>/dev/null || true)
+  if [ -n "$ci_json" ] && [[ "$ci_json" == *"\"check_runs\""* ]]; then
+    if [[ "$ci_json" == *"\"status\":\"in_progress\""* ]] || [[ "$ci_json" == *"\"status\":\"queued\""* ]]; then
+      echo "$(date -Is) homesec update: CI для $remote_sha ещё выполняется, ждём завершения..."
+      exit 0
+    fi
+    if [[ "$ci_json" == *"\"conclusion\":\"failure\""* ]]; then
+      echo "$(date -Is) homesec update: ОШИБКА — CI для $remote_sha упал (failure). Деплой отклонён!" >&2
+      exit 0
+    fi
+  fi
+fi
+
 echo "$(date -Is) homesec update: ${deployed_sha:-нет метки} -> $remote_sha"
 
 # Зависимости ставим ДО reset --hard: если pip упадёт, на диске остаётся

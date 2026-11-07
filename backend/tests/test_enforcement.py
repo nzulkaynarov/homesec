@@ -143,3 +143,43 @@ def test_self_ip_never_managed_or_blocked(db, monkeypatch):
     state = _desired_state(db, [pi])
     assert "192.168.88.2" not in state["lists"]["hs-managed"]
     assert "192.168.88.2" not in state["lists"]["hs-blocked"]
+
+
+def test_discover_devices_inherits_twin_properties(db, monkeypatch):
+    """Новое устройство с тем же hostname наследует person_id, блокировку
+    и лимит скорости, закрывая обход родительского контроля через ротацию MAC."""
+    from app.models import EventLog
+    from app.services import enforcement, mikrotik
+
+    kid = Person(name="Миша", role="kid")
+    db.add(kid)
+    db.commit()
+
+    twin = Device(
+        mac="AA:BB:CC:DD:EE:01",
+        ip="192.168.88.20",
+        name="iPhone-Misha",
+        hostname="iPhone-Misha",
+        person_id=kid.id,
+        blocked_manual=True,
+        speed_limit="10M/10M",
+    )
+    db.add(twin)
+    db.commit()
+
+    leases = [
+        {"mac": "AA:BB:CC:DD:EE:01", "ip": "192.168.88.20", "hostname": "iPhone-Misha"},
+        # Новый случайный MAC с тем же hostname
+        {"mac": "02:BB:CC:DD:EE:99", "ip": "192.168.88.21", "hostname": "iPhone-Misha"},
+    ]
+    monkeypatch.setattr(mikrotik, "get_leases", lambda api: leases)
+
+    devices = enforcement.discover_devices(db, None)
+    new_dev = next(d for d in devices if d.mac == "02:BB:CC:DD:EE:99")
+    assert new_dev.person_id == kid.id
+    assert new_dev.group == "kid"
+    assert new_dev.blocked_manual is True
+    assert new_dev.speed_limit == "10M/10M"
+
+    ev = db.query(EventLog).filter(EventLog.kind == "device_maybe_same").one()
+    assert "iPhone-Misha" in ev.message

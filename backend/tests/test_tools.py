@@ -36,7 +36,13 @@ def dev(db):
 def no_reconcile(monkeypatch):
     """Мутирующие инструменты зовут reconcile — в тестах сеть недоступна."""
     calls = []
-    monkeypatch.setattr(tools.enforcement, "reconcile", lambda s: calls.append(1))
+
+    def fake(s):
+        calls.append(1)
+
+    monkeypatch.setattr(tools.enforcement, "reconcile", fake)
+    from app import scheduler
+    monkeypatch.setattr(scheduler, "reconcile", fake)
     return calls
 
 
@@ -69,6 +75,17 @@ def test_block_unblock_logs_and_reconciles(db, dev, no_reconcile):
     tools.run_tool(db, "unblock_device", {"device_id": dev.id}, source="bot")
     assert not dev.blocked_manual
     assert any(e.kind == "bot_action" for e in db.query(EventLog))
+    # Бот поставил флаг для планировщика вместо прямого вызова RouterOS
+    from app.models import kv_get
+    from app.scheduler import _asap_tick
+
+    assert kv_get(db, "reconcile_asap") == "1"
+    assert no_reconcile == [1]  # бот не трогал роутер сам
+
+    # Планировщик панели подхватывает флаг и вызывает reconcile
+    _asap_tick()
+    assert no_reconcile == [1, 1]
+    assert kv_get(db, "reconcile_asap", "") == ""
 
 
 def test_self_ip_protected(db, dev, no_reconcile, monkeypatch):

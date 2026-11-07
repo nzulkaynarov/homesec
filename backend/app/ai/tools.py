@@ -36,6 +36,7 @@ from ..models import (
     Quota,
     QuotaBonus,
     active_pauses,
+    kv_set,
     log_event,
 )
 from ..services import adguard, enforcement, mikrotik
@@ -123,7 +124,12 @@ def run_tool(db: Session, name: str, args: dict, source: str = "ai",
     if spec.mutating:
         log_event(db, f"{source}_action", str(result))
         if reconcile_after:
-            enforcement.reconcile(db)
+            if source == "bot":
+                # Бот не обращается к RouterOS напрямую: ставит флаг быстрой сверки
+                # в kv_state, планировщик панели подхватывает его за секунды.
+                kv_set(db, "reconcile_asap", "1")
+            else:
+                enforcement.reconcile(db)
     return result
 
 
@@ -466,10 +472,14 @@ def _parse_quota_target(db: Session, target: str) -> tuple[str, str, str]:
     t = target.strip()
     if t in GROUPS:
         return "group", t, GROUP_LABELS[t]
+    person = db.scalar(select(Person).where(Person.name.ilike(t)))
+    if person is not None:
+        role_label = GROUP_LABELS.get(person.role, person.role)
+        return "person", str(person.id), f"{person.name} ({role_label})"
     dev = find_device(db, t)
-    if dev is None:
-        raise ToolError(f"Не нашёл устройство «{target}» — уточните имя или id")
-    return "device", str(dev.id), f"{dev.name} ({dev.ip or dev.mac})"
+    if dev is not None:
+        return "device", str(dev.id), f"{dev.name} ({dev.ip or dev.mac})"
+    raise ToolError(f"Не нашёл устройство или человека «{target}» — уточните имя или id")
 
 
 @tool(mutating=True)
@@ -530,13 +540,26 @@ def add_bonus_time(
                         + ", ".join(quota_svc.QUOTA_CATEGORIES))
     target_type, target_key, label = _parse_quota_target(db, target)
     dev_group = ""
+    dev_person_id = ""
     if target_type == "device":
         dev = _device_or_error(db, int(target_key))
         dev_group = dev.group
+        dev_person_id = str(dev.person_id) if dev.person_id else ""
+    elif target_type == "person":
+        person = db.scalar(select(Person).where(Person.id == int(target_key)))
+        dev_group = person.role if person else ""
+        dev_person_id = target_key
     quotas = [q for q in db.scalars(select(Quota)) if q.enabled and q.category == category]
     applies = any(
         (q.target_type == target_type and q.target == target_key)
         or (target_type == "device" and q.target_type == "group" and q.target == dev_group)
+        or (
+            target_type == "device"
+            and dev_person_id
+            and q.target_type == "person"
+            and q.target == dev_person_id
+        )
+        or (target_type == "person" and q.target_type == "group" and q.target == dev_group)
         for q in quotas
     )
     if not applies:

@@ -218,6 +218,15 @@ def discover_devices(db: Session, api) -> list[Device]:
                     (d for d in devices if d.hostname and d.hostname == hostname), None
                 )
                 if twin is not None:
+                    # Наследуем владельца, блокировку и ограничение скорости близнеца,
+                    # чтобы ротация приватного MAC не снимала родительский контроль мгновенно.
+                    if twin.person_id is not None:
+                        dev.person_id = twin.person_id
+                    if twin.blocked_manual:
+                        dev.blocked_manual = True
+                    if twin.speed_limit:
+                        dev.speed_limit = twin.speed_limit
+                    db.commit()
                     log_event(db, "device_maybe_same",
                               f"Похоже, «{dev.name}» ({mac}) — это снова "
                               f"«{twin.name}» ({twin.mac}): совпадает имя хоста.")
@@ -240,15 +249,20 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
 
     active_group_blocks = set()
     active_device_blocks = set()
+    active_person_blocks = set()
     for r in rules:
         if rule_is_active(r, now):
             if r.target_type == "group":
                 active_group_blocks.add(r.target)
+            elif r.target_type == "person":
+                active_person_blocks.add(str(r.target))
             else:
                 active_device_blocks.add(str(r.target))
     for p in active_pauses(db, now):  # разовые «паузы до …» поверх расписаний
         if p.target_type == "group":
             active_group_blocks.add(p.target)
+        elif p.target_type == "person":
+            active_person_blocks.add(str(p.target))
         else:
             active_device_blocks.add(str(p.target))
 
@@ -273,6 +287,7 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
         blocked = (
             dev.blocked_manual
             or group in active_group_blocks
+            or (dev.person_id is not None and str(dev.person_id) in active_person_blocks)
             or str(dev.id) in active_device_blocks
             or (group == "unknown" and settings.block_unknown)
             or "internet" in spent  # квота на интернет исчерпана — до полуночи

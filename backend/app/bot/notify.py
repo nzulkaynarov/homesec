@@ -15,7 +15,7 @@ from ..models import BonusRequest, Device, EventLog, kv_get, kv_set
 
 CURSOR_KEY = "bot_last_event_id"
 NOTIFY_KINDS = ("device_new", "register_request", "device_maybe_same",
-                "quota_block", "bonus_request")
+                "quota_block", "quota_warn", "bonus_request")
 
 _MAC_RE = re.compile(r"([0-9A-F]{2}(?::[0-9A-F]{2}){5})", re.IGNORECASE)
 _REQ_RE = re.compile(r"req#(\d+)")
@@ -23,7 +23,7 @@ _REQ_RE = re.compile(r"req#(\d+)")
 
 @dataclass
 class Notification:
-    kind: str  # device_new | register_request | device_maybe_same | quota_block | bonus_request
+    kind: str  # тип события из NOTIFY_KINDS
     device: Device
     message: str  # исходный текст события
     extra_device: Device | None = None  # для maybe_same: устройство-оригинал

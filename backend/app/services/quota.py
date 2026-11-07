@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Device, Quota, QuotaBonus, QuotaUsage, kv_get, kv_set
+from ..models import Device, Quota, QuotaBonus, QuotaUsage, kv_get, kv_set, log_event
 from . import adguard
 
 log = logging.getLogger("homesec.quota")
@@ -155,24 +155,60 @@ def _active_today(q: Quota, now: datetime) -> bool:
 
 
 def _quota_for(quotas: list[Quota], dev: Device, category: str) -> Quota | None:
-    """Квота категории для устройства; личная квота важнее групповой."""
+    """Квота категории для устройства; приоритет: личная устройства > человека > групповая."""
     dev_q = [q for q in quotas if q.category == category
              and q.target_type == "device" and q.target == str(dev.id)]
     if dev_q:
         return min(dev_q, key=lambda q: q.minutes_per_day)
+    if dev.person_id is not None:
+        person_q = [q for q in quotas if q.category == category
+                    and q.target_type == "person" and q.target == str(dev.person_id)]
+        if person_q:
+            return min(person_q, key=lambda q: q.minutes_per_day)
     grp_q = [q for q in quotas if q.category == category
              and q.target_type == "group" and q.target == dev.group]
     return min(grp_q, key=lambda q: q.minutes_per_day) if grp_q else None
 
 
-def _bonus_minutes(bonuses: list[QuotaBonus], dev: Device, category: str) -> int:
-    return sum(
-        b.minutes for b in bonuses
-        if b.category == category and (
-            (b.target_type == "device" and b.target == str(dev.id))
-            or (b.target_type == "group" and b.target == dev.group)
-        )
-    )
+def _person_devices_map(db: Session, person_ids: set[int]) -> dict[int, set[int]]:
+    if not person_ids:
+        return {}
+    out: dict[int, set[int]] = {}
+    for pid, did in db.execute(
+        select(Device.person_id, Device.id).where(Device.person_id.in_(person_ids))
+    ):
+        if pid is not None:
+            out.setdefault(pid, set()).add(did)
+    return out
+
+
+def _bonus_minutes(
+    bonuses: list[QuotaBonus],
+    dev: Device,
+    category: str,
+    peer_dev_ids: set[int] | None = None,
+    is_person_or_group: bool = False,
+) -> int:
+    peer_keys = {str(did) for did in peer_dev_ids} if peer_dev_ids else {str(dev.id)}
+    dev_key = str(dev.id)
+    person_key = str(dev.person_id) if dev.person_id is not None else None
+
+    total = 0
+    for b in bonuses:
+        if b.category != category:
+            continue
+        if b.target_type == "group" and b.target == dev.group:
+            total += b.minutes
+        elif b.target_type == "person" and person_key is not None and b.target == person_key:
+            total += b.minutes
+        elif b.target_type == "device":
+            if is_person_or_group:
+                if b.target in peer_keys:
+                    total += b.minutes
+            else:
+                if b.target == dev_key:
+                    total += b.minutes
+    return total
 
 
 def _usage_map(db: Session, date: str) -> dict[tuple[int, str], int]:
@@ -187,7 +223,8 @@ def progress(
     db: Session, devices: list[Device], now: datetime | None = None
 ) -> dict[int, list[dict]]:
     """Для панели/инструментов: {device_id: [{category, label, used, limit}]}.
-    Пусто у устройств без квот на сегодня."""
+    Пусто у устройств без квот на сегодня. Для квот группы/человека экранное
+    время суммируется по всем устройствам владельца, закрывая лазейку смены гаджета."""
     now = now or datetime.now()
     date = now.strftime("%Y-%m-%d")
     quotas = [q for q in db.scalars(select(Quota)) if _active_today(q, now)]
@@ -196,23 +233,82 @@ def progress(
     bonuses = list(db.scalars(select(QuotaBonus).where(QuotaBonus.date == date)))
     usage = _usage_map(db, date)
 
+    person_ids = {d.person_id for d in devices if d.person_id is not None}
+    person_devices = _person_devices_map(db, person_ids)
+
     out: dict[int, list[dict]] = {}
     for dev in devices:
         rows = []
+        peer_ids = (
+            person_devices.get(dev.person_id, {dev.id})
+            if dev.person_id is not None
+            else {dev.id}
+        )
         for category in QUOTA_CATEGORIES:
             q = _quota_for(quotas, dev, category)
             if q is None:
                 continue
-            limit = q.minutes_per_day + _bonus_minutes(bonuses, dev, category)
+            is_shared = q.target_type in ("group", "person") and dev.person_id is not None
+            limit = q.minutes_per_day + _bonus_minutes(
+                bonuses, dev, category, peer_ids, is_person_or_group=is_shared
+            )
+            if is_shared:
+                used = sum(usage.get((did, category), 0) for did in peer_ids)
+            else:
+                used = usage.get((dev.id, category), 0)
             rows.append({
                 "category": category,
                 "label": QUOTA_CATEGORY_LABELS[category],
-                "used": usage.get((dev.id, category), 0),
+                "used": used,
                 "limit": limit,
             })
         if rows:
             out[dev.id] = rows
     return out
+
+
+def check_quota_warnings(
+    db: Session, devices: list[Device] | None = None, now: datetime | None = None
+) -> list[dict]:
+    """Проверяет квоты на порог 80%. Пишет событие quota_warn (с антидребезгом
+    через kv_state), чтобы родитель получил предупреждение в Telegram до
+    жёсткой блокировки."""
+    now = now or datetime.now()
+    date = now.strftime("%Y-%m-%d")
+    if devices is None:
+        devices = list(db.scalars(select(Device)))
+    prog = progress(db, devices, now)
+    if not prog:
+        return []
+
+    dev_by_id = {d.id: d for d in devices}
+    warned = []
+    for dev_id, rows in prog.items():
+        dev = dev_by_id.get(dev_id)
+        if dev is None or not dev.ip:
+            continue
+        for r in rows:
+            used = r["used"]
+            limit = r["limit"]
+            if limit <= 0:
+                continue
+            if used >= 0.8 * limit and used < limit:
+                category = r["category"]
+                cat_label = r["label"]
+                target_key = f"{dev.person_id or dev.id}"
+                guard_key = f"quota_warn_{date}_{target_key}_{category}"
+                if kv_get(db, guard_key, "") != "":
+                    continue
+                kv_set(db, guard_key, "1")
+                remaining = limit - used
+                pct = int((used / limit) * 100)
+                msg = (
+                    f"Квота «{cat_label}» использована на {pct}%: "
+                    f"{dev.name} ({dev.mac}, {dev.ip}) — осталось {remaining} мин."
+                )
+                log_event(db, "quota_warn", msg)
+                warned.append({"device": dev, "category": category, "remaining": remaining})
+    return warned
 
 
 def exhausted(

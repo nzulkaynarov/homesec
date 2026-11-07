@@ -43,6 +43,11 @@ def restriction_for_ip(db: Session, ip: str) -> dict | None:
     my_pauses = [
         p for p in active_pauses(db, now)
         if (p.target_type == "device" and p.target == str(dev.id))
+        or (
+            dev.person_id is not None
+            and p.target_type == "person"
+            and p.target == str(dev.person_id)
+        )
         or (p.target_type == "group" and p.target == dev.group)
     ]
     if my_pauses:
@@ -54,8 +59,14 @@ def restriction_for_ip(db: Session, ip: str) -> dict | None:
     for rule in db.scalars(select(Rule)):
         if not rule_is_active(rule, now):
             continue
-        if (rule.target_type == "group" and rule.target == dev.group) or (
-            rule.target_type == "device" and str(rule.target) == str(dev.id)
+        if (
+            (rule.target_type == "group" and rule.target == dev.group)
+            or (
+                dev.person_id is not None
+                and rule.target_type == "person"
+                and str(rule.target) == str(dev.person_id)
+            )
+            or (rule.target_type == "device" and str(rule.target) == str(dev.id))
         ):
             return {"kind": "rule", "rule_name": rule.name,
                     "until": _rule_until(rule, now), **base}

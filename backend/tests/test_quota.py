@@ -276,3 +276,79 @@ def test_get_status_includes_screen_time(db, kid_device, no_reconcile):
     from app.bot.texts import format_status
 
     assert "⏳ Планшет: игры 1:20/2:00" in format_status(status)
+
+
+def test_multi_device_quota_aggregation_by_person(db, kid_device):
+    """Экранное время суммируется по человеку: 40м на телефоне + 30м на планшете
+    при лимите 60м исчерпывают квоту на ОБОИХ устройствах ребёнка."""
+    phone = Device(
+        mac="AA:00:00:00:00:02",
+        ip="192.168.88.31",
+        name="Телефон",
+        person_id=kid_device.person_id,
+    )
+    db.add(phone)
+    db.add(Quota(target_type="group", target="kid", category="games", minutes_per_day=60))
+    db.commit()
+
+    # 35м на планшете и 20м на телефоне (суммарно 55 < 60)
+    _use(db, kid_device.id, "games", 35)
+    _use(db, phone.id, "games", 20)
+    prog = quota.progress(db, [kid_device, phone])
+    assert prog[kid_device.id][0]["used"] == 55
+    assert prog[phone.id][0]["used"] == 55
+    assert quota.exhausted(db, [kid_device, phone]) == {}
+
+    # Ещё 10м на телефоне (суммарно 65 > 60)
+    _use(db, phone.id, "games", 10)
+    spent = quota.exhausted(db, [kid_device, phone])
+    assert spent == {kid_device.id: {"games"}, phone.id: {"games"}}
+
+    # Бонус +15м на планшет расширяет общий пул до 75м: оба снова свободны
+    db.add(QuotaBonus(target_type="device", target=str(kid_device.id),
+                      date=datetime.now().strftime("%Y-%m-%d"), category="games", minutes=15))
+    db.commit()
+    assert quota.exhausted(db, [kid_device, phone]) == {}
+
+
+def test_soft_quota_warning_80_percent(db, kid_device):
+    """Предупреждение 80% пишется в журнал и не спамит повторно."""
+    db.add(Quota(target_type="group", target="kid", category="games", minutes_per_day=100))
+    db.commit()
+
+    # 70 минут — 70%, нет предупреждения
+    _use(db, kid_device.id, "games", 70)
+    warned = quota.check_quota_warnings(db, [kid_device])
+    assert warned == []
+    assert db.query(EventLog).filter(EventLog.kind == "quota_warn").count() == 0
+
+    # 80 минут — ровно 80%, пишется событие
+    _use(db, kid_device.id, "games", 10)
+    warned = quota.check_quota_warnings(db, [kid_device])
+    assert len(warned) == 1
+    assert warned[0]["remaining"] == 20
+    event = db.query(EventLog).filter(EventLog.kind == "quota_warn").one()
+    assert "80%" in event.message and "20 мин" in event.message
+    assert kid_device.mac in event.message
+
+    # Повторный вызов не дублирует событие (антидребезг в kv_state)
+    warned2 = quota.check_quota_warnings(db, [kid_device])
+    assert warned2 == []
+    assert db.query(EventLog).filter(EventLog.kind == "quota_warn").count() == 1
+
+
+def test_set_quota_and_bonus_for_person_by_name(db, kid_device, no_reconcile):
+    """Инструменты set_quota и add_bonus_time принимают имя человека."""
+    msg = tools.run_tool(db, "set_quota",
+                         {"target": "Миша", "category": "video", "minutes_per_day": 90})
+    assert "Миша" in msg and "90" in msg
+    q = db.query(Quota).filter(Quota.target_type == "person").one()
+    assert q.target == str(kid_device.person_id) and q.minutes_per_day == 90
+
+    # Бонус человеку по имени
+    bmsg = tools.run_tool(db, "add_bonus_time",
+                          {"target": "Миша", "minutes": 30, "category": "video",
+                           "comment": "отличная учеба"})
+    assert "+30" in bmsg and "Миша" in bmsg
+    b = db.query(QuotaBonus).filter(QuotaBonus.target_type == "person").one()
+    assert b.target == str(kid_device.person_id) and b.minutes == 30

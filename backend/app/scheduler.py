@@ -9,7 +9,15 @@ from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import delete
 
 from . import db
-from .models import EventLog, Pause, PendingAction, QuotaBonus, QuotaUsage
+from .models import (
+    EventLog,
+    Pause,
+    PendingAction,
+    QuotaBonus,
+    QuotaUsage,
+    kv_get,
+    kv_set,
+)
 from .services import quota
 from .services.enforcement import reconcile
 
@@ -30,13 +38,29 @@ def _tick() -> None:
         session.close()
 
 
+def _asap_tick() -> None:
+    """Быстрый опрос флага немедленной сверки (reconcile_asap): бот при мутациях
+    ставит этот флаг в kv_state вместо прямого обращения к роутеру. Панель
+    остаётся единственным писателем в RouterOS, гонки исключены."""
+    session = db.session()
+    try:
+        if kv_get(session, "reconcile_asap", "") == "1":
+            kv_set(session, "reconcile_asap", "")
+            reconcile(session)
+    except Exception:
+        log.exception("reconcile_asap tick failed")
+    finally:
+        session.close()
+
+
 def _quota_tick() -> None:
-    """Учёт активных минут для квот (раз в минуту, отдельно от reconcile —
-    reconcile дёргается и после каждого изменения в панели, а учёт должен
-    идти ровно по расписанию, без двойного счёта)."""
+    """Учёт активных минут для квот и проверка порога предупреждений 80% (раз в
+    минуту, отдельно от reconcile — reconcile дёргается и после каждого изменения
+    в панели, а учёт должен идти ровно по расписанию, без двойного счёта)."""
     session = db.session()
     try:
         quota.record_activity(session)
+        quota.check_quota_warnings(session)
     except Exception:
         log.exception("quota tick failed")
     finally:
@@ -67,6 +91,8 @@ def _cleanup() -> None:
 
 def start() -> None:
     scheduler.add_job(_tick, "interval", minutes=1, id="reconcile", coalesce=True, max_instances=1)
+    scheduler.add_job(_asap_tick, "interval", seconds=3, id="reconcile_asap",
+                      coalesce=True, max_instances=1)
     scheduler.add_job(_quota_tick, "interval", minutes=1, id="quota",
                       coalesce=True, max_instances=1)
     scheduler.add_job(_cleanup, "cron", hour=3, minute=30, id="cleanup", coalesce=True)

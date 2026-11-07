@@ -75,6 +75,9 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
                 elif kind == "quota_block":
                     text = f"⏳ {message}\nМожно добавить время кнопкой:"
                     kb = handlers.bonus_keyboard(dev["id"])
+                elif kind == "quota_warn":
+                    text = f"⚠️ {message}\nМожно добавить время заранее:"
+                    kb = handlers.bonus_keyboard(dev["id"])
                 elif kind == "bonus_request" and request_id is not None:
                     text = f"🙏 {message}"
                     kb = handlers.bonus_request_keyboard(request_id)
