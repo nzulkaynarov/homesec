@@ -58,6 +58,26 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
         "CREATE INDEX IF NOT EXISTS ix_bonus_requests_created "
         "ON bonus_requests (created)",
     ]),
+    # Семейные роли (telegram_id, bot_role), категории устройств (personal/shared/iot),
+    # общая семейная память (family_notes).
+    (4, [
+        "CREATE TABLE IF NOT EXISTS people ("
+        "id INTEGER NOT NULL PRIMARY KEY, "
+        "name VARCHAR(64) NOT NULL UNIQUE, "
+        "role VARCHAR(16) NOT NULL DEFAULT 'kid', "
+        "telegram_id BIGINT UNIQUE, "
+        "bot_role VARCHAR(16) NOT NULL DEFAULT 'guest')",
+        "ALTER TABLE people ADD COLUMN telegram_id BIGINT",
+        "ALTER TABLE people ADD COLUMN bot_role VARCHAR(16) NOT NULL DEFAULT 'guest'",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ix_people_telegram_id ON people (telegram_id)",
+        "ALTER TABLE devices ADD COLUMN kind VARCHAR(16) NOT NULL DEFAULT 'personal'",
+        "CREATE TABLE IF NOT EXISTS family_notes ("
+        "id INTEGER NOT NULL PRIMARY KEY, "
+        "author VARCHAR(64) NOT NULL, "
+        "content TEXT NOT NULL, "
+        "created DATETIME NOT NULL)",
+        "CREATE INDEX IF NOT EXISTS ix_family_notes_created ON family_notes (created)",
+    ]),
 ]
 
 

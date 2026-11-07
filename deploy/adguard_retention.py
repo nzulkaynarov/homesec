@@ -77,7 +77,7 @@ class Api:
             return None
 
 
-def to_target(current: int | float, hours: int) -> int:
+def to_target(current: float, hours: int) -> int:
     """Целевое значение в тех же единицах, в каких AdGuard отдал текущее."""
     if current and current >= MS_THRESHOLD:
         return hours * 3600 * 1000

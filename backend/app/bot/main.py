@@ -9,7 +9,7 @@ import asyncio
 import logging
 from datetime import datetime, timedelta
 
-from aiogram import Bot, Dispatcher, F
+from aiogram import Bot, Dispatcher
 from aiogram.types import BotCommand
 
 from .. import db as dbmod
@@ -163,17 +163,7 @@ async def main() -> None:
     except Exception:
         log.warning("не удалось зарегистрировать меню команд", exc_info=True)
     dp = Dispatcher()
-    # Доступ только из разрешённых чатов; остальные игнорируются молча
-    handlers.router.message.filter(F.chat.id.in_(allowed))
-    handlers.router.callback_query.filter(F.message.chat.id.in_(allowed))
-    # Доп. проверка по автору (для групповых чатов): если задан список user_id —
-    # командовать может только он, а не любой участник группы. Фильтры аiogram
-    # объединяются по И, поэтому это ужесточает, а не заменяет проверку чата.
-    allowed_users = settings.telegram_allowed_user_ids
-    if allowed_users:
-        handlers.router.message.filter(F.from_user.id.in_(allowed_users))
-        handlers.router.callback_query.filter(F.from_user.id.in_(allowed_users))
-        log.info("доп. allowlist по user_id: %d", len(allowed_users))
+    # Ролевой доступ и онбординг новых членов семьи контролируются внутри handlers.router
     dp.include_router(handlers.router)
 
     tasks = [

@@ -13,7 +13,14 @@ from typing import Any
 import httpx
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
-from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import (
+    CallbackQuery,
+    InlineKeyboardButton,
+    InlineKeyboardMarkup,
+    KeyboardButton,
+    Message,
+    ReplyKeyboardMarkup,
+)
 from sqlalchemy import select
 
 from .. import db as dbmod
@@ -21,6 +28,7 @@ from ..ai import client as ai_client
 from ..ai import orchestrator, tools
 from ..config import settings
 from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get
+from ..services import family as family_svc
 from . import texts
 
 log = logging.getLogger("homesec.bot")
@@ -79,6 +87,308 @@ async def _do_tool(message: Message, name: str, args: dict) -> None:
         await message.answer("Что-то пошло не так, подробности в журнале бота.")
         return
     await message.answer(str(result))
+
+
+# ---------- клавиатуры по ролям и семейные элементы ----------
+
+def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
+    """Нижнее меню Telegram-кнопок в зависимости от роли в семье."""
+    if role in ("owner", "admin"):
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="🏠 Кто дома"), KeyboardButton(text="⏳ Квоты")],
+                [KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="🍿 ТВ для взрослых")],
+                [KeyboardButton(text="📝 Заметки"), KeyboardButton(text="❓ Помощь")],
+            ],
+            resize_keyboard=True,
+        )
+    if role == "kid":
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="⏳ Моё время"), KeyboardButton(text="🙏 Попросить время")],
+                [
+                    KeyboardButton(text="🧠 Заработать +15м"),
+                    KeyboardButton(text="🎓 Помощь с уроками"),
+                ],
+                [KeyboardButton(text="❓ Помощь")],
+            ],
+            resize_keyboard=True,
+        )
+    if role == "guest":
+        return ReplyKeyboardMarkup(
+            keyboard=[
+                [KeyboardButton(text="📶 Wi-Fi"), KeyboardButton(text="❓ Помощь")],
+            ],
+            resize_keyboard=True,
+        )
+    return None
+
+
+def access_request_keyboard(requester_id: int) -> InlineKeyboardMarkup:
+    """Кнопки родителю при онбординге нового участника семьи."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🛡 Родитель", callback_data=f"acc:{requester_id}:admin"),
+            InlineKeyboardButton(text="🎒 Ребёнок", callback_data=f"acc:{requester_id}:kid"),
+        ],
+        [
+            InlineKeyboardButton(text="🏡 Гость", callback_data=f"acc:{requester_id}:guest"),
+            InlineKeyboardButton(text="⛔ Отклонить", callback_data=f"acc:{requester_id}:deny"),
+        ],
+    ])
+
+
+def quiz_keyboard(q_idx: int, options: list[str]) -> InlineKeyboardMarkup:
+    """Кнопки вариантов ответов для викторины ребёнка."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [InlineKeyboardButton(text=opt, callback_data=f"qz:{q_idx}:{idx}")]
+        for idx, opt in enumerate(options)
+    ])
+
+
+def bonus_request_direct_keyboard(person_id: int) -> InlineKeyboardMarkup:
+    """Кнопки родителям при прямом запросе времени ребёнком через Telegram."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="➕ 15 мин", callback_data=f"bdir:{person_id}:15"),
+            InlineKeyboardButton(text="➕ 30 мин", callback_data=f"bdir:{person_id}:30"),
+        ],
+        [
+            InlineKeyboardButton(text="➕ 1 час", callback_data=f"bdir:{person_id}:60"),
+            InlineKeyboardButton(text="🌞 До конца дня", callback_data=f"bdir:{person_id}:day"),
+        ],
+        [
+            InlineKeyboardButton(text="🚫 Отказать", callback_data=f"bdir:{person_id}:deny"),
+        ],
+    ])
+
+
+# ---------- синхронные вспомогательные функции ----------
+
+def _get_user_role_sync(telegram_id: int) -> tuple[str, Person | None]:
+    s = dbmod.session()
+    try:
+        return family_svc.get_user_role(s, telegram_id)
+    finally:
+        s.close()
+
+
+def _assign_telegram_access_sync(requester_id: int, role: str, requester_name: str) -> str:
+    s = dbmod.session()
+    try:
+        if role == "deny":
+            return "Запрос доступа отклонён."
+        person = s.scalar(select(Person).where(Person.telegram_id == requester_id))
+        if person is None:
+            person = s.scalar(select(Person).where(Person.name == requester_name))
+        if person is None:
+            db_role = "adult" if role in ("owner", "admin") else (
+                "kid" if role == "kid" else "guest"
+            )
+            person = Person(
+                name=requester_name, role=db_role, telegram_id=requester_id, bot_role=role
+            )
+            s.add(person)
+        else:
+            person.telegram_id = requester_id
+            person.bot_role = role
+            if role in ("owner", "admin"):
+                person.role = "adult"
+            elif role == "kid":
+                person.role = "kid"
+            elif role == "guest":
+                person.role = "guest"
+        s.commit()
+        role_label = family_svc.ROLE_LABELS.get(role, role)
+        return f"Пользователю {requester_name} назначена роль: {role_label}."
+    finally:
+        s.close()
+
+
+def _who_sync() -> str:
+    s = dbmod.session()
+    try:
+        st = family_svc.get_presence_status(s)
+        return family_svc.format_presence(st)
+    finally:
+        s.close()
+
+
+def _movie_sync() -> str:
+    s = dbmod.session()
+    try:
+        return family_svc.set_movie_mode(s)
+    finally:
+        s.close()
+
+
+def _save_note_sync(author: str, content: str) -> str:
+    s = dbmod.session()
+    try:
+        n = family_svc.save_family_note(s, author, content)
+        return f"✅ Заметка сохранена: «{n.content}»"
+    finally:
+        s.close()
+
+
+def _get_notes_sync() -> str:
+    s = dbmod.session()
+    try:
+        notes = family_svc.get_family_notes(s)
+        return family_svc.format_family_notes(notes)
+    finally:
+        s.close()
+
+
+def _quiz_prepare_sync(user_id: int) -> tuple[bool, str, dict | None]:
+    s = dbmod.session()
+    try:
+        role, person = family_svc.get_user_role(s, user_id)
+        if person is None:
+            return False, "Вы не зарегистрированы в списке семьи. Обратитесь к родителям!", None
+        if not family_svc.can_take_quiz_today(s, person.id):
+            return False, "Сегодня вы уже получали бонус за викторину! Приходите завтра 🧠", None
+        q = family_svc.get_random_quiz_question()
+        return True, "", q
+    finally:
+        s.close()
+
+
+def _quiz_answer_sync(user_id: int, q_idx: int, chosen_opt: int) -> str:
+    s = dbmod.session()
+    try:
+        if q_idx < 0 or q_idx >= len(family_svc.QUIZ_QUESTIONS):
+            return "Вопрос устарел."
+        q = family_svc.QUIZ_QUESTIONS[q_idx]
+        if chosen_opt != q["correct"]:
+            return "❌ Неверно! Попробуйте другой вопрос завтра или повторите тему."
+        _, person = family_svc.get_user_role(s, user_id)
+        if person is None:
+            return "Не найден пользователь."
+        if not family_svc.can_take_quiz_today(s, person.id):
+            return "Сегодня вы уже получали бонус за викторину."
+        return family_svc.award_quiz_bonus(s, person, minutes=15)
+    finally:
+        s.close()
+
+
+def _resolve_bonus_direct_sync(person_id: int, choice: str) -> tuple[str, int, str]:
+    from ..models import QuotaBonus
+
+    s = dbmod.session()
+    try:
+        person = s.get(Person, person_id)
+        if person is None:
+            return "Пользователь не найден.", 0, ""
+        if choice == "deny":
+            return f"Отказано в добавлении времени для {person.name}.", 0, person.name
+        minutes = 720 if choice == "day" else int(choice)
+        date = datetime.now().strftime("%Y-%m-%d")
+        s.add(
+            QuotaBonus(
+                target_type="person",
+                target=str(person.id),
+                date=date,
+                category="internet",
+                minutes=minutes,
+                comment="Одобрено родителем в Telegram",
+            )
+        )
+        s.commit()
+        label = "до конца дня" if choice == "day" else f"+{minutes} мин"
+        return f"✅ Одобрено {label} интернета для {person.name}!", minutes, person.name
+    finally:
+        s.close()
+
+
+def _tutor_ask_sync(chat_id: int, user_text: str) -> str:
+    s = dbmod.session()
+    try:
+        messages = list(CHAT_HISTORY[chat_id]) + [{"role": "user", "content": user_text}]
+        resp = ai_client.ask(
+            s,
+            messages=messages,
+            system=(
+                "Ты — добрый, поддерживающий семейный ИИ-репетитор HomeSec для детей. "
+                "Отвечай просто, понятно и увлекательно на русском языке. "
+                "Правило Сократа: если ребёнок просит решить за него задачу или домашку, "
+                "не давай готовый ответ сразу! Объясни суть, приведи жизненный пример "
+                "и задай наводящий вопрос. Хвали за любознательность. "
+                "У тебя НЕТ инструментов управления сетью или устройствами."
+            ),
+            max_tokens=1000,
+        )
+        content_text = ""
+        for block in resp.content:
+            if getattr(block, "type", "") == "text":
+                content_text += block.text
+        return content_text or "Я здесь! Задай мне любой вопрос по урокам или окружающему миру."
+    finally:
+        s.close()
+
+
+async def _notify_owner_about_access_request(message: Message) -> None:
+    if not message.bot:
+        return
+    user = message.from_user
+    if not user:
+        return
+    uname = f"@{user.username}" if user.username else user.full_name
+    text = (
+        f"🔔 *Новый запрос доступа в семейный бот!*\n\n"
+        f"Пользователь: {user.full_name} ({uname}, ID: `{user.id}`)\n\n"
+        f"Выберите роль для нового участника семьи:"
+    )
+    for owner_id in settings.telegram_allowed_ids:
+        try:
+            await message.bot.send_message(
+                owner_id,
+                text,
+                parse_mode="Markdown",
+                reply_markup=access_request_keyboard(user.id),
+            )
+        except Exception:
+            log.exception("не удалось отправить запрос доступа владельцу %s", owner_id)
+
+
+async def _forward_time_request_to_parents(
+    message: Message, person_id: int, person_name: str, reason: str
+) -> None:
+    if not message.bot:
+        return
+    text = (
+        f"🔔 *Запрос дополнительного времени!*\n\n"
+        f"🎒 Ребёнок: *{person_name}*\n"
+        f"💬 Причина: _{reason}_\n\n"
+        f"Сколько добавить?"
+    )
+    kb = bonus_request_direct_keyboard(person_id)
+    for parent_id in settings.telegram_allowed_ids:
+        try:
+            await message.bot.send_message(
+                parent_id, text, parse_mode="Markdown", reply_markup=kb
+            )
+        except Exception:
+            log.exception("не удалось отправить запрос родителю %s", parent_id)
+    await message.answer(
+        "✅ Запрос отправлен родителям! Я пришлю ответ, как только они нажмут кнопку.",
+        reply_markup=keyboard_for_role("kid"),
+    )
+
+
+async def _handle_kid_tutor(message: Message, user_text: str) -> None:
+    if not ai_client.is_configured():
+        await message.answer("ИИ-помощник сейчас не подключён. Спроси у родителей!")
+        return
+    try:
+        reply = await asyncio.to_thread(_tutor_ask_sync, message.chat.id, user_text)
+    except Exception:
+        log.exception("ошибка репетитора")
+        await message.answer("Что-то пошло не так, попробуй задать вопрос ещё раз!")
+        return
+    CHAT_HISTORY[message.chat.id].append({"role": "user", "content": user_text})
+    CHAT_HISTORY[message.chat.id].append({"role": "assistant", "content": reply})
+    await message.answer(reply)
 
 
 # ---------- выбор устройства кнопками ----------
@@ -171,12 +481,28 @@ async def cb_pick(cb: CallbackQuery) -> None:
 
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
-    await message.answer(texts.START)
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    kb = keyboard_for_role(role)
+    if role == "unauthorized":
+        await message.answer(texts.START_UNAUTHORIZED)
+        await _notify_owner_about_access_request(message)
+        return
+    if role == "kid":
+        await message.answer(texts.START_KID, reply_markup=kb)
+        return
+    await message.answer(texts.START, reply_markup=kb)
 
 
 @router.message(Command("help"))
+@router.message(F.text == "❓ Помощь")
 async def cmd_help(message: Message) -> None:
-    await message.answer(texts.HELP)
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "kid":
+        await message.answer(texts.START_KID, reply_markup=keyboard_for_role("kid"))
+        return
+    await message.answer(texts.HELP, reply_markup=keyboard_for_role(role))
 
 
 @router.message(Command("status"))
@@ -191,6 +517,115 @@ async def cmd_devices(message: Message) -> None:
     await message.answer(texts.format_devices(rows))
 
 
+@router.message(Command("who"))
+@router.message(F.text == "🏠 Кто дома")
+async def cmd_who(message: Message) -> None:
+    text = await asyncio.to_thread(_who_sync)
+    await message.answer(text, parse_mode="Markdown")
+
+
+@router.message(Command("movie"))
+@router.message(F.text == "🍿 ТВ для взрослых")
+async def cmd_movie(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "kid":
+        await message.answer("Эта команда доступна только родителям 🍿")
+        return
+    text = await asyncio.to_thread(_movie_sync)
+    await message.answer(text, parse_mode="Markdown")
+
+
+@router.message(Command("note"))
+async def cmd_note(message: Message, command: CommandObject) -> None:
+    content = (command.args or "").strip()
+    if not content:
+        await message.answer(
+            "Использование: /note <текст заметки>\n"
+            "Например: /note размер ноги Миши 36"
+        )
+        return
+    author = message.from_user.first_name if message.from_user else "Семья"
+    res = await asyncio.to_thread(_save_note_sync, author, content)
+    await message.answer(res)
+
+
+@router.message(Command("notes"))
+@router.message(F.text == "📝 Заметки")
+async def cmd_notes(message: Message) -> None:
+    text = await asyncio.to_thread(_get_notes_sync)
+    await message.answer(text, parse_mode="Markdown")
+
+
+@router.message(Command("quiz"))
+@router.message(F.text == "🧠 Заработать +15м")
+async def cmd_quiz(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    ok, err_msg, q = await asyncio.to_thread(_quiz_prepare_sync, user_id)
+    if not ok or q is None:
+        await message.answer(err_msg)
+        return
+    text = (
+        f"🧠 *Вопрос викторины на +15 минут:*\n\n"
+        f"{q['question']}\n\n"
+        f"Выберите правильный ответ:"
+    )
+    kb = quiz_keyboard(q["id"], q["options"])
+    await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+
+
+@router.message(Command("ask"))
+@router.message(F.text == "🙏 Попросить время")
+async def cmd_ask_time(message: Message, command: CommandObject | None = None) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    s = dbmod.session()
+    try:
+        _, person = family_svc.get_user_role(s, user_id)
+    finally:
+        s.close()
+    if person is None:
+        await message.answer("Сначала необходимо привязать ваш аккаунт к ребёнку.")
+        return
+    reason = (command.args or "").strip() if (command and command.args) else ""
+    if not reason:
+        await message.answer(
+            "Напишите сообщение с причиной (или отправьте голосовое):\n"
+            "Например: «Пожалуйста, добавьте 30 минут доделать проект по географии»"
+        )
+        return
+    await _forward_time_request_to_parents(message, person.id, person.name, reason)
+
+
+@router.message(F.text == "🎓 Помощь с уроками")
+async def btn_homework_help(message: Message) -> None:
+    await message.answer(
+        "Привет! Я готов помочь тебе разобраться с уроками 🎒\n\n"
+        "Напиши мне вопрос или условие задачи (или пришли голосовое сообщение).\n"
+        "Я объясню сложные правила и подскажу ход решения!"
+    )
+
+
+@router.message(F.text == "⏳ Моё время")
+@router.message(F.text == "⏳ Квоты")
+async def btn_quota(message: Message) -> None:
+    await cmd_quota(message)
+
+
+@router.message(F.text == "⏸ Пауза")
+async def btn_pause(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "kid":
+        await message.answer("Эта функция доступна только родителям 🛡")
+        return
+    await cmd_pause(message, CommandObject(prefix="/", command="pause", args=""))
+
+
+@router.message(F.text == "📶 Wi-Fi")
+async def btn_wifi(message: Message) -> None:
+    await message.answer("📶 Данные домашней Wi-Fi сети для гостей уточните у хозяев дома.")
+
+
 def _digest_sync() -> str:
     from ..ai import analyst
 
@@ -203,6 +638,11 @@ def _digest_sync() -> str:
 
 @router.message(Command("digest"))
 async def cmd_digest(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "kid":
+        await message.answer("Эта функция доступна только родителям 🛡")
+        return
     await message.answer(await asyncio.to_thread(_digest_sync))
 
 
@@ -220,11 +660,21 @@ async def _device_command(message: Message, command: CommandObject, tool_name: s
 
 @router.message(Command("block"))
 async def cmd_block(message: Message, command: CommandObject) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "kid":
+        await message.answer("Эта функция доступна только родителям 🛡")
+        return
     await _device_command(message, command, "block_device")
 
 
 @router.message(Command("unblock"))
 async def cmd_unblock(message: Message, command: CommandObject) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "kid":
+        await message.answer("Эта функция доступна только родителям 🛡")
+        return
     await _device_command(message, command, "unblock_device")
 
 
@@ -284,6 +734,11 @@ async def cb_pause_preset(cb: CallbackQuery) -> None:
 
 @router.message(Command("pause"))
 async def cmd_pause(message: Message, command: CommandObject) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "kid":
+        await message.answer("Эта функция доступна только родителям 🛡")
+        return
     raw = (command.args or "").strip()
     if not raw:
         await message.answer(
@@ -310,6 +765,11 @@ async def cmd_pause(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("resume"))
 async def cmd_resume(message: Message, command: CommandObject) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "kid":
+        await message.answer("Эта функция доступна только родителям 🛡")
+        return
     target = (command.args or "").strip()
     await _target_command(message, "resume_internet", target, {})
 
@@ -317,6 +777,12 @@ async def cmd_resume(message: Message, command: CommandObject) -> None:
 @router.message(Command("bonus"))
 async def cmd_bonus(message: Message, command: CommandObject) -> None:
     from ..services.quota import QUOTA_CATEGORIES
+
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "kid":
+        await message.answer("Эта функция доступна только родителям 🛡")
+        return
 
     parts = (command.args or "").split()
     usage = ("Использование: /bonus [кто] <минут> [категория]\n"
@@ -436,6 +902,11 @@ def _find_merge_candidates_sync() -> list[tuple[dict, dict, str]]:
 
 @router.message(Command("merge"))
 async def cmd_merge(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "kid":
+        await message.answer("Эта функция доступна только родителям 🛡")
+        return
     candidates = await asyncio.to_thread(_find_merge_candidates_sync)
     if not candidates:
         await message.answer(
@@ -478,6 +949,11 @@ def _collect_usage_sync() -> tuple[dict, int, int | None, str]:
 
 @router.message(Command("usage"))
 async def cmd_usage(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "kid":
+        await message.answer("Эта функция доступна только родителям 🛡")
+        return
     today, week_tokens, left, gw = await asyncio.to_thread(_collect_usage_sync)
     await message.answer(texts.format_usage(today, week_tokens, left, gw))
 
@@ -491,6 +967,14 @@ def new_device_keyboard(dev_id: int, people: list[tuple[int, str, str]]) -> Inli
                               callback_data=f"nd:{dev_id}:assign:{pid}")]
         for pid, name, role in people
     ]
+    rows.append([
+        InlineKeyboardButton(
+            text="📺 Общее (ТВ/Колонка)", callback_data=f"nd:{dev_id}:kind:shared"
+        ),
+        InlineKeyboardButton(
+            text="🤖 Умный дом (IoT)", callback_data=f"nd:{dev_id}:kind:iot"
+        ),
+    ])
     rows.append([
         InlineKeyboardButton(text="⛔ Блокировать", callback_data=f"nd:{dev_id}:block"),
         InlineKeyboardButton(text="Оставить как есть", callback_data=f"nd:{dev_id}:skip"),
@@ -626,6 +1110,11 @@ async def cb_new_device(cb: CallbackQuery) -> None:
             result = "Оставлено в «Неизвестных»"
         elif action == "block":
             result = await asyncio.to_thread(run_tool_sync, "block_device", {"device_id": dev_id})
+        elif action == "kind":
+            kind_val = parts[3]
+            result = await asyncio.to_thread(
+                run_tool_sync, "set_device_kind", {"device_id": dev_id, "kind": kind_val}
+            )
         elif action == "assign":
             name = await asyncio.to_thread(_person_name, int(parts[3]))
             if name is None:
@@ -644,6 +1133,83 @@ async def cb_new_device(cb: CallbackQuery) -> None:
         return
     await cb.answer("Готово")
     if isinstance(cb.message, Message):  # у устаревших сообщений править нечего
+        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
+
+
+@router.callback_query(F.data.startswith("acc:"))
+async def cb_access_request(cb: CallbackQuery) -> None:
+    parts = (cb.data or "").split(":")
+    requester_id, role = int(parts[1]), parts[2]
+    requester_name = f"Пользователь {requester_id}"
+    if cb.message and isinstance(cb.message, Message) and cb.message.text:
+        for line in cb.message.text.split("\n"):
+            if line.startswith("Пользователь:"):
+                requester_name = line.replace("Пользователь:", "").split("(")[0].strip()
+                break
+
+    msg = await asyncio.to_thread(
+        _assign_telegram_access_sync, requester_id, role, requester_name
+    )
+    await cb.answer()
+    if isinstance(cb.message, Message):
+        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {msg}", reply_markup=None)
+
+    if role != "deny" and cb.bot:
+        start_text = texts.START_KID if role == "kid" else texts.START
+        role_label = family_svc.ROLE_LABELS.get(role, role)
+        try:
+            await cb.bot.send_message(
+                requester_id,
+                f"🎉 Доступ подтверждён! Ваша роль: {role_label}.\n\n{start_text}",
+                reply_markup=keyboard_for_role(role),
+            )
+        except Exception:
+            log.exception(
+                "не удалось уведомить пользователя %s о предоставлении доступа", requester_id
+            )
+
+
+@router.callback_query(F.data.startswith("bdir:"))
+async def cb_bonus_direct(cb: CallbackQuery) -> None:
+    parts = (cb.data or "").split(":")
+    person_id, choice = int(parts[1]), parts[2]
+    msg, minutes, _person_name = await asyncio.to_thread(
+        _resolve_bonus_direct_sync, person_id, choice
+    )
+    await cb.answer()
+    if isinstance(cb.message, Message):
+        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {msg}", reply_markup=None)
+
+    s = dbmod.session()
+    try:
+        p = s.get(Person, person_id)
+        kid_tg = p.telegram_id if p else None
+    finally:
+        s.close()
+
+    if kid_tg and cb.bot:
+        if choice == "deny":
+            kid_msg = (
+                "Родители пока не могут добавить время. "
+                "Попробуйте позаниматься уроками или викториной! 🎒"
+            )
+        else:
+            label = "до конца дня" if choice == "day" else f"+{minutes} минут"
+            kid_msg = f"🎉 Родители одобрили добавление времени: {label}! Приятного пользования."
+        try:
+            await cb.bot.send_message(kid_tg, kid_msg)
+        except Exception:
+            log.exception("не удалось уведомить ребёнка %s", kid_tg)
+
+
+@router.callback_query(F.data.startswith("qz:"))
+async def cb_quiz(cb: CallbackQuery) -> None:
+    parts = (cb.data or "").split(":")
+    q_idx, opt_idx = int(parts[1]), int(parts[2])
+    user_id = cb.from_user.id if cb.from_user else 0
+    result = await asyncio.to_thread(_quiz_answer_sync, user_id, q_idx, opt_idx)
+    await cb.answer()
+    if isinstance(cb.message, Message):
         await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
 
 
@@ -666,6 +1232,29 @@ def confirm_keyboard(pending_id: int) -> InlineKeyboardMarkup:
 
 async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
     """Обрабатывает текстовый ввод (набранный или распознанный из аудио) через ИИ."""
+    user_id = message.from_user.id if message.from_user else 0
+    role, person = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role == "unauthorized":
+        await message.answer(texts.START_UNAUTHORIZED)
+        await _notify_owner_about_access_request(message)
+        return
+
+    if role == "kid":
+        lower = user_text.lower()
+        time_keywords = ("время", "времени", "добавь", "разблокируй", "интернет", "продли", "минут")
+        is_asking_time = any(k in lower for k in time_keywords) and (
+            "дай" in lower or "добавь" in lower or "пожалуйста" in lower
+            or "прошу" in lower or "еще" in lower or "ещё" in lower
+        )
+        if is_asking_time:
+            if person:
+                await _forward_time_request_to_parents(
+                    message, person.id, person.name, user_text
+                )
+                return
+        await _handle_kid_tutor(message, user_text)
+        return
+
     if not ai_client.is_configured():
         await message.answer(
             "Свободный текст понимает ИИ, а он не настроен "

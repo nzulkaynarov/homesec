@@ -472,3 +472,179 @@ def test_format_usage():
     assert "285,000" in text
     assert "15,000" in text
     assert "LunaGPT" in text
+
+
+def test_keyboards_for_roles():
+    from app.bot.handlers import keyboard_for_role
+
+    kb_owner = keyboard_for_role("owner")
+    assert kb_owner is not None
+    owner_buttons = [btn.text for row in kb_owner.keyboard for btn in row]
+    assert "🏠 Кто дома" in owner_buttons
+    assert "🍿 ТВ для взрослых" in owner_buttons
+    assert "📝 Заметки" in owner_buttons
+
+    kb_kid = keyboard_for_role("kid")
+    assert kb_kid is not None
+    kid_buttons = [btn.text for row in kb_kid.keyboard for btn in row]
+    assert "⏳ Моё время" in kid_buttons
+    assert "🙏 Попросить время" in kid_buttons
+    assert "🧠 Заработать +15м" in kid_buttons
+    assert "🎓 Помощь с уроками" in kid_buttons
+
+    kb_guest = keyboard_for_role("guest")
+    assert kb_guest is not None
+    guest_buttons = [btn.text for row in kb_guest.keyboard for btn in row]
+    assert "📶 Wi-Fi" in guest_buttons
+
+    assert keyboard_for_role("unauthorized") is None
+
+
+def test_access_request_flow(db):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram.types import Message
+    from sqlalchemy import select
+
+    from app.bot.handlers import access_request_keyboard, cb_access_request
+    from app.models import Person
+
+    kb = access_request_keyboard(123456)
+    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+    assert "acc:123456:admin" in callbacks
+    assert "acc:123456:kid" in callbacks
+    assert "acc:123456:guest" in callbacks
+    assert "acc:123456:deny" in callbacks
+
+    cb = MagicMock()
+    cb.data = "acc:123456:kid"
+    cb.answer = AsyncMock()
+    msg = MagicMock(spec=Message)
+    msg.text = "Пользователь: Ваня (@vanya, ID: 123456)"
+    msg.edit_text = AsyncMock()
+    cb.message = msg
+    cb.bot = MagicMock()
+    cb.bot.send_message = AsyncMock()
+
+    asyncio.run(cb_access_request(cb))
+
+    person = db.scalar(select(Person).where(Person.telegram_id == 123456))
+    assert person is not None
+    assert person.name == "Ваня"
+    assert person.role == "kid"
+    assert person.bot_role == "kid"
+
+    msg.edit_text.assert_called_once()
+    assert "Ребёнок" in msg.edit_text.call_args[0][0]
+    cb.bot.send_message.assert_called_once()
+
+
+def test_new_device_kind_assignment(db):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram.types import Message
+
+    from app.bot.handlers import cb_new_device, new_device_keyboard
+    from app.models import Device
+
+    dev = Device(mac="AA:33:00:00:00:01", ip="192.168.88.80", name="Samsung TV")
+    db.add(dev)
+    db.commit()
+
+    kb = new_device_keyboard(dev.id, [])
+    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+    assert f"nd:{dev.id}:kind:shared" in callbacks
+    assert f"nd:{dev.id}:kind:iot" in callbacks
+
+    cb = MagicMock()
+    cb.data = f"nd:{dev.id}:kind:shared"
+    cb.answer = AsyncMock()
+    msg = MagicMock(spec=Message)
+    msg.text = "Новое устройство: Samsung TV"
+    msg.edit_text = AsyncMock()
+    cb.message = msg
+
+    asyncio.run(cb_new_device(cb))
+
+    db.refresh(dev)
+    assert dev.kind == "shared"
+    assert dev.group == "shared"
+    msg.edit_text.assert_called_once()
+    assert "Общее (ТВ/Колонка)" in msg.edit_text.call_args[0][0]
+
+
+def test_kid_guards_parent_commands(db):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram.filters import CommandObject
+
+    from app.bot.handlers import cmd_block, cmd_movie, cmd_pause
+    from app.models import Person
+
+    kid = Person(name="Лена", role="kid", telegram_id=8888, bot_role="kid")
+    db.add(kid)
+    db.commit()
+
+    msg = MagicMock()
+    msg.from_user.id = 8888
+    msg.answer = AsyncMock()
+
+    cmd_obj = CommandObject(prefix="/", command="pause", args="30")
+    asyncio.run(cmd_pause(msg, cmd_obj))
+    msg.answer.assert_called_once()
+    assert "доступна только родителям" in msg.answer.call_args[0][0]
+
+    msg.answer.reset_mock()
+    cmd_block_obj = CommandObject(prefix="/", command="block", args="1")
+    asyncio.run(cmd_block(msg, cmd_block_obj))
+    msg.answer.assert_called_once()
+    assert "доступна только родителям" in msg.answer.call_args[0][0]
+
+    msg.answer.reset_mock()
+    asyncio.run(cmd_movie(msg))
+    msg.answer.assert_called_once()
+    assert "доступна только родителям" in msg.answer.call_args[0][0]
+
+
+def test_bonus_direct_approval(db):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram.types import Message
+    from sqlalchemy import select
+
+    from app.bot.handlers import bonus_request_direct_keyboard, cb_bonus_direct
+    from app.models import Person, QuotaBonus
+
+    kid = Person(name="Коля", role="kid", telegram_id=9999, bot_role="kid")
+    db.add(kid)
+    db.commit()
+
+    kb = bonus_request_direct_keyboard(kid.id)
+    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+    assert f"bdir:{kid.id}:15" in callbacks
+    assert f"bdir:{kid.id}:30" in callbacks
+    assert f"bdir:{kid.id}:day" in callbacks
+    assert f"bdir:{kid.id}:deny" in callbacks
+
+    cb = MagicMock()
+    cb.data = f"bdir:{kid.id}:30"
+    cb.answer = AsyncMock()
+    msg = MagicMock(spec=Message)
+    msg.text = "Запрос дополнительного времени: Коля"
+    msg.edit_text = AsyncMock()
+    cb.message = msg
+    cb.bot = MagicMock()
+    cb.bot.send_message = AsyncMock()
+
+    asyncio.run(cb_bonus_direct(cb))
+
+    qb = db.scalar(select(QuotaBonus).where(QuotaBonus.target == str(kid.id)))
+    assert qb is not None
+    assert qb.minutes == 30
+
+    cb.bot.send_message.assert_called_once()
+    assert "30 минут" in cb.bot.send_message.call_args[0][1]

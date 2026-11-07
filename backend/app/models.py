@@ -1,16 +1,36 @@
 from datetime import datetime
 
-from sqlalchemy import Boolean, DateTime, ForeignKey, String, Text
+from sqlalchemy import BigInteger, Boolean, DateTime, ForeignKey, String, Text
 from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 
-# Группы устройств. У устройства без владельца группа всегда 'unknown'.
-GROUPS = ("kid", "adult", "guest", "unknown")
-GROUP_LABELS = {"kid": "Дети", "adult": "Взрослые", "guest": "Гости", "unknown": "Неизвестные"}
+# Группы устройств.
+GROUPS = ("kid", "adult", "guest", "shared", "iot", "unknown")
+GROUP_LABELS = {
+    "kid": "Дети",
+    "adult": "Взрослые",
+    "guest": "Гости",
+    "shared": "Общие (ТВ/Колонки)",
+    "iot": "Умный дом (IoT)",
+    "unknown": "Неизвестные",
+}
+
+# Категории домашних устройств
+DEVICE_KINDS = ("personal", "shared", "iot")
+DEVICE_KIND_LABELS = {
+    "personal": "Личное",
+    "shared": "Общее (ТВ/Колонка)",
+    "iot": "Умный дом (IoT)",
+}
 
 # Соответствие групп address-list'ам на MikroTik
-GROUP_ADDRESS_LISTS = {"kid": "hs-kids", "guest": "hs-guests", "unknown": "hs-unknown"}
+GROUP_ADDRESS_LISTS = {
+    "kid": "hs-kids",
+    "shared": "hs-kids",  # безопасный поиск и фильтрация на общих медиа
+    "guest": "hs-guests",
+    "unknown": "hs-unknown",
+}
 
 
 def is_random_mac(mac: str) -> bool:
@@ -26,6 +46,8 @@ class Person(Base):
     id: Mapped[int] = mapped_column(primary_key=True)
     name: Mapped[str] = mapped_column(String(64), unique=True)
     role: Mapped[str] = mapped_column(String(16), default="kid")  # kid | adult | guest
+    telegram_id: Mapped[int | None] = mapped_column(BigInteger, unique=True, nullable=True)
+    bot_role: Mapped[str] = mapped_column(String(16), default="guest")  # owner/admin/kid/guest
 
     devices: Mapped[list["Device"]] = relationship(back_populates="person")
 
@@ -38,6 +60,7 @@ class Device(Base):
     ip: Mapped[str] = mapped_column(String(15), default="")
     name: Mapped[str] = mapped_column(String(64), default="")
     hostname: Mapped[str] = mapped_column(String(64), default="")  # из DHCP-lease
+    kind: Mapped[str] = mapped_column(String(16), default="personal")  # personal | shared | iot
     person_id: Mapped[int | None] = mapped_column(ForeignKey("people.id"), nullable=True)
     blocked_manual: Mapped[bool] = mapped_column(Boolean, default=False)
     speed_limit: Mapped[str] = mapped_column(String(32), default="")  # напр. "10M/10M"
@@ -47,6 +70,10 @@ class Device(Base):
 
     @property
     def group(self) -> str:
+        if self.kind == "iot":
+            return "iot"
+        if self.kind == "shared":
+            return "shared"
         return self.person.role if self.person else "unknown"
 
     @property
@@ -240,3 +267,14 @@ def kv_set(db, key: str, value: str) -> None:
     else:
         row.value = value
     db.commit()
+
+
+class FamilyNote(Base):
+    """Семейная память и заметки (размеры одежды, коды домофона, списки)."""
+
+    __tablename__ = "family_notes"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    author: Mapped[str] = mapped_column(String(64), default="")
+    content: Mapped[str] = mapped_column(Text)
+    created: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)

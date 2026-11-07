@@ -40,6 +40,7 @@ from ..models import (
     log_event,
 )
 from ..services import adguard, enforcement, mikrotik
+from ..services import family as family_svc
 from ..services import quota as quota_svc
 from ..services.device_links import move_device_rows
 
@@ -211,14 +212,20 @@ def _device_row(d: Device, pauses: list[Pause]) -> dict:
               if (p.target_type == "device" and p.target == str(d.id))
               or (p.target_type == "group" and p.target == d.group)]
     until = max(p.until for p in paused).isoformat(timespec="minutes") if paused else None
+    owner = d.person.name if d.person else None
+    if d.kind == "shared":
+        owner = "📺 Общие (ТВ/Колонки)"
+    elif d.kind == "iot":
+        owner = "🤖 Умный дом (IoT)"
     return {
         "id": d.id,
         "name": d.name,
         "mac": d.mac,
         "ip": d.ip,
+        "kind": d.kind,
         "group": d.group,
         "group_label": GROUP_LABELS[d.group],
-        "owner": d.person.name if d.person else None,
+        "owner": owner,
         "blocked_manual": d.blocked_manual,
         "speed_limit": d.speed_limit or None,
         "paused_until": until,
@@ -627,3 +634,65 @@ def assign_device(
     dev.person = person
     db.commit()
     return f"{dev.name} → {person.name} ({GROUP_LABELS[person.role]})"
+
+
+@tool(mutating=True)
+def set_device_kind(
+    db: Session,
+    device_id: Annotated[int, "id устройства из list_devices"],
+    kind: Annotated[str, "personal (личное) | shared (ТВ/колонка) | iot (умный дом)"],
+) -> str:
+    """Устанавливает категорию устройства: личное, общее (ТВ/приставка) или умный дом."""
+    dev = _device_or_error(db, device_id)
+    k = kind.strip().lower()
+    if k not in ("personal", "shared", "iot"):
+        raise ToolError("Категория должна быть personal, shared или iot")
+    dev.kind = k
+    db.commit()
+    labels = {"personal": "Личное", "shared": "Общее (ТВ/Колонка)", "iot": "Умный дом (IoT)"}
+    return f"{dev.name}: установлена категория «{labels[k]}»"
+
+
+@tool()
+def get_presence(db: Session) -> dict:
+    """Радар «Кто дома»: кто из людей сейчас в сети Wi-Fi (по смартфонам),
+    статус общих устройств (ТВ, приставки) и техники умного дома."""
+    return family_svc.get_presence_status(db)
+
+
+@tool(mutating=True)
+def set_movie_mode(
+    db: Session,
+    hours: Annotated[int, "на сколько часов включить режим взрослых (по умолчанию 8, до утра)"] = 8,
+) -> str:
+    """Режим «Смотрят взрослые»: временно разблокирует общие ТВ и приставки до утра."""
+    return family_svc.set_movie_mode(db, hours)
+
+
+@tool(mutating=True)
+def save_family_note(
+    db: Session,
+    content: Annotated[str, "текст семейной заметки (размер одежды, код домофона, список и т.п.)"],
+    author: Annotated[str, "автор заметки"] = "",
+) -> str:
+    """Сохраняет запись в общую семейную память."""
+    note = family_svc.save_family_note(db, author=author, content=content)
+    return f"Заметка сохранена: «{note.content}»"
+
+
+@tool()
+def get_family_notes(
+    db: Session,
+    limit: Annotated[int, "максимальное число заметок"] = 10,
+) -> list[dict]:
+    """Возвращает список последних семейных заметок."""
+    notes = family_svc.get_family_notes(db, limit=limit)
+    return [
+        {
+            "id": n.id,
+            "author": n.author,
+            "content": n.content,
+            "created": n.created.strftime("%d.%m %H:%M"),
+        }
+        for n in notes
+    ]
