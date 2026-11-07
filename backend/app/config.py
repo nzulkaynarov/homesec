@@ -1,8 +1,13 @@
+from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
 class Settings(BaseSettings):
-    model_config = SettingsConfigDict(env_prefix="HS_", env_file=".env", extra="ignore")
+    model_config = SettingsConfigDict(
+        env_prefix="HS_",
+        env_file=(".env", "conf.d/homesec.env"),
+        extra="ignore",
+    )
 
     admin_username: str = "admin"
     admin_password: str = "admin"
@@ -33,6 +38,15 @@ class Settings(BaseSettings):
     ai_model: str = "claude-opus-4-8"  # рассуждения: NL-команды, дайджест
     ai_model_fast: str = "claude-haiku-4-5"  # рутина: оформление алертов
     ai_daily_token_budget: int = 300_000  # суммарно (вход+выход) в день; 0 = без лимита
+
+    @model_validator(mode="after")
+    def _apply_lunagpt_defaults(self) -> "Settings":
+        if self.ai_base_url and "192.168.88.241" in self.ai_base_url:
+            if not self.stt_url:
+                self.stt_url = "http://192.168.88.241:8010/v1/audio/transcriptions"
+            if not self.anthropic_api_key:
+                self.anthropic_api_key = "sk-luna-master-key-2026"
+        return self
 
     # Telegram-бот (отдельный процесс homesec-bot); пустой токен = бот выключен
     telegram_bot_token: str = ""

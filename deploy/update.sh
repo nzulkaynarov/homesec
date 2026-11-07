@@ -76,6 +76,25 @@ run "$APP_DIR/backend/.venv/bin/pip" install -q -r "$tmp_req"
 
 run git -C "$APP_DIR" reset --hard "origin/$BRANCH"
 sync_units              # второй раз: применяем юниты уже из нового коммита
+
+# Синхронизация переменных из GitHub (backend/conf.d/homesec.env) в локальный .env
+if [ -f "$APP_DIR/backend/conf.d/homesec.env" ]; then
+  env_file="$APP_DIR/backend/.env"
+  [ -f "$env_file" ] || touch "$env_file"
+  while IFS="=" read -r key val || [ -n "$key" ]; do
+    [[ "$key" =~ ^[[:space:]]*# ]] && continue
+    [[ -z "${key// /}" ]] && continue
+    key="${key// /}"
+    if [ -n "$key" ] && [ -n "$val" ]; then
+      if grep -q "^${key}=" "$env_file" 2>/dev/null; then
+        sed -i "s|^${key}=.*|${key}=${val}|" "$env_file"
+      else
+        echo "${key}=${val}" >> "$env_file"
+      fi
+    fi
+  done < "$APP_DIR/backend/conf.d/homesec.env"
+fi
+
 systemctl restart homesec
 systemctl restart homesec-bot
 

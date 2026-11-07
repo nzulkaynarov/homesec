@@ -22,6 +22,10 @@ os.environ["HS_ADGUARD_URL"] = "http://127.0.0.1:9"
 # TestClient шлёт Host: testserver — он должен считаться «своим» адресом панели,
 # иначе middleware примет тестовые запросы за NAT-перехваченные.
 os.environ["HS_PANEL_LAN_URL"] = "http://testserver:8000"
+# Изоляция тестов от ИИ-конфигурации хоста
+os.environ["HS_AI_BASE_URL"] = ""
+os.environ["HS_STT_URL"] = ""
+os.environ["HS_ANTHROPIC_API_KEY"] = ""
 
 import logging  # noqa: E402
 
