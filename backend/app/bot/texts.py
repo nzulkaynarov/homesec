@@ -10,6 +10,9 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("pause", "Пауза интернета на время"),
     ("resume", "Снять паузу досрочно"),
     ("bonus", "Добавить время к квоте на сегодня"),
+    ("quota", "Экранное время и остаток квот"),
+    ("merge", "Поиск и объединение MAC-дублей"),
+    ("usage", "Расход токенов ИИ-шлюза"),
     ("digest", "Дайджест за сутки прямо сейчас"),
     ("help", "Все команды и подсказки"),
 ]
@@ -19,8 +22,10 @@ START = (
     "Привет! Я — бот HomeSec, слежу за домашней сетью.\n\n"
     "/status — что сейчас в сети\n"
     "/devices — устройства и кто онлайн\n"
+    "/quota — экранное время детей\n"
+    "/pause — быстрая пауза интернета\n"
     "/help — все команды\n\n"
-    "Можно писать и обычным текстом («выключи детям интернет на час») — "
+    "Можно писать текстом или слать голосовые сообщения («выключи детям интернет на час») — "
     "разберётся ИИ, а действие попросит подтвердить кнопкой."
 )
 
@@ -30,11 +35,14 @@ HELP = (
     "/devices — список устройств\n"
     "/block <имя|id> — заблокировать интернет устройству\n"
     "/unblock <имя|id> — снять блокировку\n"
-    "/pause <имя|группа> <минут> — пауза интернета (группы: kid, guest, unknown)\n"
+    "/pause <имя|группа> [минут] — пауза интернета (без аргументов — быстрые кнопки)\n"
     "/resume <имя|группа> — снять паузу досрочно\n"
     "/bonus <кто> <минут> [категория] — добавить время к сегодняшней квоте\n"
+    "/quota — экранное время и квоты детей сегодня\n"
+    "/merge — поиск и объединение случайных MAC-дублей\n"
+    "/usage — статистика расхода токенов ИИ\n"
     "/digest — дайджест за сутки прямо сейчас\n\n"
-    "Можно писать свободным текстом («выключи детям интернет на час») — "
+    "Можно писать свободным текстом или слать голосовые сообщения — "
     "разберётся ИИ, а любое действие попросит подтвердить кнопкой.\n"
     "Также я сообщаю о новых устройствах, аномалиях и падении сервисов."
 )
@@ -117,3 +125,64 @@ def format_new_device(dev: dict) -> str:
         f"MAC: {dev['mac']}\nIP: {dev['ip'] or '—'}{warning}\n\n"
         "Кому оно принадлежит?"
     )
+
+
+def progress_bar(used: int, limit: int, length: int = 8) -> str:
+    if limit <= 0:
+        return "[────────]"
+    pct = min(1.0, max(0.0, used / limit))
+    filled = int(round(pct * length))
+    return f"[{'█' * filled}{'░' * (length - filled)}]"
+
+
+def format_quota(items: list[dict]) -> str:
+    """Форматирует экранное время детей с визуальными прогресс-барами."""
+    if not items:
+        return "⏳ На сегодня правил экранного времени не назначено."
+    lines = ["⏳ Экранное время детей сегодня:"]
+    for item in items:
+        title = item["device"]
+        if item.get("owner"):
+            title = f"{item['owner']} ({title})"
+        lines.append(f"\n📱 {title}:")
+        for row in item["rows"]:
+            used, limit = row["used"], row["limit"]
+            bar = progress_bar(used, limit)
+            left = max(0, limit - used)
+            left_str = f"осталось {left} мин" if left > 0 else "лимит исчерпан ⛔"
+            lines.append(
+                f"  {row['label']}: {bar} {hhmm(used)}/{hhmm(limit)} ({left_str})"
+            )
+    return "\n".join(lines)
+
+
+def format_usage(
+    today: dict, week_tokens: int, budget_left: int | None, gateway: str = ""
+) -> str:
+    """Форматирует статистику расхода токенов ИИ-шлюза."""
+    in_tok = today.get("input", 0)
+    out_tok = today.get("output", 0)
+    total_today = in_tok + out_tok
+    reqs = today.get("requests", 0)
+
+    lines = [
+        "🤖 Расход токенов ИИ-шлюза",
+        "",
+        "Сегодня:",
+        f"• Запросов: {reqs}",
+        f"• Входных токенов: {in_tok:,}",
+        f"• Выходных токенов: {out_tok:,}",
+        f"• Всего сегодня: {total_today:,}",
+    ]
+    if budget_left is not None:
+        lines.append(f"• Остаток бюджета: {budget_left:,}")
+    else:
+        lines.append("• Дневной бюджет: без ограничений")
+
+    lines.extend([
+        "",
+        f"За последние 7 дней: {week_tokens:,} токенов",
+    ])
+    if gateway:
+        lines.append(f"Шлюз: {gateway}")
+    return "\n".join(lines)

@@ -4,20 +4,23 @@
 мутации исполняются сразу; подтверждение кнопкой нужно только действиям ИИ."""
 
 import asyncio
+import json
 import logging
 from collections import defaultdict, deque
+from datetime import datetime, timedelta
 from typing import Any
 
 import httpx
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
+from sqlalchemy import select
 
 from .. import db as dbmod
 from ..ai import client as ai_client
 from ..ai import orchestrator, tools
 from ..config import settings
-from ..models import GROUP_LABELS, GROUPS, Person
+from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get
 from . import texts
 
 log = logging.getLogger("homesec.bot")
@@ -225,12 +228,80 @@ async def cmd_unblock(message: Message, command: CommandObject) -> None:
     await _device_command(message, command, "unblock_device")
 
 
+def pause_presets_keyboard() -> InlineKeyboardMarkup:
+    """Быстрые пресеты для /pause без аргументов."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="⏸ Дети 30м", callback_data="pz:kid:30"),
+            InlineKeyboardButton(text="⏸ Дети 1ч", callback_data="pz:kid:60"),
+        ],
+        [
+            InlineKeyboardButton(text="🍽 Ужин (30м)", callback_data="pz:kid:30:dinner"),
+            InlineKeyboardButton(text="🌙 До утра (8ч)", callback_data="pz:kid:480"),
+        ],
+        [
+            InlineKeyboardButton(text="👥 Гости 1ч", callback_data="pz:guest:60"),
+            InlineKeyboardButton(text="🔍 Выбрать устройство", callback_data="pz:select"),
+        ],
+        [
+            InlineKeyboardButton(text="✖ Отмена", callback_data="pick:cancel"),
+        ],
+    ])
+
+
+@router.callback_query(F.data.startswith("pz:"))
+async def cb_pause_preset(cb: CallbackQuery) -> None:
+    parts = (cb.data or "").split(":")
+    if len(parts) < 2:
+        await cb.answer()
+        return
+    action = parts[1]
+    if action == "select":
+        await cb.answer()
+        candidates = await asyncio.to_thread(_find_candidates, "")
+        if isinstance(cb.message, Message):
+            await cb.message.edit_text(
+                "Выберите устройство для паузы на 30 мин:",
+                reply_markup=device_pick_keyboard(candidates, "pause_internet", extra=":30"),
+            )
+        return
+    target, minutes = action, int(parts[2])
+    reason = "ужин" if len(parts) > 3 and parts[3] == "dinner" else ""
+    args: dict[str, Any] = {"target": target, "minutes": minutes}
+    if reason:
+        args["reason"] = reason
+    try:
+        result = await asyncio.to_thread(run_tool_sync, "pause_internet", args)
+    except tools.ToolError as e:
+        result = f"Не получилось: {e}"
+    except Exception:
+        log.exception("pause_internet упал")
+        result = "Ошибка при выполнении, подробности в журнале."
+    await cb.answer()
+    if isinstance(cb.message, Message):
+        await cb.message.edit_text(f"➡ {result}", reply_markup=None)
+
+
 @router.message(Command("pause"))
 async def cmd_pause(message: Message, command: CommandObject) -> None:
-    parts = (command.args or "").split()
-    if not parts or not parts[-1].isdigit():
-        await message.answer("Использование: /pause [имя|группа] <минут>\n"
-                             "Например: /pause kid 60 или просто /pause 60 — выбор кнопками")
+    raw = (command.args or "").strip()
+    if not raw:
+        await message.answer(
+            "Быстрая пауза интернета. Выберите пресет или укажите время:",
+            reply_markup=pause_presets_keyboard(),
+        )
+        return
+    parts = raw.split()
+    if len(parts) == 1 and parts[0].isdigit():
+        minutes = int(parts[0])
+        await _pick_device(message, "", "pause_internet", extra=f":{minutes}")
+        return
+    if not parts[-1].isdigit():
+        await message.answer(
+            "Использование: /pause [имя|группа] <минут>\n"
+            "Например: /pause kid 60 или /pause 30 — выбор кнопками\n"
+            "Либо просто /pause — быстрые кнопки пресетов."
+        )
         return
     target, minutes = " ".join(parts[:-1]), int(parts[-1])
     await _target_command(message, "pause_internet", target,
@@ -261,6 +332,154 @@ async def cmd_bonus(message: Message, command: CommandObject) -> None:
     await _target_command(message, "add_bonus_time", target,
                           {"minutes": minutes, "category": category},
                           extra=f":{minutes}:{category}")
+
+
+def _collect_quota_sync() -> list[dict]:
+    from ..services import quota as quota_svc
+
+    s = dbmod.session()
+    try:
+        devices = list(s.scalars(select(Device)))
+        people = {p.id: p.name for p in s.scalars(select(Person))}
+        prog = quota_svc.progress(s, devices)
+        out = []
+        for dev in devices:
+            rows = prog.get(dev.id, [])
+            if not rows:
+                continue
+            out.append({
+                "device": dev.name,
+                "device_id": dev.id,
+                "owner": people.get(dev.person_id) if dev.person_id else None,
+                "rows": rows,
+            })
+        return out
+    finally:
+        s.close()
+
+
+def quota_buttons_keyboard(items: list[dict]) -> InlineKeyboardMarkup | None:
+    """Кнопки '+15м' и '+30м' под отчётом квот для каждого детского устройства."""
+    rows = []
+    for item in items:
+        dev_id = item["device_id"]
+        dev_name = item["device"]
+        short_name = dev_name if len(dev_name) <= 12 else dev_name[:11] + "…"
+        rows.append([
+            InlineKeyboardButton(
+                text=f"➕ 15м {short_name}",
+                callback_data=f"pick:add_bonus_time:{dev_id}:15:internet",
+            ),
+            InlineKeyboardButton(
+                text=f"➕ 30м {short_name}",
+                callback_data=f"pick:add_bonus_time:{dev_id}:30:internet",
+            ),
+        ])
+    if not rows:
+        return None
+    return InlineKeyboardMarkup(inline_keyboard=rows)
+
+
+@router.message(Command("quota"))
+async def cmd_quota(message: Message) -> None:
+    items = await asyncio.to_thread(_collect_quota_sync)
+    kb = quota_buttons_keyboard(items)
+    await message.answer(texts.format_quota(items), reply_markup=kb)
+
+
+def _find_merge_candidates_sync() -> list[tuple[dict, dict, str]]:
+    """Находит пары (дубль, оригинал) устройств-кандидатов на объединение.
+    Возвращает: [(dup_dict, target_dict, причина)]."""
+    s = dbmod.session()
+    try:
+        devices = list(s.scalars(select(Device).order_by(Device.id)))
+        candidates: list[tuple[dict, dict, str]] = []
+        seen_pairs: set[tuple[int, int]] = set()
+
+        for d1 in devices:
+            for d2 in devices:
+                if d1.id >= d2.id:
+                    continue
+                reason = ""
+                h1 = (d1.hostname or "").strip().lower()
+                h2 = (d2.hostname or "").strip().lower()
+                n1 = (d1.name or "").strip().lower()
+                n2 = (d2.name or "").strip().lower()
+                if h1 and h2 and h1 == h2:
+                    reason = f"совпадает hostname «{d1.hostname}»"
+                elif n1 and n2 and n1 == n2:
+                    reason = f"совпадает имя «{d1.name}»"
+                if reason:
+                    # Решаем, кто вероятнее дубль: без владельца или со случайным MAC
+                    if d1.person_id is None and d2.person_id is not None:
+                        dup, tgt = d1, d2
+                    elif d2.person_id is None and d1.person_id is not None:
+                        dup, tgt = d2, d1
+                    elif d1.mac_is_random and not d2.mac_is_random:
+                        dup, tgt = d1, d2
+                    elif d2.mac_is_random and not d1.mac_is_random:
+                        dup, tgt = d2, d1
+                    else:
+                        dup, tgt = (d2, d1) if d2.id > d1.id else (d1, d2)
+                    pair = (dup.id, tgt.id)
+                    if pair not in seen_pairs:
+                        seen_pairs.add(pair)
+                        candidates.append((
+                            {"id": dup.id, "name": dup.name, "mac": dup.mac, "ip": dup.ip},
+                            {"id": tgt.id, "name": tgt.name, "mac": tgt.mac, "ip": tgt.ip},
+                            reason,
+                        ))
+        return candidates
+    finally:
+        s.close()
+
+
+@router.message(Command("merge"))
+async def cmd_merge(message: Message) -> None:
+    candidates = await asyncio.to_thread(_find_merge_candidates_sync)
+    if not candidates:
+        await message.answer(
+            "Подозрительных дублей не найдено: у всех устройств уникальные имена и hostnames."
+        )
+        return
+    await message.answer(f"Найдено подозрительных дублей: {len(candidates)}")
+    for dup, tgt, reason in candidates:
+        text = (
+            f"🔁 Кандидат на объединение ({reason}):\n"
+            f"Дубль: #{dup['id']} {dup['name']} ({dup['mac']}, {dup['ip'] or '—'})\n"
+            f"Оригинал: #{tgt['id']} {tgt['name']} ({tgt['mac']}, {tgt['ip'] or '—'})"
+        )
+        await message.answer(text, reply_markup=merge_keyboard(dup["id"], tgt["id"]))
+
+
+def _collect_usage_sync() -> tuple[dict, int, int | None, str]:
+    s = dbmod.session()
+    try:
+        today = ai_client.usage_today(s)
+        left = ai_client.budget_left(s)
+        now = datetime.now()
+        week_tokens = 0
+        for i in range(7):
+            d_key = ai_client._usage_key(now - timedelta(days=i))
+            raw = kv_get(s, d_key, "")
+            if raw:
+                try:
+                    data = json.loads(raw)
+                    week_tokens += data.get("input", 0) + data.get("output", 0)
+                except ValueError:
+                    pass
+        gw = settings.ai_base_url or "Anthropic Cloud"
+        if "192.168.88.241" in gw:
+            gw = "LunaGPT Gateway (192.168.88.241:4000)"
+        return today, week_tokens, left, gw
+    finally:
+        s.close()
+
+
+@router.message(Command("usage"))
+async def cmd_usage(message: Message) -> None:
+    today, week_tokens, left, gw = await asyncio.to_thread(_collect_usage_sync)
+    await message.answer(texts.format_usage(today, week_tokens, left, gw))
 
 
 # ---------- кнопки под уведомлением о новом устройстве ----------
@@ -420,6 +639,8 @@ async def cb_new_device(cb: CallbackQuery) -> None:
             return
     except tools.ToolError as e:
         await cb.answer(str(e), show_alert=True)
+        if isinstance(cb.message, Message):
+            await cb.message.edit_text(f"{cb.message.text}\n\n⚠️ {e}", reply_markup=None)
         return
     await cb.answer("Готово")
     if isinstance(cb.message, Message):  # у устаревших сообщений править нечего

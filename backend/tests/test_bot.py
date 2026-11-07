@@ -365,3 +365,110 @@ def test_handle_voice_transcription_success(monkeypatch):
 
     assert "выключи интернет детям" in processed_prompts
     assert msg.answer.called
+
+
+def test_pause_presets_keyboard():
+    from app.bot.handlers import pause_presets_keyboard
+
+    kb = pause_presets_keyboard()
+    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+    assert "pz:kid:30" in callbacks
+    assert "pz:kid:60" in callbacks
+    assert "pz:kid:30:dinner" in callbacks
+    assert "pz:kid:480" in callbacks
+    assert "pz:guest:60" in callbacks
+    assert "pz:select" in callbacks
+
+
+def test_cb_pause_preset(monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram.types import Message
+
+    from app.bot import handlers
+
+    executed = []
+
+    def mock_run_tool(name, args, source="bot"):
+        executed.append((name, args))
+        return "Пауза включена"
+
+    monkeypatch.setattr(handlers, "run_tool_sync", mock_run_tool)
+
+    cb = MagicMock()
+    cb.data = "pz:kid:30:dinner"
+    cb.answer = AsyncMock()
+    msg = MagicMock(spec=Message)
+    msg.edit_text = AsyncMock()
+    cb.message = msg
+
+    asyncio.run(handlers.cb_pause_preset(cb))
+
+    assert len(executed) == 1
+    assert executed[0] == ("pause_internet", {"target": "kid", "minutes": 30, "reason": "ужин"})
+    msg.edit_text.assert_called_once()
+    assert "Пауза включена" in msg.edit_text.call_args[0][0]
+
+
+def test_format_quota_and_keyboard():
+    from app.bot import texts
+    from app.bot.handlers import quota_buttons_keyboard
+
+    items = [{
+        "device": "Планшет",
+        "device_id": 42,
+        "owner": "Миша",
+        "rows": [
+            {"category": "games", "label": "Игры", "used": 60, "limit": 120},
+            {"category": "internet", "label": "Интернет", "used": 150, "limit": 150},
+        ],
+    }]
+    text = texts.format_quota(items)
+    assert "Миша (Планшет)" in text
+    assert "Игры:" in text
+    assert "осталось 60 мин" in text
+    assert "лимит исчерпан ⛔" in text
+    assert "█" in text and "░" in text
+
+    kb = quota_buttons_keyboard(items)
+    assert kb is not None
+    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
+    assert "pick:add_bonus_time:42:15:internet" in callbacks
+    assert "pick:add_bonus_time:42:30:internet" in callbacks
+
+
+def test_find_merge_candidates(db):
+    from app.bot.handlers import _find_merge_candidates_sync
+    from app.models import Device, Person
+
+    p = Person(name="Аня", role="kid")
+    db.add(p)
+    db.commit()
+
+    d1 = Device(mac="10:22:33:44:55:66", ip="192.168.88.51", name="iPhone-Аня",
+                hostname="iphone-anya", person_id=p.id)
+    d2 = Device(mac="AA:BB:CC:DD:EE:FF", ip="192.168.88.52", name="iPhone-Аня",
+                hostname="iphone-anya", person_id=None)
+    db.add_all([d1, d2])
+    db.commit()
+
+    candidates = _find_merge_candidates_sync()
+    assert len(candidates) >= 1
+    # d2 (random MAC, no person) must be duplicate, d1 must be target
+    matching = [c for c in candidates if c[0]["id"] == d2.id and c[1]["id"] == d1.id]
+    assert len(matching) == 1
+    assert "iphone-anya" in matching[0][2]
+
+
+def test_format_usage():
+    from app.bot import texts
+
+    today = {"input": 1000, "output": 500, "requests": 5}
+    text = texts.format_usage(today, week_tokens=15000, budget_left=285000, gateway="LunaGPT")
+    assert "Запросов: 5" in text
+    assert "Входных токенов: 1,000" in text
+    assert "Выходных токенов: 500" in text
+    assert "285,000" in text
+    assert "15,000" in text
+    assert "LunaGPT" in text
