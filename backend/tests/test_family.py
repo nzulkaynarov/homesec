@@ -176,4 +176,22 @@ def test_quiz_lifecycle(db):
     bonuses = list(db.scalars(family_svc.select(QuotaBonus).where(QuotaBonus.target == str(p.id))))
     assert len(bonuses) == 1
     assert bonuses[0].minutes == 15
-    assert bonuses[0].comment == "Победа в викторине"
+    assert "Победа в викторине" in bonuses[0].comment
+
+
+def test_dynamic_quiz_and_active_store(db):
+    p = Person(name="Соня", role="kid")
+    db.add(p)
+    db.commit()
+
+    q = family_svc.generate_dynamic_quiz_question(db, p.id)
+    assert "question" in q and "options" in q and "correct" in q
+    assert len(q["options"]) == 4
+
+    family_svc.store_active_quiz(db, p.id, q)
+    active = family_svc.get_active_quiz(db, p.id)
+    assert active is not None
+    assert active["question"] == q["question"]
+
+    family_svc.clear_active_quiz(db, p.id)
+    assert family_svc.get_active_quiz(db, p.id) is None

@@ -105,12 +105,17 @@ def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
     if role == "kid":
         return ReplyKeyboardMarkup(
             keyboard=[
-                [KeyboardButton(text="⏳ Моё время"), KeyboardButton(text="🙏 Попросить время")],
+                [
+                    KeyboardButton(text="⏳ Моё время"),
+                    KeyboardButton(text="🙏 Попросить время"),
+                ],
                 [
                     KeyboardButton(text="🧠 Заработать +15м"),
-                    KeyboardButton(text="🎓 Помощь с уроками"),
+                    KeyboardButton(text="🚀 Чем заняться?"),
                 ],
-                [KeyboardButton(text="❓ Помощь")],
+                [
+                    KeyboardButton(text="❓ Помощь"),
+                ],
             ],
             resize_keyboard=True,
         )
@@ -138,10 +143,24 @@ def access_request_keyboard(requester_id: int) -> InlineKeyboardMarkup:
     ])
 
 
-def quiz_keyboard(q_idx: int, options: list[str]) -> InlineKeyboardMarkup:
+def kid_explore_keyboard() -> InlineKeyboardMarkup:
+    """Интерактивные сценарии для ребёнка в 1 клик."""
+    return InlineKeyboardMarkup(inline_keyboard=[
+        [
+            InlineKeyboardButton(text="🎲 Текстовый квест (RPG)", callback_data="kexp:quest"),
+            InlineKeyboardButton(text="💻 Идея мини-игры", callback_data="kexp:game"),
+        ],
+        [
+            InlineKeyboardButton(text="🇬🇧 Английский челлендж", callback_data="kexp:english"),
+            InlineKeyboardButton(text="🤯 Факт дня", callback_data="kexp:fact"),
+        ],
+    ])
+
+
+def quiz_keyboard(person_id: int, options: list[str]) -> InlineKeyboardMarkup:
     """Кнопки вариантов ответов для викторины ребёнка."""
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=opt, callback_data=f"qz:{q_idx}:{idx}")]
+        [InlineKeyboardButton(text=opt, callback_data=f"qz:{person_id}:{idx}")]
         for idx, opt in enumerate(options)
     ])
 
@@ -240,34 +259,78 @@ def _get_notes_sync() -> str:
         s.close()
 
 
-def _quiz_prepare_sync(user_id: int) -> tuple[bool, str, dict | None]:
+def _quiz_prepare_sync(user_id: int) -> tuple[bool, str, dict | None, int | None]:
     s = dbmod.session()
     try:
         role, person = family_svc.get_user_role(s, user_id)
         if person is None:
-            return False, "Вы не зарегистрированы в списке семьи. Обратитесь к родителям!", None
+            return (
+                False,
+                "Вы не зарегистрированы в списке семьи. Обратитесь к родителям!",
+                None,
+                None,
+            )
         if not family_svc.can_take_quiz_today(s, person.id):
-            return False, "Сегодня вы уже получали бонус за викторину! Приходите завтра 🧠", None
-        q = family_svc.get_random_quiz_question()
-        return True, "", q
+            return (
+                False,
+                "Сегодня вы уже получали бонус за викторину! Приходите завтра 🧠",
+                None,
+                None,
+            )
+        q = family_svc.generate_dynamic_quiz_question(s, person.id)
+        family_svc.store_active_quiz(s, person.id, q)
+        return True, "", q, person.id
     finally:
         s.close()
 
 
-def _quiz_answer_sync(user_id: int, q_idx: int, chosen_opt: int) -> str:
+def _quiz_answer_sync(user_id: int, person_id: int, chosen_opt: int) -> dict[str, Any]:
     s = dbmod.session()
     try:
-        if q_idx < 0 or q_idx >= len(family_svc.QUIZ_QUESTIONS):
-            return "Вопрос устарел."
-        q = family_svc.QUIZ_QUESTIONS[q_idx]
-        if chosen_opt != q["correct"]:
-            return "❌ Неверно! Попробуйте другой вопрос завтра или повторите тему."
+        active = family_svc.get_active_quiz(s, person_id)
+        if active is None:
+            return {"status": "expired", "message": "Вопрос устарел или уже отвечен."}
+        family_svc.clear_active_quiz(s, person_id)
+
         _, person = family_svc.get_user_role(s, user_id)
-        if person is None:
-            return "Не найден пользователь."
+        if person is None or person.id != person_id:
+            return {"status": "error", "message": "Только автор вопроса может отвечать."}
+
+        correct_idx = active.get("correct", 0)
+        options = active.get("options", [])
+        correct_text = options[correct_idx] if 0 <= correct_idx < len(options) else ""
+        topic = active.get("topic", "Эрудиция")
+        q_text = active.get("question", "")
+
+        if chosen_opt != correct_idx:
+            return {
+                "status": "wrong",
+                "message": (
+                    f"❌ Не совсем так!\n"
+                    f"Правильный ответ: *{correct_text}*.\n\n"
+                    f"Не расстраивайся, завтра будет новый вопрос и шанс заработать минуты! 🧠"
+                ),
+            }
+
         if not family_svc.can_take_quiz_today(s, person.id):
-            return "Сегодня вы уже получали бонус за викторину."
-        return family_svc.award_quiz_bonus(s, person, minutes=15)
+            return {
+                "status": "already_taken",
+                "message": "Сегодня вы уже получали бонус за викторину.",
+            }
+
+        bonus_msg = family_svc.award_quiz_bonus(s, person, minutes=15, topic=topic)
+        return {
+            "status": "correct",
+            "message": (
+                "🎉 *Абсолютно верно!* Ты большой молодец.\n\n"
+                "Тебе начислено *+15 минут* интернета, "
+                "а родителям отправлена весточка о твоём успехе! 🏆"
+            ),
+            "person_name": person.name,
+            "question": q_text,
+            "topic": topic,
+            "bonus_msg": bonus_msg,
+        }
     finally:
         s.close()
 
@@ -309,20 +372,31 @@ def _tutor_ask_sync(chat_id: int, user_text: str) -> str:
             s,
             messages=messages,
             system=(
-                "Ты — добрый, поддерживающий семейный ИИ-репетитор HomeSec для детей. "
-                "Отвечай просто, понятно и увлекательно на русском языке. "
-                "Правило Сократа: если ребёнок просит решить за него задачу или домашку, "
-                "не давай готовый ответ сразу! Объясни суть, приведи жизненный пример "
-                "и задай наводящий вопрос. Хвали за любознательность. "
-                "У тебя НЕТ инструментов управления сетью или устройствами."
+                "Ты — умный, добрый и вдохновляющий семейный ИИ-помощник LunaGPT для детей. "
+                "Ты общаешься с ребёнком дружелюбно, с поддержкой и юмором на русском языке.\n\n"
+                "ТВОИ ПРАВИЛА:\n"
+                "1. ШКОЛА И УРОКИ (Метод Сократа): Если ребёнок просит решить за него задачу, "
+                "уравнение или написать сочинение — НЕ давай готовый ответ! "
+                "Объясни суть темы простыми словами на жизненных примерах (игры, пицца), "
+                "покажи первый шаг и задай наводящий вопрос, чтобы ребёнок додумался сам. "
+                "Хвали за каждую верную мысль.\n"
+                "2. ТВОРЧЕСТВО, СКАЗКИ И КВЕСТЫ: Если ребёнок просит сочинить сказку, "
+                "историю, сыграть в текстовую игру или придумать героя — "
+                "включай творчество на полную мощность! Пиши увлекательно, живо и ярко.\n"
+                "3. ПРОГРАММИРОВАНИЕ (Scratch, Python, Minecraft, Roblox): Помогай с кодом, "
+                "объясняй логику и алгоритмы просто и понятно, вдохновляй делать свои проекты.\n"
+                "4. НАУКА И МИР: Отвечай на вопросы («почему небо синее», «как летит ракета») "
+                "наглядно и интересно, развивая любознательность.\n"
+                "5. БЕЗОПАСНОСТЬ: Дружелюбный детский тон, без взрослого контента и негатива. "
+                "У тебя НЕТ инструментов управления роутером и блокировками домашней сети."
             ),
-            max_tokens=1000,
+            max_tokens=1500,
         )
         content_text = ""
         for block in resp.content:
             if getattr(block, "type", "") == "text":
                 content_text += block.text
-        return content_text or "Я здесь! Задай мне любой вопрос по урокам или окружающему миру."
+        return content_text or "Я здесь! Задай мне любой вопрос или выбери занятие в меню."
     finally:
         s.close()
 
@@ -561,17 +635,66 @@ async def cmd_notes(message: Message) -> None:
 @router.message(F.text == "🧠 Заработать +15м")
 async def cmd_quiz(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
-    ok, err_msg, q = await asyncio.to_thread(_quiz_prepare_sync, user_id)
-    if not ok or q is None:
+    ok, err_msg, q, person_id = await asyncio.to_thread(_quiz_prepare_sync, user_id)
+    if not ok or q is None or person_id is None:
         await message.answer(err_msg)
         return
+    topic = q.get("topic", "Эрудиция")
     text = (
-        f"🧠 *Вопрос викторины на +15 минут:*\n\n"
+        f"🧠 *Вопрос викторины на +15 минут ({topic}):*\n\n"
         f"{q['question']}\n\n"
         f"Выберите правильный ответ:"
     )
-    kb = quiz_keyboard(q["id"], q["options"])
+    kb = quiz_keyboard(person_id, q["options"])
     await message.answer(text, reply_markup=kb, parse_mode="Markdown")
+
+
+@router.message(Command("explore"))
+@router.message(F.text == "🚀 Чем заняться?")
+async def cmd_kid_explore(message: Message) -> None:
+    await message.answer(
+        "🚀 *Выбирай, чем займёмся сегодня:*\n\n"
+        "🎲 *Текстовый квест* — интерактивное приключение, где ты выбираешь сюжет!\n"
+        "💻 *Идея мини-игры* — задумка для твоей игры на Scratch или Python.\n"
+        "🇬🇧 *Английский челлендж* — сленг и фразы из любимых игр.\n"
+        "🤯 *Факт дня* — удивительный научный факт, чтобы удивить родителей!",
+        reply_markup=kid_explore_keyboard(),
+        parse_mode="Markdown",
+    )
+
+
+@router.callback_query(F.data.startswith("kexp:"))
+async def cb_kid_explore(cb: CallbackQuery) -> None:
+    action = (cb.data or "").split(":")[1]
+    prompts = {
+        "quest": (
+            "Начни для меня увлекательный интерактивный текстовый мини-квест в жанре "
+            "космического или фэнтези-приключения! Напиши краткую завязку (3-4 предложения) "
+            "и предложи 3 пронумерованных варианта действия (1, 2, 3), "
+            "чтобы я выбрал, что делать дальше."
+        ),
+        "game": (
+            "Предложи интересную и простую идею для создания собственной мини-игры "
+            "на Scratch или Python. Кратко объясни механику, фишку игры "
+            "и первые 3 шага, с чего начать программировать!"
+        ),
+        "english": (
+            "Устрой для меня веселый мини-челлендж по английскому языку на тему игр и приключений: "
+            "1 классное слово или фраза, пример в диалоге и короткий вопрос с вариантами для меня!"
+        ),
+        "fact": (
+            "Расскажи один поразительный, неожиданный и научно доказанный факт о космосе, "
+            "природе или технологиях, которым я сегодня смогу удивить родителей за ужином!"
+        ),
+    }
+    user_prompt = prompts.get(action, "Расскажи что-нибудь интересное!")
+    await cb.answer()
+    if isinstance(cb.message, Message):
+        title = user_prompt.split("!")[0]
+        await cb.message.answer(
+            f"🚀 *Запускаю:* _{title}…_", parse_mode="Markdown"
+        )
+        await _handle_kid_tutor(cb.message, user_prompt)
 
 
 @router.message(Command("ask"))
@@ -1205,12 +1328,33 @@ async def cb_bonus_direct(cb: CallbackQuery) -> None:
 @router.callback_query(F.data.startswith("qz:"))
 async def cb_quiz(cb: CallbackQuery) -> None:
     parts = (cb.data or "").split(":")
-    q_idx, opt_idx = int(parts[1]), int(parts[2])
+    person_id, opt_idx = int(parts[1]), int(parts[2])
     user_id = cb.from_user.id if cb.from_user else 0
-    result = await asyncio.to_thread(_quiz_answer_sync, user_id, q_idx, opt_idx)
+    res = await asyncio.to_thread(_quiz_answer_sync, user_id, person_id, opt_idx)
     await cb.answer()
     if isinstance(cb.message, Message):
-        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
+        await cb.message.edit_text(
+            f"{cb.message.text}\n\n➡ {res['message']}",
+            reply_markup=None,
+            parse_mode="Markdown",
+        )
+
+    # При верном ответе — шлём гордое уведомление родителям с темой вопроса
+    if res.get("status") == "correct" and cb.bot:
+        parent_text = (
+            f"🏆 *{res['person_name']} выиграл в викторине!*\n\n"
+            f"Тема: *{res['topic']}*\n"
+            f"Вопрос: _{res['question']}_\n\n"
+            f"Ребёнок дал верный ответ и получил бонус *+15 минут* интернета."
+        )
+        for parent_id in settings.telegram_allowed_ids:
+            try:
+                await cb.bot.send_message(parent_id, parent_text, parse_mode="Markdown")
+            except Exception:
+                log.exception(
+                    "не удалось отправить родителю %s уведомление о победе в викторине",
+                    parent_id,
+                )
 
 
 # ---------- свободный текст -> ИИ-оркестратор ----------

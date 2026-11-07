@@ -253,10 +253,98 @@ def format_family_notes(notes: list[FamilyNote]) -> str:
 
 
 def get_random_quiz_question() -> dict[str, Any]:
-    """Возвращает случайный вопрос для викторины."""
+    """Возвращает случайный вопрос для викторины из встроенного пула."""
     idx = random.randint(0, len(QUIZ_QUESTIONS) - 1)
     q = QUIZ_QUESTIONS[idx]
-    return {"id": idx, "question": q["q"], "options": q["options"], "correct": q["correct"]}
+    return {
+        "id": idx,
+        "question": q["q"],
+        "options": q["options"],
+        "correct": q["correct"],
+        "topic": "Эрудиция",
+    }
+
+
+def generate_dynamic_quiz_question(db: Session, person_id: int) -> dict[str, Any]:
+    """Генерирует уникальный познавательный вопрос викторины через LunaGPT
+    или использует fallback-пул при отсутствии ИИ."""
+    import json
+
+    from ..ai import client as ai_client
+
+    if ai_client.is_configured():
+        try:
+            prompt = (
+                "Сгенерируй один интересный, познавательный вопрос викторины для школьника "
+                "(математика, логика, природа, космос, история или наука). "
+                "Верни ответ СТРОГО в виде валидного JSON без разметки markdown:\n"
+                '{"q": "Текст вопроса?", '
+                '"options": ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4"], '
+                '"correct": 0, "topic": "Космос"}\n'
+                "options: список из ровно 4 вариантов ответа. "
+                "correct: целое число от 0 до 3 (индекс правильного ответа). "
+                "topic: короткая тема вопроса (1-2 слова)."
+            )
+            resp = ai_client.ask(
+                db,
+                messages=[{"role": "user", "content": prompt}],
+                system=(
+                    "Ты — генератор вопросов для детской познавательной викторины. "
+                    "Отвечай строго валидным JSON без лишних слов."
+                ),
+                max_tokens=400,
+            )
+            raw = "".join(b.text for b in resp.content if b.type == "text").strip()
+            if raw.startswith("```"):
+                raw = raw.strip("`")
+                if raw.startswith("json\n"):
+                    raw = raw[5:]
+                elif raw.startswith("json"):
+                    raw = raw[4:]
+                raw = raw.strip()
+            data = json.loads(raw)
+            if (
+                isinstance(data, dict)
+                and "q" in data
+                and "options" in data
+                and len(data["options"]) == 4
+                and isinstance(data.get("correct"), int)
+                and 0 <= data["correct"] <= 3
+            ):
+                return {
+                    "id": -1,
+                    "question": data["q"],
+                    "options": data["options"],
+                    "correct": data["correct"],
+                    "topic": data.get("topic", "Эрудиция"),
+                }
+        except Exception as e:
+            log.warning("генерация викторины через ИИ не удалась (%s), берём из пула", e)
+
+    return get_random_quiz_question()
+
+
+def store_active_quiz(db: Session, person_id: int, quiz_data: dict[str, Any]) -> None:
+    """Сохраняет текущий активный вопрос викторины в kv_state."""
+    import json
+    kv_set(db, f"quiz_active_{person_id}", json.dumps(quiz_data, ensure_ascii=False))
+
+
+def get_active_quiz(db: Session, person_id: int) -> dict[str, Any] | None:
+    """Получает сохранённый вопрос активной викторины."""
+    import json
+    raw = kv_get(db, f"quiz_active_{person_id}", "")
+    if not raw:
+        return None
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
+
+
+def clear_active_quiz(db: Session, person_id: int) -> None:
+    """Очищает активный вопрос викторины."""
+    kv_set(db, f"quiz_active_{person_id}", "")
 
 
 def can_take_quiz_today(db: Session, person_id: int, now: datetime | None = None) -> bool:
@@ -268,7 +356,11 @@ def can_take_quiz_today(db: Session, person_id: int, now: datetime | None = None
 
 
 def award_quiz_bonus(
-    db: Session, person: Person, minutes: int = 15, now: datetime | None = None
+    db: Session,
+    person: Person,
+    minutes: int = 15,
+    topic: str = "Эрудиция",
+    now: datetime | None = None,
 ) -> str:
     """Начисляет ребёнку бонусные минуты за успешный квиз."""
     now = now or datetime.now()
@@ -284,12 +376,12 @@ def award_quiz_bonus(
             date=date,
             category="internet",
             minutes=minutes,
-            comment="Победа в викторине",
+            comment=f"Победа в викторине ({topic})",
         )
     )
     db.commit()
     msg = (
-        f"🏆 {person.name} успешно ответил на вопрос викторины "
+        f"🏆 {person.name} успешно ответил на вопрос викторины ({topic}) "
         f"и получил +{minutes} мин интернета!"
     )
     log_event(db, "quiz_win", msg)
