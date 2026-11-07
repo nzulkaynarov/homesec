@@ -66,11 +66,64 @@ def _run_read_tool(db: Session, name: str, args: dict) -> tuple[str, bool]:
         return "Внутренняя ошибка инструмента", True
 
 
-def _describe_pending(name: str, args: dict) -> str:
+def _describe_pending(db: Session, name: str, args: dict) -> str:
+    from ..models import GROUP_LABELS, Device
+
     spec = tools.REGISTRY[name]
     first_line = spec.description.splitlines()[0]
-    arg_str = ", ".join(f"{k}={v}" for k, v in args.items())
-    return f"{first_line} ({arg_str})"
+    details: list[str] = []
+
+    # Резолвим device_id в имя и IP устройства из БД
+    if "device_id" in args:
+        try:
+            dev = db.get(Device, int(args["device_id"]))
+            if dev:
+                details.append(f"{dev.name} ({dev.ip or dev.mac})")
+            else:
+                details.append(f"id={args['device_id']}")
+        except (ValueError, TypeError):
+            details.append(f"id={args['device_id']}")
+
+    # Резолвим дубли при merge_devices
+    if "duplicate_id" in args and "target_id" in args:
+        try:
+            dup = db.get(Device, int(args["duplicate_id"]))
+            tgt = db.get(Device, int(args["target_id"]))
+            dup_name = dup.name if dup else f"id={args['duplicate_id']}"
+            tgt_name = tgt.name if tgt else f"id={args['target_id']}"
+            details.append(f"дубль «{dup_name}» → в «{tgt_name}»")
+        except (ValueError, TypeError):
+            pass
+
+    # Резолвим target (группа или устройство)
+    if "target" in args:
+        t = str(args["target"]).strip()
+        if t in GROUP_LABELS:
+            details.append(f"группа «{GROUP_LABELS[t]}»")
+        else:
+            dev = tools.find_device(db, t)
+            if dev:
+                details.append(f"{dev.name} ({dev.ip or dev.mac})")
+            else:
+                details.append(t)
+
+    for k, v in args.items():
+        if k in ("device_id", "duplicate_id", "target_id", "target"):
+            continue
+        if k == "minutes":
+            details.append(f"{v} мин")
+        elif k == "limit":
+            details.append(f"лимит {v}")
+        elif k == "category":
+            details.append(f"категория {v}")
+        elif k == "person_name":
+            details.append(f"владелец {v}")
+        elif v:
+            details.append(f"{k}={v}")
+
+    if details:
+        return f"{first_line}: {', '.join(details)}"
+    return first_line
 
 
 def handle(db: Session, user_text: str, history: list[dict] | None = None) -> Answer:
@@ -105,7 +158,7 @@ def handle(db: Session, user_text: str, history: list[dict] | None = None) -> An
                 action = PendingAction(
                     tool=block.name,
                     args=args,
-                    description=_describe_pending(block.name, args),
+                    description=_describe_pending(db, block.name, args),
                 )
                 pending.append(action)
                 log_event(db, "ai_proposed", action.description)

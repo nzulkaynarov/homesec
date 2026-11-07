@@ -8,6 +8,7 @@ import logging
 from collections import defaultdict, deque
 from typing import Any
 
+import httpx
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -15,6 +16,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .. import db as dbmod
 from ..ai import client as ai_client
 from ..ai import orchestrator, tools
+from ..config import settings
 from ..models import GROUP_LABELS, GROUPS, Person
 from . import texts
 
@@ -441,8 +443,8 @@ def confirm_keyboard(pending_id: int) -> InlineKeyboardMarkup:
     ]])
 
 
-@router.message(F.text)
-async def free_text(message: Message) -> None:
+async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
+    """Обрабатывает текстовый ввод (набранный или распознанный из аудио) через ИИ."""
     if not ai_client.is_configured():
         await message.answer(
             "Свободный текст понимает ИИ, а он не настроен "
@@ -450,7 +452,7 @@ async def free_text(message: Message) -> None:
         )
         return
     try:
-        answer = await asyncio.to_thread(_orchestrate, message.chat.id, message.text or "")
+        answer = await asyncio.to_thread(_orchestrate, message.chat.id, user_text)
     except ai_client.AiError as e:
         await message.answer(str(e))
         return
@@ -459,7 +461,7 @@ async def free_text(message: Message) -> None:
         await message.answer("ИИ споткнулся, подробности в журнале бота. Команды /help работают.")
         return
 
-    CHAT_HISTORY[message.chat.id].append({"role": "user", "content": message.text or ""})
+    CHAT_HISTORY[message.chat.id].append({"role": "user", "content": user_text})
     CHAT_HISTORY[message.chat.id].append({"role": "assistant", "content": answer.text})
     await message.answer(answer.text)
     for action in answer.pending:
@@ -468,6 +470,58 @@ async def free_text(message: Message) -> None:
             f"Подтвердите действие:\n{action.description}",
             reply_markup=confirm_keyboard(pending_id),
         )
+
+
+@router.message(F.voice)
+async def handle_voice(message: Message) -> None:
+    """Голосовое сообщение от пользователя: скачивает ogg аудиофайл,
+    транскрибирует через LunaGPT STT и передаёт в ИИ-оркестратор."""
+    if not settings.stt_url:
+        await message.answer(
+            "Голосовое управление не настроено: укажите HS_STT_URL в .env (шлюз LunaGPT)."
+        )
+        return
+
+    if not message.voice or message.bot is None:
+        return
+
+    try:
+        await message.bot.send_chat_action(message.chat.id, "typing")
+        file_info = await message.bot.get_file(message.voice.file_id)
+        if not file_info.file_path:
+            await message.answer("Не удалось получить файл голосового сообщения из Telegram.")
+            return
+
+        voice_buf = await message.bot.download_file(file_info.file_path)
+        if voice_buf is None:
+            await message.answer("Не удалось скачать аудиозапись.")
+            return
+        voice_bytes = voice_buf.getvalue() if hasattr(voice_buf, "getvalue") else voice_buf.read()
+
+        async with httpx.AsyncClient(timeout=35.0) as client:
+            files = {
+                "file": ("voice.oga", voice_bytes, message.voice.mime_type or "audio/ogg")
+            }
+            data = {"language": "ru"}
+            resp = await client.post(settings.stt_url, files=files, data=data)
+            resp.raise_for_status()
+            transcribed_text = resp.json().get("text", "").strip()
+    except Exception as exc:
+        log.exception("ошибка транскрипции голосового сообщения")
+        await message.answer(f"Не удалось распознать голос: {exc}")
+        return
+
+    if not transcribed_text:
+        await message.answer("Не удалось разобрать речь. Попробуйте сказать четче.")
+        return
+
+    await message.answer(f"🗣 <i>«{transcribed_text}»</i>", parse_mode="HTML")
+    await _process_user_nl_prompt(message, transcribed_text)
+
+
+@router.message(F.text)
+async def free_text(message: Message) -> None:
+    await _process_user_nl_prompt(message, message.text or "")
 
 
 @router.callback_query(F.data.startswith("act:"))

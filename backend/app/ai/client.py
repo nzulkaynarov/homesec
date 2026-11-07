@@ -99,7 +99,14 @@ def ask(
     if effort:
         kwargs["output_config"] = {"effort": effort}
 
-    client = anthropic.Anthropic(api_key=settings.anthropic_api_key, timeout=120.0)
+    client_kwargs: dict = {
+        "api_key": settings.anthropic_api_key,
+        "timeout": 120.0,
+    }
+    if settings.ai_base_url:
+        client_kwargs["base_url"] = settings.ai_base_url
+
+    client = anthropic.Anthropic(**client_kwargs)
     try:
         response = client.messages.create(**kwargs)
     except anthropic.RateLimitError as e:

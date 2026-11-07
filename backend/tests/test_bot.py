@@ -289,3 +289,79 @@ def test_bonus_request_approve_deny_idempotent(db):
     db.delete(d)
     db.query(Person).delete()
     db.commit()
+
+
+def test_describe_pending_resolves_device(db):
+    from app.ai.orchestrator import _describe_pending
+
+    dev = Device(mac="AA:BB:CC:11:22:33", ip="192.168.88.45", name="Планшет Миши")
+    db.add(dev)
+    db.commit()
+
+    desc = _describe_pending(db, "block_device", {"device_id": dev.id})
+    assert "Планшет Миши" in desc
+    assert "192.168.88.45" in desc
+
+
+@pytest.mark.asyncio
+async def test_handle_voice_missing_stt_url(monkeypatch):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.bot.handlers import handle_voice
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "stt_url", "")
+    msg = MagicMock()
+    msg.voice = MagicMock()
+    msg.answer = AsyncMock()
+    await handle_voice(msg)
+    msg.answer.assert_called_once()
+    assert "HS_STT_URL" in msg.answer.call_args[0][0]
+
+
+@pytest.mark.asyncio
+async def test_handle_voice_transcription_success(monkeypatch):
+    import io
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.bot import handlers
+    from app.config import settings
+
+    monkeypatch.setattr(settings, "stt_url", "http://lunagpt:8010/v1/audio/transcriptions")
+
+    mock_bot = MagicMock()
+    mock_file = MagicMock()
+    mock_file.file_path = "voice/voice.oga"
+    mock_bot.get_file = AsyncMock(return_value=mock_file)
+    mock_bot.download_file = AsyncMock(return_value=io.BytesIO(b"fake_voice_bytes"))
+    mock_bot.send_chat_action = AsyncMock()
+
+    msg = MagicMock()
+    msg.bot = mock_bot
+    msg.chat.id = 12345
+    msg.voice.file_id = "file_123"
+    msg.voice.mime_type = "audio/ogg"
+    msg.answer = AsyncMock()
+
+    # Mock httpx post
+    mock_resp = MagicMock()
+    mock_resp.status_code = 200
+    mock_resp.raise_for_status = MagicMock()
+    mock_resp.json.return_value = {"text": "выключи интернет детям"}
+
+    async def mock_post(*args, **kwargs):
+        return mock_resp
+
+    monkeypatch.setattr("httpx.AsyncClient.post", mock_post)
+
+    processed_prompts = []
+
+    async def mock_process(message, text):
+        processed_prompts.append(text)
+
+    monkeypatch.setattr(handlers, "_process_user_nl_prompt", mock_process)
+
+    await handlers.handle_voice(msg)
+
+    assert "выключи интернет детям" in processed_prompts
+    assert msg.answer.called

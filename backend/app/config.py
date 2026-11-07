@@ -26,8 +26,10 @@ class Settings(BaseSettings):
     database_path: str = "./homesec.db"
     scheduler_enabled: bool = True  # выключается для локальной разработки/тестов
 
-    # ИИ-слой (Claude API); пустой ключ = ИИ-фичи выключены, остальное работает
+    # ИИ-слой (Claude API или шлюз LunaGPT); пустой ключ = ИИ-фичи выключены, остальное работает
     anthropic_api_key: str = ""
+    ai_base_url: str = ""  # шлюз LunaGPT/LiteLLM, напр. "http://192.168.88.241:4000"
+    stt_url: str = ""  # эндпоинт распознавания речи, напр. "http://192.168.88.241:8010/v1/audio/transcriptions"
     ai_model: str = "claude-opus-4-8"  # рассуждения: NL-команды, дайджест
     ai_model_fast: str = "claude-haiku-4-5"  # рутина: оформление алертов
     ai_daily_token_budget: int = 300_000  # суммарно (вход+выход) в день; 0 = без лимита
