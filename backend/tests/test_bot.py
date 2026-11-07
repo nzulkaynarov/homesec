@@ -303,8 +303,8 @@ def test_describe_pending_resolves_device(db):
     assert "192.168.88.45" in desc
 
 
-@pytest.mark.asyncio
-async def test_handle_voice_missing_stt_url(monkeypatch):
+def test_handle_voice_missing_stt_url(monkeypatch):
+    import asyncio
     from unittest.mock import AsyncMock, MagicMock
 
     from app.bot.handlers import handle_voice
@@ -314,13 +314,13 @@ async def test_handle_voice_missing_stt_url(monkeypatch):
     msg = MagicMock()
     msg.voice = MagicMock()
     msg.answer = AsyncMock()
-    await handle_voice(msg)
+    asyncio.run(handle_voice(msg))
     msg.answer.assert_called_once()
     assert "HS_STT_URL" in msg.answer.call_args[0][0]
 
 
-@pytest.mark.asyncio
-async def test_handle_voice_transcription_success(monkeypatch):
+def test_handle_voice_transcription_success(monkeypatch):
+    import asyncio
     import io
     from unittest.mock import AsyncMock, MagicMock
 
@@ -361,7 +361,7 @@ async def test_handle_voice_transcription_success(monkeypatch):
 
     monkeypatch.setattr(handlers, "_process_user_nl_prompt", mock_process)
 
-    await handlers.handle_voice(msg)
+    asyncio.run(handlers.handle_voice(msg))
 
     assert "выключи интернет детям" in processed_prompts
     assert msg.answer.called
