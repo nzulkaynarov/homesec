@@ -80,8 +80,9 @@ def heartbeat(body: Heartbeat, db: Session = Depends(get_db)) -> dict[str, str]:
 def list_people(db: Session = Depends(get_db)) -> list[dict]:
     """The family as the Pi knows it; Luna never keeps its own copy of who exists."""
     counts: dict[int, int] = {}
-    for device in db.scalars(select(Device).where(Device.person_id.is_not(None))):
-        counts[device.person_id] = counts.get(device.person_id, 0) + 1
+    for device in db.scalars(select(Device)):
+        if device.person_id is not None:
+            counts[device.person_id] = counts.get(device.person_id, 0) + 1
     return [
         {
             "id": p.id,
