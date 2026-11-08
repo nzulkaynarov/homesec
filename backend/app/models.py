@@ -65,6 +65,8 @@ class Device(Base):
     blocked_manual: Mapped[bool] = mapped_column(Boolean, default=False)
     speed_limit: Mapped[str] = mapped_column(String(32), default="")  # напр. "10M/10M"
     first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # A shared device counts as an adult's until this moment, then returns to kid mode.
+    adult_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 
     person: Mapped[Person | None] = relationship(back_populates="devices")
 
@@ -73,6 +75,8 @@ class Device(Base):
         if self.kind == "iot":
             return "iot"
         if self.kind == "shared":
+            if self.adult_until is not None and self.adult_until > datetime.now():
+                return "adult"
             return "shared"
         return self.person.role if self.person else "unknown"
 

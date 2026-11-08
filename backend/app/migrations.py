@@ -78,6 +78,8 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
         "created DATETIME NOT NULL)",
         "CREATE INDEX IF NOT EXISTS ix_family_notes_created ON family_notes (created)",
     ]),
+    # Shared devices can be opened for adults until a set time.
+    (5, ["ALTER TABLE devices ADD COLUMN adult_until DATETIME"]),
 ]
 
 

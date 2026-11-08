@@ -483,7 +483,7 @@ def test_keyboards_for_roles():
     assert kb_owner is not None
     owner_buttons = [btn.text for row in kb_owner.keyboard for btn in row]
     assert "🏠 Кто дома" in owner_buttons
-    assert "🍿 ТВ для взрослых" in owner_buttons
+    assert "📺 Общие устройства" in owner_buttons
     assert "📝 Заметки" in owner_buttons
 
     kb_kid = keyboard_for_role("kid")

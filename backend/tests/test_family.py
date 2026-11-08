@@ -125,7 +125,7 @@ def test_set_movie_mode(db):
     db.commit()
 
     msg = family_svc.set_movie_mode(db)
-    assert "Режим «Смотрят взрослые» включён" in msg
+    assert "Режим для взрослых включён" in msg
     assert "LG OLED TV" in msg
 
     db.refresh(d_tv)

@@ -5,7 +5,7 @@
 import logging
 import random
 import re
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any
 
 from sqlalchemy import select
@@ -15,6 +15,7 @@ from ..config import settings
 from ..models import (
     Device,
     FamilyNote,
+    Pause,
     Person,
     QuotaBonus,
     kv_get,
@@ -194,30 +195,57 @@ def format_presence(status: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
-def set_movie_mode(db: Session, hours: int = 8) -> str:
-    """Режим «Смотрят взрослые»: временно снимает ручные блокировки с общих
-    медиа-устройств (ТВ/колонки) до утра, чтобы родители могли спокойно смотреть фильм."""
+MORNING_HOUR = 7
+SHARED_STATES = ("kid", "off", "adult")
+
+
+def hours_until_morning(now: datetime | None = None) -> float:
+    now = now or datetime.now()
+    morning = now.replace(hour=MORNING_HOUR, minute=0, second=0, microsecond=0)
+    if morning <= now:
+        morning += timedelta(days=1)
+    return (morning - now).total_seconds() / 3600
+
+
+def shared_device_state(dev: Device, now: datetime | None = None) -> str:
+    now = now or datetime.now()
+    if dev.blocked_manual:
+        return "off"
+    if dev.adult_until is not None and dev.adult_until > now:
+        return "adult"
+    return "kid"
+
+
+def set_shared_state(db: Session, dev: Device, state: str, hours: float | None = None) -> None:
+    """Switch a shared device between kid mode, off, and open for adults until a set time."""
+    if dev.kind != "shared":
+        raise ValueError("Device is not shared")
+    if state not in SHARED_STATES:
+        raise ValueError(f"Unknown state: {state}")
+    now = datetime.now()
+    dev.blocked_manual = state == "off"
+    dev.adult_until = now + timedelta(hours=hours or 1) if state == "adult" else None
+    if state == "adult":
+        for pause in db.scalars(
+            select(Pause).where(Pause.target_type == "device", Pause.target == str(dev.id))
+        ):
+            db.delete(pause)
+    db.commit()
+    kv_set(db, "reconcile_asap", "1")
+    log_event(db, "shared_state", f"{dev.name}: режим {state}")
+
+
+def set_movie_mode(db: Session, hours: float | None = None) -> str:
+    """Open every shared device for adults until morning or for the given hours."""
     shared_devs = list(db.scalars(select(Device).where(Device.kind == "shared")))
     if not shared_devs:
         return "В сети нет устройств с типом «Общее (ТВ/Колонка)»."
-
-    unblocked_names = []
-    for d in shared_devs:
-        if d.blocked_manual:
-            d.blocked_manual = False
-            unblocked_names.append(d.name)
-
-    # Ставим флаг быстрой синхронизации для роутера
-    kv_set(db, "reconcile_asap", "1")
-    db.commit()
-
-    names_str = ", ".join(d.name for d in shared_devs)
-    log_event(db, "movie_mode", f"Включён режим взрослых для общих медиа: {names_str}")
-    return (
-        f"🍿 *Режим «Смотрят взрослые» включён!*\n\n"
-        f"Общие устройства ({names_str}) доступны без ограничений.\n"
-        f"Детский режим вернётся автоматически утром."
-    )
+    duration = hours or hours_until_morning()
+    for dev in shared_devs:
+        set_shared_state(db, dev, "adult", duration)
+    until = datetime.now() + timedelta(hours=duration)
+    names = ", ".join(d.name for d in shared_devs)
+    return f"🍿 *Режим для взрослых включён* до {until:%H:%M}.\n\nУстройства: {names}."
 
 
 def save_family_note(db: Session, author: str, content: str) -> FamilyNote:

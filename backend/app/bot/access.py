@@ -26,7 +26,7 @@ KID_CALLBACKS = {"kexp", "qz"}
 OWNER_CALLBACKS = {"acc"}  # granting roles is reserved for the owner
 GUEST_COMMANDS = {"start", "help"}
 GUEST_BUTTONS = {"📶 Wi-Fi", "❓ Помощь"}
-ADULT_BUTTONS = {"🏠 Кто дома", "⏳ Квоты", "⏸ Пауза", "🍿 ТВ для взрослых", "📝 Заметки"}
+ADULT_BUTTONS = {"🏠 Кто дома", "⏳ Квоты", "⏸ Пауза", "📺 Общие устройства", "📝 Заметки"}
 
 DENIED_KID = "Эта функция доступна только родителям 🛡"
 DENIED_GUEST = "Гостям доступны только Wi-Fi и справка."

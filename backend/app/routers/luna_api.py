@@ -6,6 +6,7 @@ Pi, which remains the only writer to the network state."""
 import hmac
 import json
 from datetime import datetime
+from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
 from pydantic import BaseModel, Field
@@ -45,6 +46,12 @@ class TelegramLink(BaseModel):
     telegram_id: int
 
 
+class SharedState(BaseModel):
+    state: Literal["kid", "off", "adult"]
+    hours: float | None = Field(default=None, gt=0, le=24)
+    until_morning: bool = False
+
+
 class QuizResult(BaseModel):
     correct: bool
     topic: str = Field(default="Эрудиция", max_length=64)
@@ -60,7 +67,8 @@ def _person_or_404(db: Session, name: str) -> Person:
 
 
 def _devices_of(db: Session, person: Person) -> list[Device]:
-    return list(db.scalars(select(Device).where(Device.person_id == person.id).order_by(Device.id)))
+    query = select(Device).where(Device.person_id == person.id, Device.kind == "personal")
+    return list(db.scalars(query.order_by(Device.id)))
 
 
 @router.get("/health")
@@ -76,11 +84,35 @@ def heartbeat(body: Heartbeat, db: Session = Depends(get_db)) -> dict[str, str]:
     return {"status": "ok"}
 
 
+def _shared_view(dev: Device) -> dict:
+    state = family.shared_device_state(dev)
+    until = dev.adult_until.isoformat() if state == "adult" and dev.adult_until else None
+    return {"id": dev.id, "name": dev.name, "state": state, "until": until}
+
+
+@router.get("/shared-devices", dependencies=[Depends(require_token)])
+def shared_devices(db: Session = Depends(get_db)) -> list[dict]:
+    query = select(Device).where(Device.kind == "shared").order_by(Device.name)
+    return [_shared_view(d) for d in db.scalars(query)]
+
+
+@router.post("/shared-devices/{device_id}/state", dependencies=[Depends(require_token)])
+def set_shared_state(device_id: int, body: SharedState, db: Session = Depends(get_db)) -> dict:
+    device = db.get(Device, device_id)
+    if device is None or device.kind != "shared":
+        raise HTTPException(status_code=404, detail="Unknown shared device")
+    hours = family.hours_until_morning() if body.until_morning else body.hours
+    if body.state == "adult" and hours is None:
+        raise HTTPException(status_code=422, detail="Adult mode needs a duration")
+    family.set_shared_state(db, device, body.state, hours)
+    return _shared_view(device)
+
+
 @router.get("/people", dependencies=[Depends(require_token)])
 def list_people(db: Session = Depends(get_db)) -> list[dict]:
     """The family as the Pi knows it; Luna never keeps its own copy of who exists."""
     counts: dict[int, int] = {}
-    for device in db.scalars(select(Device)):
+    for device in db.scalars(select(Device).where(Device.kind == "personal")):
         if device.person_id is not None:
             counts[device.person_id] = counts.get(device.person_id, 0) + 1
     return [
