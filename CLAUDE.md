@@ -287,3 +287,10 @@ cd backend && uv pip install -r requirements.txt pytest ruff mypy
 (старые сервисы gradesentinel_bot/motionEye/n8n остановлены, docker-данные
 сохранены на диске). Huawei в мост переводить пока НЕ хочет. Постоянные
 SSH-ключи агента на устройства не ставить — только парольный доступ по сессии.
+
+## Luna AI Assistant (ноябрь 2026)
+
+Семья и гости общаются с Luna на ПК (`@lunazua_bot`, репозиторий LunaGPT). Pi остаётся единственным, кто пишет состояние сети.
+- API для Luna: `backend/app/routers/luna_api.py`, токен `HS_LUNA_API_TOKEN`.
+- Luna шлёт heartbeat; если он молчит 3 минуты, `bot/luna_watch.py` сообщает всем участникам токеном Luna (`HS_LUNA_TELEGRAM_BOT_TOKEN`).
+- Модели: своя первая (`HS_AI_MODEL_LOCAL`), затем Gemini и Sonnet, через шлюз LunaGPT с отдельным ключом HomeSec.
