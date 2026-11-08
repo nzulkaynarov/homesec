@@ -142,11 +142,11 @@ def format_alert(db: Session, anomaly: "Anomaly | str") -> str:
         return f"🕵️ {neutral}{tail}"
     try:
         with client.attribute(client.Caller(feature="watchdog")):
-            response = client.ask(
+            response = client.ask_with_fallback(
                 db,
+                client.model_ladder(settings.ai_model_local, settings.ai_model_fast),
                 system=ALERT_SYSTEM,
                 messages=[{"role": "user", "content": neutral}],
-                model=settings.ai_model_fast,  # рутинное оформление — дешёвая модель
                 max_tokens=1024,
             )
     except client.AiError as e:

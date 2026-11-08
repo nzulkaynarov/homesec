@@ -286,14 +286,14 @@ def generate_dynamic_quiz_question(db: Session, person_id: int) -> dict[str, Any
                 "correct: целое число от 0 до 3 (индекс правильного ответа). "
                 "topic: короткая тема вопроса (1-2 слова)."
             )
-            resp = ai_client.ask(
+            resp = ai_client.ask_with_fallback(
                 db,
+                ai_client.model_ladder(settings.ai_model_fast, settings.ai_model_support),
                 messages=[{"role": "user", "content": prompt}],
                 system=(
                     "Ты — генератор вопросов для детской познавательной викторины. "
                     "Отвечай строго валидным JSON без лишних слов."
                 ),
-                model=settings.ai_model_fast,
                 max_tokens=400,
             )
             raw = "".join(b.text for b in resp.content if b.type == "text").strip()

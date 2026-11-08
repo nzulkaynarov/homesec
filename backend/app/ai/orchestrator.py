@@ -7,12 +7,14 @@ app/ai/tools.py. Цикл tool use написан вручную, потому �
 Модель физически не может сделать больше, чем есть в реестре: firewall, NAT,
 mangle и DNS-конфиг для неё не существуют."""
 
+import json
 import logging
 from dataclasses import dataclass, field
 from datetime import datetime
 
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..models import log_event
 from . import client, tools
 
@@ -56,8 +58,6 @@ def _run_read_tool(db: Session, name: str, args: dict) -> tuple[str, bool]:
     """Возвращает (текст результата для модели, is_error)."""
     try:
         result = tools.run_tool(db, name, args, source="ai", reconcile_after=False)
-        import json
-
         return json.dumps(result, ensure_ascii=False, default=str), False
     except tools.ToolError as e:
         return str(e), True
@@ -134,27 +134,75 @@ def handle(db: Session, user_text: str, history: list[dict] | None = None) -> An
     messages.append({"role": "user", "content": f"[{now:%Y-%m-%d %H:%M}] {user_text}"})
     pending: list[PendingAction] = []
 
+    ladder = client.model_ladder(
+        settings.ai_model_local, settings.ai_model, settings.ai_model_support
+    )
+    rung = 0
+    tool_used = False
+    seen_calls: set[tuple[str, str]] = set()
+
     for _ in range(MAX_TOOL_ROUNDS):
-        response = client.ask(
-            db,
-            system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
-            messages=messages,
-            tools=tools.anthropic_schemas(),
-            max_tokens=4096,
-            thinking=True,
-            effort="medium",  # бытовые команды: скорость и цена важнее глубины
-        )
+        model = ladder[rung]
+        can_escalate = rung + 1 < len(ladder)
+        try:
+            response = client.ask(
+                db,
+                model=model,
+                system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
+                messages=messages,
+                tools=tools.anthropic_schemas(),
+                max_tokens=4096,
+                thinking=True,
+                effort="medium",  # бытовые команды: скорость и цена важнее глубины
+            )
+        except client.BudgetExceeded:
+            raise
+        except client.AiError:
+            if not can_escalate:
+                raise
+            rung += 1
+            continue
+
         if response.stop_reason != "tool_use":
+            # The local model is trusted for network commands, not for open questions.
+            if client.is_local_model(model) and not tool_used and can_escalate:
+                rung += 1
+                continue
             text = "".join(b.text for b in response.content if b.type == "text").strip()
             return Answer(text=text or "Готово.", pending=pending)
 
+        unknown_tool = any(
+            b.type == "tool_use" and b.name not in tools.REGISTRY for b in response.content
+        )
+        if unknown_tool and can_escalate:
+            rung += 1
+            continue
+
+        calls = [
+            (b.name, json.dumps(b.input or {}, sort_keys=True, ensure_ascii=False))
+            for b in response.content
+            if b.type == "tool_use"
+        ]
+        repeated = any(call in seen_calls for call in calls)
+        if repeated and can_escalate:
+            # A model repeating itself is stuck; the next rung sees the same results.
+            rung += 1
+            continue
+        seen_calls.update(calls)
+
+        tool_used = True
         messages.append({"role": "assistant", "content": response.content})
         tool_results = []
         for block in response.content:
             if block.type != "tool_use":
                 continue
             args = dict(block.input or {})
-            if tools.is_mutating(block.name):
+            if tools.is_mutating(block.name) and any(
+                p.tool == block.name and p.args == args for p in pending
+            ):
+                content = "Это действие уже ожидает подтверждения. Заверши ответ."
+                is_error = False
+            elif tools.is_mutating(block.name):
                 action = PendingAction(
                     tool=block.name,
                     args=args,
@@ -162,18 +210,24 @@ def handle(db: Session, user_text: str, history: list[dict] | None = None) -> An
                 )
                 pending.append(action)
                 log_event(db, "ai_proposed", action.description)
-                content = ("Действие отправлено пользователю на подтверждение "
-                           "кнопкой. Не выполнено. Сообщи об этом и заверши ответ.")
+                content = (
+                    "Действие отправлено пользователю на подтверждение "
+                    "кнопкой. Не выполнено. Сообщи об этом и заверши ответ."
+                )
                 is_error = False
             else:
                 content, is_error = _run_read_tool(db, block.name, args)
-            tool_results.append({
-                "type": "tool_result",
-                "tool_use_id": block.id,
-                "content": content,
-                "is_error": is_error,
-            })
+            tool_results.append(
+                {
+                    "type": "tool_result",
+                    "tool_use_id": block.id,
+                    "content": content,
+                    "is_error": is_error,
+                }
+            )
         messages.append({"role": "user", "content": tool_results})
+        if pending and client.is_local_model(model):
+            return Answer(text="Подготовил действие, подтвердите его кнопкой.", pending=pending)
 
     return Answer(
         text="Я запутался в этом запросе (слишком много шагов) — попробуйте проще.",

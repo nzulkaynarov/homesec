@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
+from ..config import settings
 from ..models import Device, EventLog, Person, QuotaUsage
 from ..services import adguard
 from ..services.quota import QUOTA_CATEGORY_LABELS
@@ -132,8 +133,9 @@ def daily_digest(db: Session) -> str:
         return _fallback_digest(data)
     try:
         with client.attribute(client.Caller(feature="digest")):
-            response = client.ask(
+            response = client.ask_with_fallback(
                 db,
+                client.model_ladder(settings.ai_model, settings.ai_model_support),
                 system=DIGEST_SYSTEM,
                 messages=[{
                     "role": "user",

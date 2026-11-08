@@ -28,6 +28,7 @@ LEDGER_KEY_PREFIX = (
 
 # USD per 1M tokens as (input, output). Keys match settings model names by substring.
 MODEL_PRICES = {"opus": (5.0, 25.0), "sonnet": (3.0, 15.0), "haiku": (0.30, 2.50)}
+LOCAL_MODEL_TIMEOUT_SECONDS = 60.0
 CACHE_READ_MULTIPLIER = 0.1
 CACHE_WRITE_MULTIPLIER = 1.25
 
@@ -164,6 +165,59 @@ def budget_left(db: Session) -> int | None:
     return settings.ai_daily_token_budget - usage["input"] - usage["output"]
 
 
+def is_local_model(model: str) -> bool:
+    return bool(settings.ai_model_local) and model == settings.ai_model_local
+
+
+def _is_claude_reasoning_model(model: str) -> bool:
+    return "opus" in model or "sonnet" in model
+
+
+def build_request(
+    model: str,
+    messages: list[dict],
+    system: str | list[dict],
+    tools: list[dict] | None,
+    max_tokens: int,
+    thinking: bool,
+    effort: str | None,
+) -> dict:
+    """Build request arguments, keeping Claude-only options away from other models."""
+    claude = _is_claude_reasoning_model(model)
+    kwargs: dict = {"model": model, "max_tokens": max_tokens, "messages": messages}
+    if system:
+        if isinstance(system, list) and not claude:
+            kwargs["system"] = "\n\n".join(block["text"] for block in system)
+        else:
+            kwargs["system"] = system
+    if tools:
+        kwargs["tools"] = tools
+    if thinking and claude:
+        kwargs["thinking"] = {"type": "adaptive"}
+    if effort and claude:
+        kwargs["output_config"] = {"effort": effort}
+    return kwargs
+
+
+def model_ladder(*models: str) -> list[str]:
+    """Models in the order to try, without blanks or repeats."""
+    return list(dict.fromkeys(model for model in models if model))
+
+
+def ask_with_fallback(db: Session, models: list[str], **kwargs):
+    """Try each model in order; a spending limit stops the ladder, other errors climb it."""
+    last_error: AiError | None = None
+    for model in models:
+        try:
+            return ask(db, model=model, **kwargs)
+        except BudgetExceeded:
+            raise
+        except AiError as e:
+            log.warning("model %s failed: %s", model, e)
+            last_error = e
+    raise last_error or AiError("Не настроена ни одна модель")
+
+
 def ask(
     db: Session,
     messages: list[dict],
@@ -189,24 +243,18 @@ def ask(
 
     import anthropic  # импорт здесь: без ключа зависимость не нужна на горячем пути
 
-    kwargs: dict = {
-        "model": model or settings.ai_model,
-        "max_tokens": max_tokens,
-        "messages": messages,
-    }
-    if system:
-        kwargs["system"] = system
-    if tools:
-        kwargs["tools"] = tools
-    if thinking:
-        kwargs["thinking"] = {"type": "adaptive"}
-    if effort:
-        kwargs["output_config"] = {"effort": effort}
+    kwargs = build_request(
+        model or settings.ai_model, messages, system, tools, max_tokens, thinking, effort
+    )
 
     client_kwargs: dict = {
         "api_key": settings.anthropic_api_key,
         "timeout": 120.0,
     }
+    if is_local_model(kwargs["model"]):
+        # A busy GPU must not hold up the next rung of the ladder.
+        client_kwargs["timeout"] = LOCAL_MODEL_TIMEOUT_SECONDS
+        client_kwargs["max_retries"] = 0
     if settings.ai_base_url:
         client_kwargs["base_url"] = settings.ai_base_url
 

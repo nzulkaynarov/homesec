@@ -376,8 +376,9 @@ def _tutor_ask_sync(chat_id: int, user_text: str) -> str:
     s = dbmod.session()
     try:
         messages = list(CHAT_HISTORY[chat_id]) + [{"role": "user", "content": user_text}]
-        resp = ai_client.ask(
+        resp = ai_client.ask_with_fallback(
             s,
+            ai_client.model_ladder(settings.ai_model_tutor, settings.ai_model_support),
             messages=messages,
             system=(
                 "Ты — умный, добрый и вдохновляющий семейный ИИ-помощник LunaGPT для детей. "
@@ -400,7 +401,6 @@ def _tutor_ask_sync(chat_id: int, user_text: str) -> str:
                 "поддержи и посоветуй сразу поговорить с родителями или взрослым. "
                 "У тебя НЕТ инструментов управления роутером и блокировками домашней сети."
             ),
-            model=settings.ai_model_tutor,
             max_tokens=1500,
         )
         content_text = ""

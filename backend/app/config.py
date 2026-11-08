@@ -35,9 +35,11 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     ai_base_url: str = ""  # шлюз LunaGPT/LiteLLM, напр. "http://192.168.88.241:4000"
     stt_url: str = ""  # эндпоинт распознавания речи, напр. "http://192.168.88.241:8010/v1/audio/transcriptions"
-    ai_model: str = "claude-opus-4-8"  # рассуждения: NL-команды, дайджест
+    ai_model: str = "claude-haiku-4-5"  # рассуждения: NL-команды, дайджест
     ai_model_fast: str = "claude-haiku-4-5"  # рутина: оформление алертов
-    ai_model_tutor: str = "claude-sonnet-4-6"  # kid tutor
+    ai_model_tutor: str = "claude-haiku-4-5"  # kid tutor
+    ai_model_local: str = ""  # own model tried first; empty disables the local rung
+    ai_model_support: str = "claude-sonnet-4-6"  # paid support when cheaper rungs fail
     ai_kid_daily_usd: float = 0.30  # per-child daily AI spend limit; 0 disables it
     ai_max_voice_seconds: int = 120
     ai_daily_token_budget: int = 300_000  # суммарно (вход+выход) в день; 0 = без лимита
