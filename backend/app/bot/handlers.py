@@ -384,11 +384,7 @@ def _tutor_ask_sync(chat_id: int, user_text: str) -> str:
                 "Ты — умный, добрый и вдохновляющий семейный ИИ-помощник LunaGPT для детей. "
                 "Ты общаешься с ребёнком дружелюбно, с поддержкой и юмором на русском языке.\n\n"
                 "ТВОИ ПРАВИЛА:\n"
-                "1. ШКОЛА И УРОКИ (Метод Сократа): Если ребёнок просит решить за него задачу, "
-                "уравнение или написать сочинение — НЕ давай готовый ответ! "
-                "Объясни суть темы простыми словами на жизненных примерах (игры, пицца), "
-                "покажи первый шаг и задай наводящий вопрос, чтобы ребёнок додумался сам. "
-                "Хвали за каждую верную мысль.\n"
+                "1. ШКОЛА И УРОКИ: Помогай полноценно и объясняй простыми словами.\n"
                 "2. ТВОРЧЕСТВО, СКАЗКИ И КВЕСТЫ: Если ребёнок просит сочинить сказку, "
                 "историю, сыграть в текстовую игру или придумать героя — "
                 "включай творчество на полную мощность! Пиши увлекательно, живо и ярко.\n"
@@ -437,6 +433,14 @@ async def _notify_owner_about_access_request(message: Message) -> None:
             log.exception("не удалось отправить запрос доступа владельцу %s", owner_id)
 
 
+def _can_take_quiz_sync(person_id: int) -> bool:
+    s = dbmod.session()
+    try:
+        return family_svc.can_take_quiz_today(s, person_id)
+    finally:
+        s.close()
+
+
 async def _forward_time_request_to_parents(
     message: Message, person_id: int, person_name: str, reason: str
 ) -> None:
@@ -456,10 +460,10 @@ async def _forward_time_request_to_parents(
             )
         except Exception:
             log.exception("не удалось отправить запрос родителю %s", parent_id)
-    await message.answer(
-        "✅ Запрос отправлен родителям! Я пришлю ответ, как только они нажмут кнопку.",
-        reply_markup=keyboard_for_role("kid"),
-    )
+    text = "✅ Запрос отправлен родителям! Я пришлю ответ, как только они нажмут кнопку."
+    if await asyncio.to_thread(_can_take_quiz_sync, person_id):
+        text += "\n\nПока ждёшь, можно заработать +15 минут в викторине: /quiz"
+    await message.answer(text, reply_markup=keyboard_for_role("kid"))
 
 
 def _log_kid_safety_sync(name: str) -> None:

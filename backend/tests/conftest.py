@@ -10,6 +10,7 @@ _db = pathlib.Path(tempfile.gettempdir()) / "homesec_pytest.db"
 if _db.exists():
     _db.unlink()
 
+os.environ["HS_AI_MODEL_LOCAL"] = ""
 os.environ["HS_SCHEDULER_ENABLED"] = "false"
 os.environ["HS_DATABASE_PATH"] = str(_db)
 os.environ["HS_ADMIN_USERNAME"] = "admin"

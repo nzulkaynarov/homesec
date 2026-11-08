@@ -50,3 +50,14 @@ def test_adult_photo_is_not_forwarded(monkeypatch):
 def test_kid_may_send_photo_and_guest_may_not():
     assert check_message("kid", None).allowed
     assert not check_message("guest", None).allowed
+
+
+@pytest.mark.parametrize(("available", "offered"), [(True, True), (False, False)])
+def test_quiz_is_offered_only_with_a_time_request(monkeypatch, available, offered):
+    monkeypatch.setattr(settings, "telegram_chat_ids", "111")
+    monkeypatch.setattr(handlers, "_can_take_quiz_sync", lambda person_id: available)
+    message = MagicMock()
+    message.answer = AsyncMock()
+    message.bot.send_message = AsyncMock()
+    asyncio.run(handlers._forward_time_request_to_parents(message, 3, "Миша", "хочу доиграть"))
+    assert ("/quiz" in message.answer.await_args.args[0]) is offered
