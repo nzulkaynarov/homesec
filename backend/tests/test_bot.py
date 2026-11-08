@@ -638,6 +638,7 @@ def test_bonus_direct_approval(db):
     msg = MagicMock(spec=Message)
     msg.text = "Запрос дополнительного времени: Коля"
     msg.edit_text = AsyncMock()
+    msg.photo = None
     cb.message = msg
     cb.bot = MagicMock()
     cb.bot.send_message = AsyncMock()

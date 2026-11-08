@@ -116,6 +116,7 @@ def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
                     KeyboardButton(text="🚀 Чем заняться?"),
                 ],
                 [
+                    KeyboardButton(text="✅ Сделал дело"),
                     KeyboardButton(text="❓ Помощь"),
                 ],
             ],
@@ -791,6 +792,46 @@ async def cmd_ask_time(message: Message, command: CommandObject | None = None) -
     await _forward_time_request_to_parents(message, person.id, person.name, reason)
 
 
+@router.message(F.text == "✅ Сделал дело")
+async def btn_task_done(message: Message) -> None:
+    await message.answer(
+        "Молодец! 📸 Пришли фото того, что сделал, и подпиши его: "
+        "например, «убрал комнату». Родители посмотрят и начислят минуты."
+    )
+
+
+@router.message(F.photo)
+async def handle_task_photo(message: Message) -> None:
+    """A child's proof of a finished task goes to parents, who award minutes with one tap."""
+    user_id = message.from_user.id if message.from_user else 0
+    role, person = await asyncio.to_thread(_get_user_role_sync, user_id)
+    if role != "kid" or person is None or message.bot is None or not message.photo:
+        await message.answer("Фото принимаются только как отчёт ребёнка о сделанном деле.")
+        return
+    if not _allow_ai_request(user_id):
+        await message.answer("Слишком много сообщений подряд. Подождите минуту 🙂")
+        return
+    task = (message.caption or "без описания")[:500]
+    caption = f"✅ {person.name} сделал(а) дело: {task}\n\nСколько минут начислить?"
+    delivered = False
+    for parent_id in settings.telegram_allowed_ids:
+        try:
+            await message.bot.send_photo(
+                parent_id,
+                photo=message.photo[-1].file_id,
+                caption=caption,
+                reply_markup=bonus_request_direct_keyboard(person.id),
+            )
+            delivered = True
+        except Exception:
+            log.exception("не удалось отправить отчёт родителю %s", parent_id)
+    await message.answer(
+        "Отправил родителям! Сообщу, когда они решат 🙌"
+        if delivered
+        else "Не получилось отправить родителям, попробуй ещё раз позже."
+    )
+
+
 @router.message(F.text == "🎓 Помощь с уроками")
 async def btn_homework_help(message: Message) -> None:
     await message.answer(
@@ -1403,7 +1444,12 @@ async def cb_bonus_direct(cb: CallbackQuery) -> None:
     )
     await cb.answer()
     if isinstance(cb.message, Message):
-        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {msg}", reply_markup=None)
+        if cb.message.photo:
+            await cb.message.edit_caption(
+                caption=f"{cb.message.caption}\n\n➡ {msg}", reply_markup=None
+            )
+        else:
+            await cb.message.edit_text(f"{cb.message.text}\n\n➡ {msg}", reply_markup=None)
 
     s = dbmod.session()
     try:

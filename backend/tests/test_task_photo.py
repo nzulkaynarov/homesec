@@ -1,0 +1,52 @@
+"""A child's photo of a finished task reaches parents and the decision reaches the child."""
+
+import asyncio
+from unittest.mock import AsyncMock, MagicMock
+
+import pytest
+
+from app.bot import handlers
+from app.bot.access import check_message
+from app.config import settings
+
+
+def _photo_message(user_id=7):
+    message = MagicMock()
+    message.from_user.id = user_id
+    message.photo = [MagicMock(file_id="small"), MagicMock(file_id="large")]
+    message.caption = "убрал комнату"
+    message.answer = AsyncMock()
+    message.bot.send_photo = AsyncMock()
+    return message
+
+
+@pytest.fixture
+def kid(monkeypatch):
+    person = MagicMock(id=3)
+    person.name = "Миша"
+    monkeypatch.setattr(handlers, "_get_user_role_sync", lambda user_id: ("kid", person))
+    monkeypatch.setattr(settings, "telegram_chat_ids", "111")
+    handlers._ai_request_times.clear()
+    return person
+
+
+def test_photo_goes_to_parents_with_award_buttons(kid):
+    message = _photo_message()
+    asyncio.run(handlers.handle_task_photo(message))
+    kwargs = message.bot.send_photo.await_args.kwargs
+    assert message.bot.send_photo.await_args.args == (111,)
+    assert kwargs["photo"] == "large"
+    assert "Миша" in kwargs["caption"] and "убрал комнату" in kwargs["caption"]
+    assert kwargs["reply_markup"].inline_keyboard[0][0].callback_data == "bdir:3:15"
+
+
+def test_adult_photo_is_not_forwarded(monkeypatch):
+    monkeypatch.setattr(handlers, "_get_user_role_sync", lambda user_id: ("owner", None))
+    message = _photo_message()
+    asyncio.run(handlers.handle_task_photo(message))
+    message.bot.send_photo.assert_not_awaited()
+
+
+def test_kid_may_send_photo_and_guest_may_not():
+    assert check_message("kid", None).allowed
+    assert not check_message("guest", None).allowed
