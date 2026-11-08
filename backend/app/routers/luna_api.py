@@ -22,6 +22,7 @@ router = APIRouter(prefix="/api/luna/v1", tags=["luna"])
 
 HEARTBEAT_KEY = "luna_last_heartbeat"
 MEMBERS_KEY = "luna_member_chat_ids"
+BOT_ROLE_BY_PERSON_ROLE = {"adult": "admin", "kid": "kid", "guest": "guest"}
 
 
 def require_token(authorization: str = Header(default="")) -> None:
@@ -38,6 +39,10 @@ class Heartbeat(BaseModel):
 
 class TimeRequest(BaseModel):
     reason: str = Field(default="", max_length=500)
+
+
+class TelegramLink(BaseModel):
+    telegram_id: int
 
 
 class QuizResult(BaseModel):
@@ -69,6 +74,43 @@ def heartbeat(body: Heartbeat, db: Session = Depends(get_db)) -> dict[str, str]:
     kv_set(db, HEARTBEAT_KEY, datetime.now().isoformat())
     kv_set(db, MEMBERS_KEY, json.dumps(body.member_chat_ids))
     return {"status": "ok"}
+
+
+@router.get("/people", dependencies=[Depends(require_token)])
+def list_people(db: Session = Depends(get_db)) -> list[dict]:
+    """The family as the Pi knows it; Luna never keeps its own copy of who exists."""
+    counts: dict[int, int] = {}
+    for device in db.scalars(select(Device).where(Device.person_id.is_not(None))):
+        counts[device.person_id] = counts.get(device.person_id, 0) + 1
+    return [
+        {
+            "id": p.id,
+            "name": p.name,
+            "role": p.role,
+            "devices": counts.get(p.id, 0),
+            "telegram_id": p.telegram_id,
+        }
+        for p in db.scalars(select(Person).order_by(Person.name))
+    ]
+
+
+@router.put("/people/{person_id}/telegram", dependencies=[Depends(require_token)])
+def link_telegram(
+    person_id: int, body: TelegramLink, db: Session = Depends(get_db)
+) -> dict[str, str]:
+    """Attach a Telegram account chosen by the owner through a single-use Luna link."""
+    person = db.get(Person, person_id)
+    if person is None:
+        raise HTTPException(status_code=404, detail="Unknown person")
+    other = db.scalar(
+        select(Person).where(Person.telegram_id == body.telegram_id, Person.id != person_id)
+    )
+    if other is not None:
+        raise HTTPException(status_code=409, detail="Telegram account is linked to another person")
+    person.telegram_id = body.telegram_id
+    person.bot_role = BOT_ROLE_BY_PERSON_ROLE.get(person.role, "guest")
+    db.commit()
+    return {"status": "linked"}
 
 
 @router.get("/people/{name}/quota", dependencies=[Depends(require_token)])

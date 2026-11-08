@@ -132,3 +132,45 @@ def test_watch_reports_outage_once_and_recovery(db):
     kv_set(db, luna_watch.HEARTBEAT_KEY, now.isoformat())
     assert luna_watch.evaluate(db, now) == "up"
     assert luna_watch.evaluate(db, now) is None
+
+
+def test_people_lists_family_with_device_counts(db, client, kid):
+    db.add(Person(name="Мама", role="adult"))
+    db.commit()
+    people = {p["name"]: p for p in client.get("/api/luna/v1/people", headers=AUTH).json()}
+    assert people["Миша"]["devices"] == 1 and people["Миша"]["role"] == "kid"
+    assert people["Мама"]["devices"] == 0 and people["Мама"]["telegram_id"] is None
+
+
+def test_people_requires_token(db, client):
+    assert client.get("/api/luna/v1/people").status_code == 401
+
+
+@pytest.mark.parametrize(
+    ("role", "bot_role"), [("kid", "kid"), ("adult", "admin"), ("guest", "guest")]
+)
+def test_link_sets_telegram_and_matching_bot_role(db, client, role, bot_role):
+    person = Person(name="Человек", role=role)
+    db.add(person)
+    db.commit()
+    url = f"/api/luna/v1/people/{person.id}/telegram"
+    assert client.put(url, json={"telegram_id": 555}, headers=AUTH).status_code == 200
+    db.expire_all()
+    assert person.telegram_id == 555 and person.bot_role == bot_role
+
+
+def test_one_telegram_account_cannot_be_two_people(db, client):
+    first, second = Person(name="А", role="kid", telegram_id=555), Person(name="Б", role="kid")
+    db.add_all([first, second])
+    db.commit()
+    url = f"/api/luna/v1/people/{second.id}/telegram"
+    assert client.put(url, json={"telegram_id": 555}, headers=AUTH).status_code == 409
+
+
+def test_link_unknown_person(db, client):
+    assert (
+        client.put(
+            "/api/luna/v1/people/999999/telegram", json={"telegram_id": 1}, headers=AUTH
+        ).status_code
+        == 404
+    )
