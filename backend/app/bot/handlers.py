@@ -30,6 +30,7 @@ from ..config import settings
 from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get
 from ..services import family as family_svc
 from . import texts
+from .access import AccessMiddleware
 
 log = logging.getLogger("homesec.bot")
 router = Router()
@@ -463,6 +464,11 @@ async def _handle_kid_tutor(message: Message, user_text: str) -> None:
     CHAT_HISTORY[message.chat.id].append({"role": "user", "content": user_text})
     CHAT_HISTORY[message.chat.id].append({"role": "assistant", "content": reply})
     await message.answer(reply)
+
+
+_access = AccessMiddleware(_notify_owner_about_access_request, texts.START_UNAUTHORIZED)
+router.message.outer_middleware(_access)
+router.callback_query.outer_middleware(_access)
 
 
 # ---------- выбор устройства кнопками ----------
