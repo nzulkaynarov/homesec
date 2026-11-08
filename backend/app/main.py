@@ -12,7 +12,7 @@ from .config import settings
 from .db import Base, engine, session
 from .migrations import ensure_schema
 from .models import GROUP_ADDRESS_LISTS, GroupPolicy, Quota
-from .routers import auth_routes, dashboard, devices, people, portal, rules
+from .routers import auth_routes, dashboard, devices, luna_api, people, portal, rules
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
@@ -68,6 +68,7 @@ app.mount("/static", StaticFiles(directory=str(Path(__file__).parent / "static")
 
 app.include_router(auth_routes.router)
 app.include_router(portal.router)
+app.include_router(luna_api.router)
 app.include_router(dashboard.router)
 app.include_router(devices.router)
 app.include_router(people.router)

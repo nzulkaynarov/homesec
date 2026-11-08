@@ -363,6 +363,8 @@ def mark_quiz_attempted(db: Session, person_id: int, now: datetime | None = None
     kv_set(db, f"quiz_attempt_{date}_{person_id}", "1")
 
 
+QUIZ_BONUS_MINUTES = 15
+
 SAFETY_PATTERN = re.compile(
     r"суицид|покончить с собой|убить себя|не хочу жить|порезать себя|"
     r"меня бьют|меня бьёт|меня бьет|меня трогает|домогает|меня травят|буллят|шантажиру",

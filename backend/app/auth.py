@@ -40,7 +40,7 @@ def is_authenticated(request: Request) -> bool:
 
 def _is_public(path: str) -> bool:
     return path in ("/login", "/blocked", "/register", "/me", "/me/ask") \
-        or path.startswith("/static/")
+        or path.startswith("/static/") or path.startswith("/api/luna/")  # own bearer token
 
 
 def _is_intercepted(request: Request) -> bool:

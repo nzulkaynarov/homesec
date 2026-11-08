@@ -51,6 +51,10 @@ class Settings(BaseSettings):
                 self.stt_url = "http://192.168.88.241:8010/v1/audio/transcriptions"
         return self
 
+    # Luna AI Assistant on the GPU host: API token and its bot token for outage notices
+    luna_api_token: str = ""
+    luna_telegram_bot_token: str = ""
+
     # Telegram-бот (отдельный процесс homesec-bot); пустой токен = бот выключен
     telegram_bot_token: str = ""
     telegram_chat_ids: str = ""  # csv chat_id: кому разрешены команды и куда слать алерты
