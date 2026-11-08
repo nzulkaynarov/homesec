@@ -1457,7 +1457,12 @@ async def handle_voice(message: Message) -> None:
                 "file": ("voice.oga", voice_bytes, message.voice.mime_type or "audio/ogg")
             }
             data = {"language": "ru"}
-            resp = await client.post(settings.stt_url, files=files, data=data)
+            headers = (
+                {"Authorization": f"Bearer {settings.anthropic_api_key}"}
+                if settings.anthropic_api_key
+                else {}
+            )
+            resp = await client.post(settings.stt_url, files=files, data=data, headers=headers)
             resp.raise_for_status()
             transcribed_text = resp.json().get("text", "").strip()
     except Exception as exc:

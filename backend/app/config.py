@@ -44,8 +44,6 @@ class Settings(BaseSettings):
         if self.ai_base_url and "192.168.88.241" in self.ai_base_url:
             if not self.stt_url:
                 self.stt_url = "http://192.168.88.241:8010/v1/audio/transcriptions"
-            if not self.anthropic_api_key:
-                self.anthropic_api_key = "sk-luna-master-key-2026"
         return self
 
     # Telegram-бот (отдельный процесс homesec-bot); пустой токен = бот выключен
