@@ -4,6 +4,7 @@
 
 import logging
 import random
+import re
 from datetime import datetime
 from typing import Any
 
@@ -292,6 +293,7 @@ def generate_dynamic_quiz_question(db: Session, person_id: int) -> dict[str, Any
                     "Ты — генератор вопросов для детской познавательной викторины. "
                     "Отвечай строго валидным JSON без лишних слов."
                 ),
+                model=settings.ai_model_fast,
                 max_tokens=400,
             )
             raw = "".join(b.text for b in resp.content if b.type == "text").strip()
@@ -352,7 +354,30 @@ def can_take_quiz_today(db: Session, person_id: int, now: datetime | None = None
     now = now or datetime.now()
     date = now.strftime("%Y-%m-%d")
     key = f"quiz_bonus_{date}_{person_id}"
-    return kv_get(db, key, "") == ""
+    return kv_get(db, key, "") == "" and kv_get(db, f"quiz_attempt_{date}_{person_id}", "") == ""
+
+
+def mark_quiz_attempted(db: Session, person_id: int, now: datetime | None = None) -> None:
+    """Spends today's single attempt, so a wrong answer cannot be retried."""
+    date = (now or datetime.now()).strftime("%Y-%m-%d")
+    kv_set(db, f"quiz_attempt_{date}_{person_id}", "1")
+
+
+SAFETY_PATTERN = re.compile(
+    r"суицид|покончить с собой|убить себя|не хочу жить|порезать себя|"
+    r"меня бьют|меня бьёт|меня бьет|меня трогает|домогает|меня травят|буллят|шантажиру",
+    re.IGNORECASE,
+)
+SAFETY_REPLY = (
+    "Спасибо, что написал мне об этом. Это важно, и ты не один 💛\n"
+    "Пожалуйста, расскажи прямо сейчас родителям или другому взрослому, которому доверяешь. "
+    "Если тебе угрожает опасность, позвони взрослым или в экстренную службу."
+)
+
+
+def needs_adult_attention(text: str) -> bool:
+    """Keyword check for messages a parent should see; false positives are acceptable."""
+    return bool(SAFETY_PATTERN.search(text))
 
 
 def award_quiz_bonus(

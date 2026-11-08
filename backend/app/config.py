@@ -37,6 +37,9 @@ class Settings(BaseSettings):
     stt_url: str = ""  # эндпоинт распознавания речи, напр. "http://192.168.88.241:8010/v1/audio/transcriptions"
     ai_model: str = "claude-opus-4-8"  # рассуждения: NL-команды, дайджест
     ai_model_fast: str = "claude-haiku-4-5"  # рутина: оформление алертов
+    ai_model_tutor: str = "claude-sonnet-4-6"  # kid tutor
+    ai_kid_daily_usd: float = 0.30  # per-child daily AI spend limit; 0 disables it
+    ai_max_voice_seconds: int = 120
     ai_daily_token_budget: int = 300_000  # суммарно (вход+выход) в день; 0 = без лимита
 
     @model_validator(mode="after")

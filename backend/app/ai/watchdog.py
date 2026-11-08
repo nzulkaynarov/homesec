@@ -141,13 +141,14 @@ def format_alert(db: Session, anomaly: "Anomaly | str") -> str:
     if not client.is_configured():
         return f"🕵️ {neutral}{tail}"
     try:
-        response = client.ask(
-            db,
-            system=ALERT_SYSTEM,
-            messages=[{"role": "user", "content": neutral}],
-            model=settings.ai_model_fast,  # рутинное оформление — дешёвая модель
-            max_tokens=1024,
-        )
+        with client.attribute(client.Caller(feature="watchdog")):
+            response = client.ask(
+                db,
+                system=ALERT_SYSTEM,
+                messages=[{"role": "user", "content": neutral}],
+                model=settings.ai_model_fast,  # рутинное оформление — дешёвая модель
+                max_tokens=1024,
+            )
     except client.AiError as e:
         log.warning("алерт без LLM: %s", e)
         return f"🕵️ {neutral}{tail}"

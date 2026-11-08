@@ -29,9 +29,12 @@ DIGEST_HOUR = 21  # ежедневный дайджест в 21:00 локаль�
 
 
 async def _broadcast(bot: Bot, chat_ids: set[int], text: str, keyboard=None) -> None:
+    parts = texts.split_message(text)
     for chat_id in chat_ids:
         try:
-            await bot.send_message(chat_id, text, reply_markup=keyboard)
+            for part in parts[:-1]:
+                await bot.send_message(chat_id, part)
+            await bot.send_message(chat_id, parts[-1], reply_markup=keyboard)
         except Exception:
             log.exception("не удалось отправить сообщение в чат %s", chat_id)
 

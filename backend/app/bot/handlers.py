@@ -6,6 +6,7 @@
 import asyncio
 import json
 import logging
+import time
 from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from typing import Any
@@ -27,7 +28,7 @@ from .. import db as dbmod
 from ..ai import client as ai_client
 from ..ai import orchestrator, tools
 from ..config import settings
-from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get
+from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get, log_event
 from ..services import family as family_svc
 from . import texts
 from .access import AccessMiddleware
@@ -278,7 +279,11 @@ def _quiz_prepare_sync(user_id: int) -> tuple[bool, str, dict | None, int | None
                 None,
                 None,
             )
-        q = family_svc.generate_dynamic_quiz_question(s, person.id)
+        active = family_svc.get_active_quiz(s, person.id)
+        if active is not None:
+            return True, "", active, person.id
+        with ai_client.attribute(_caller(person, user_id, "quiz", role)):
+            q = family_svc.generate_dynamic_quiz_question(s, person.id)
         family_svc.store_active_quiz(s, person.id, q)
         return True, "", q, person.id
     finally:
@@ -288,14 +293,14 @@ def _quiz_prepare_sync(user_id: int) -> tuple[bool, str, dict | None, int | None
 def _quiz_answer_sync(user_id: int, person_id: int, chosen_opt: int) -> dict[str, Any]:
     s = dbmod.session()
     try:
+        _, person = family_svc.get_user_role(s, user_id)
+        if person is None or person.id != person_id:
+            return {"status": "error", "message": "Только автор вопроса может отвечать."}
+
         active = family_svc.get_active_quiz(s, person_id)
         if active is None:
             return {"status": "expired", "message": "Вопрос устарел или уже отвечен."}
         family_svc.clear_active_quiz(s, person_id)
-
-        _, person = family_svc.get_user_role(s, user_id)
-        if person is None or person.id != person_id:
-            return {"status": "error", "message": "Только автор вопроса может отвечать."}
 
         correct_idx = active.get("correct", 0)
         options = active.get("options", [])
@@ -304,11 +309,12 @@ def _quiz_answer_sync(user_id: int, person_id: int, chosen_opt: int) -> dict[str
         q_text = active.get("question", "")
 
         if chosen_opt != correct_idx:
+            family_svc.mark_quiz_attempted(s, person.id)
             return {
                 "status": "wrong",
                 "message": (
                     f"❌ Не совсем так!\n"
-                    f"Правильный ответ: *{correct_text}*.\n\n"
+                    f"Правильный ответ: *{texts.escape_markdown(str(correct_text))}*.\n\n"
                     f"Не расстраивайся, завтра будет новый вопрос и шанс заработать минуты! 🧠"
                 ),
             }
@@ -389,8 +395,11 @@ def _tutor_ask_sync(chat_id: int, user_text: str) -> str:
                 "4. НАУКА И МИР: Отвечай на вопросы («почему небо синее», «как летит ракета») "
                 "наглядно и интересно, развивая любознательность.\n"
                 "5. БЕЗОПАСНОСТЬ: Дружелюбный детский тон, без взрослого контента и негатива. "
+                "Не давай опасных инструкций. Если ребёнку плохо, страшно или его обижают, "
+                "поддержи и посоветуй сразу поговорить с родителями или взрослым. "
                 "У тебя НЕТ инструментов управления роутером и блокировками домашней сети."
             ),
+            model=settings.ai_model_tutor,
             max_tokens=1500,
         )
         content_text = ""
@@ -411,7 +420,8 @@ async def _notify_owner_about_access_request(message: Message) -> None:
     uname = f"@{user.username}" if user.username else user.full_name
     text = (
         f"🔔 *Новый запрос доступа в семейный бот!*\n\n"
-        f"Пользователь: {user.full_name} ({uname}, ID: `{user.id}`)\n\n"
+        f"Пользователь: {texts.escape_markdown(user.full_name)} "
+        f"({texts.escape_markdown(uname)}, ID: `{user.id}`)\n\n"
         f"Выберите роль для нового участника семьи:"
     )
     for owner_id in settings.telegram_allowed_ids:
@@ -433,8 +443,8 @@ async def _forward_time_request_to_parents(
         return
     text = (
         f"🔔 *Запрос дополнительного времени!*\n\n"
-        f"🎒 Ребёнок: *{person_name}*\n"
-        f"💬 Причина: _{reason}_\n\n"
+        f"🎒 Ребёнок: *{texts.escape_markdown(person_name)}*\n"
+        f"💬 Причина: {texts.escape_markdown(reason)}\n\n"
         f"Сколько добавить?"
     )
     kb = bonus_request_direct_keyboard(person_id)
@@ -451,24 +461,80 @@ async def _forward_time_request_to_parents(
     )
 
 
+def _log_kid_safety_sync(name: str) -> None:
+    s = dbmod.session()
+    try:
+        log_event(s, "kid_safety", f"{name}: обращение требует внимания родителей")
+    finally:
+        s.close()
+
+
+async def _alert_parents_about_kid(message: Message, person: Person | None, text: str) -> None:
+    name = person.name if person is not None else f"id {message.chat.id}"
+    await asyncio.to_thread(_log_kid_safety_sync, name)
+    if not message.bot:
+        return
+    for parent_id in settings.telegram_allowed_ids:
+        try:
+            await message.bot.send_message(
+                parent_id, f"🚨 {name} написал(а) ассистенту, стоит поговорить:\n\n{text[:1000]}"
+            )
+        except Exception:
+            log.exception("не удалось предупредить родителя %s", parent_id)
+
+
 async def _handle_kid_tutor(message: Message, user_text: str) -> None:
     if not ai_client.is_configured():
         await message.answer("ИИ-помощник сейчас не подключён. Спроси у родителей!")
         return
+    role, person = await asyncio.to_thread(_get_user_role_sync, message.chat.id)
+    if family_svc.needs_adult_attention(user_text):
+        await _alert_parents_about_kid(message, person, user_text)
+        await message.answer(family_svc.SAFETY_REPLY)
+        return
     try:
-        reply = await asyncio.to_thread(_tutor_ask_sync, message.chat.id, user_text)
+        with ai_client.attribute(_caller(person, message.chat.id, "tutor", role)):
+            reply = await asyncio.to_thread(_tutor_ask_sync, message.chat.id, user_text)
+    except ai_client.AiError as e:
+        await message.answer(str(e))
+        return
     except Exception:
         log.exception("ошибка репетитора")
         await message.answer("Что-то пошло не так, попробуй задать вопрос ещё раз!")
         return
     CHAT_HISTORY[message.chat.id].append({"role": "user", "content": user_text})
     CHAT_HISTORY[message.chat.id].append({"role": "assistant", "content": reply})
-    await message.answer(reply)
+    await send_long(message, reply)
 
 
 _access = AccessMiddleware(_notify_owner_about_access_request, texts.START_UNAUTHORIZED)
 router.message.outer_middleware(_access)
 router.callback_query.outer_middleware(_access)
+
+
+AI_RATE_LIMIT = 8  # requests per window for one person
+AI_RATE_WINDOW_SECONDS = 60
+_ai_request_times: dict[int, deque] = defaultdict(lambda: deque(maxlen=AI_RATE_LIMIT))
+
+
+def _allow_ai_request(user_id: int) -> bool:
+    """Sliding-window limit that keeps one person from flooding paid model calls."""
+    now = time.monotonic()
+    times = _ai_request_times[user_id]
+    if len(times) == AI_RATE_LIMIT and now - times[0] < AI_RATE_WINDOW_SECONDS:
+        return False
+    times.append(now)
+    return True
+
+
+def _caller(person: Person | None, telegram_id: int, feature: str, role: str) -> ai_client.Caller:
+    user = f"person:{person.id}" if person is not None else f"tg:{telegram_id}"
+    return ai_client.Caller(user=user, session=f"tg:{telegram_id}", feature=feature, role=role)
+
+
+async def send_long(message: Message, text: str) -> None:
+    for part in texts.split_message(text):
+        await message.answer(part)
 
 
 # ---------- выбор устройства кнопками ----------
@@ -648,7 +714,7 @@ async def cmd_quiz(message: Message) -> None:
     topic = q.get("topic", "Эрудиция")
     text = (
         f"🧠 *Вопрос викторины на +15 минут ({topic}):*\n\n"
-        f"{q['question']}\n\n"
+        f"{texts.escape_markdown(q['question'])}\n\n"
         f"Выберите правильный ответ:"
     )
     kb = quiz_keyboard(person_id, q["options"])
@@ -772,7 +838,7 @@ async def cmd_digest(message: Message) -> None:
     if role == "kid":
         await message.answer("Эта функция доступна только родителям 🛡")
         return
-    await message.answer(await asyncio.to_thread(_digest_sync))
+    await send_long(message, await asyncio.to_thread(_digest_sync))
 
 
 async def _device_command(message: Message, command: CommandObject, tool_name: str) -> None:
@@ -1076,6 +1142,31 @@ def _collect_usage_sync() -> tuple[dict, int, int | None, str]:
         s.close()
 
 
+def _spend_by_person_sync() -> tuple[list[tuple[str, float, int, dict]], float]:
+    s = dbmod.session()
+    try:
+        names = {f"person:{p.id}": p.name for p in s.scalars(select(Person))}
+        names["system"] = "Система (алерты, дайджест)"
+        ledger = ai_client.ledger_for_day(s)
+        rows = sorted(
+            (
+                (names.get(k, "Владелец"), v["usd"], v["requests"], v["features"])
+                for k, v in ledger.items()
+            ),
+            key=lambda row: row[1],
+            reverse=True,
+        )
+        now = datetime.now()
+        week_usd = sum(
+            entry["usd"]
+            for i in range(7)
+            for entry in ai_client.ledger_for_day(s, now - timedelta(days=i)).values()
+        )
+        return rows, week_usd
+    finally:
+        s.close()
+
+
 @router.message(Command("usage"))
 async def cmd_usage(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
@@ -1084,7 +1175,12 @@ async def cmd_usage(message: Message) -> None:
         await message.answer("Эта функция доступна только родителям 🛡")
         return
     today, week_tokens, left, gw = await asyncio.to_thread(_collect_usage_sync)
-    await message.answer(texts.format_usage(today, week_tokens, left, gw))
+    rows, week_usd = await asyncio.to_thread(_spend_by_person_sync)
+    await message.answer(
+        texts.format_usage(today, week_tokens, left, gw)
+        + "\n\n"
+        + texts.format_spend_by_person(rows, week_usd)
+    )
 
 
 # ---------- кнопки под уведомлением о новом устройстве ----------
@@ -1340,7 +1436,7 @@ async def cb_quiz(cb: CallbackQuery) -> None:
     await cb.answer()
     if isinstance(cb.message, Message):
         await cb.message.edit_text(
-            f"{cb.message.text}\n\n➡ {res['message']}",
+            f"{texts.escape_markdown(cb.message.text or '')}\n\n➡ {res['message']}",
             reply_markup=None,
             parse_mode="Markdown",
         )
@@ -1389,6 +1485,14 @@ async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
         await _notify_owner_about_access_request(message)
         return
 
+    if role == "guest":
+        await message.answer("Гостям доступны только Wi-Fi и справка.")
+        return
+
+    if not _allow_ai_request(user_id):
+        await message.answer("Слишком много сообщений подряд. Подождите минуту 🙂")
+        return
+
     if role == "kid":
         lower = user_text.lower()
         time_keywords = ("время", "времени", "добавь", "разблокируй", "интернет", "продли", "минут")
@@ -1412,7 +1516,8 @@ async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
         )
         return
     try:
-        answer = await asyncio.to_thread(_orchestrate, message.chat.id, user_text)
+        with ai_client.attribute(_caller(person, user_id, "orchestrator", role)):
+            answer = await asyncio.to_thread(_orchestrate, message.chat.id, user_text)
     except ai_client.AiError as e:
         await message.answer(str(e))
         return
@@ -1423,13 +1528,22 @@ async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
 
     CHAT_HISTORY[message.chat.id].append({"role": "user", "content": user_text})
     CHAT_HISTORY[message.chat.id].append({"role": "assistant", "content": answer.text})
-    await message.answer(answer.text)
+    await send_long(message, answer.text)
     for action in answer.pending:
         pending_id = await asyncio.to_thread(_save_pending, action)
         await message.answer(
             f"Подтвердите действие:\n{action.description}",
             reply_markup=confirm_keyboard(pending_id),
         )
+
+
+def _record_voice_spend_sync(caller: ai_client.Caller, seconds: int) -> None:
+    # Gemini bills roughly 32 tokens per second of audio at the input price.
+    s = dbmod.session()
+    try:
+        ai_client.record_spend(s, caller, ai_client.estimate_usd("haiku", seconds * 32, 0))
+    finally:
+        s.close()
 
 
 @router.message(F.voice)
@@ -1444,6 +1558,15 @@ async def handle_voice(message: Message) -> None:
 
     if not message.voice or message.bot is None:
         return
+    if message.voice.duration > settings.ai_max_voice_seconds:
+        await message.answer(
+            f"Слишком длинное голосовое, максимум {settings.ai_max_voice_seconds} секунд."
+        )
+        return
+
+    user_id = message.from_user.id if message.from_user else 0
+    role, person = await asyncio.to_thread(_get_user_role_sync, user_id)
+    caller = _caller(person, user_id, "stt", role)
 
     try:
         await message.bot.send_chat_action(message.chat.id, "typing")
@@ -1463,11 +1586,9 @@ async def handle_voice(message: Message) -> None:
                 "file": ("voice.oga", voice_bytes, message.voice.mime_type or "audio/ogg")
             }
             data = {"language": "ru"}
-            headers = (
-                {"Authorization": f"Bearer {settings.anthropic_api_key}"}
-                if settings.anthropic_api_key
-                else {}
-            )
+            headers = ai_client.attribution_headers(caller)
+            if settings.anthropic_api_key:
+                headers["Authorization"] = f"Bearer {settings.anthropic_api_key}"
             resp = await client.post(settings.stt_url, files=files, data=data, headers=headers)
             resp.raise_for_status()
             transcribed_text = resp.json().get("text", "").strip()
@@ -1475,6 +1596,8 @@ async def handle_voice(message: Message) -> None:
         log.exception("ошибка транскрипции голосового сообщения")
         await message.answer(f"Не удалось распознать голос: {exc}")
         return
+
+    await asyncio.to_thread(_record_voice_spend_sync, caller, message.voice.duration)
 
     if not transcribed_text:
         await message.answer("Не удалось разобрать речь. Попробуйте сказать четче.")

@@ -22,7 +22,7 @@ MAX_TOOL_ROUNDS = 8  # предохранитель от зацикливани�
 
 SYSTEM = """Ты — интеллектуальный семейный ассистент HomeSec и управляющий домашней
 сетью (панель на Raspberry Pi + роутер MikroTik + фильтр AdGuard Home). Ты общаешься
-с главой семьи в Telegram.
+со взрослыми членами семьи в Telegram.
 
 Твои возможности:
 1. Управление сетью: блокировка устройств, пауза интернета, экранные квоты детей,
@@ -137,7 +137,7 @@ def handle(db: Session, user_text: str, history: list[dict] | None = None) -> An
     for _ in range(MAX_TOOL_ROUNDS):
         response = client.ask(
             db,
-            system=SYSTEM,
+            system=[{"type": "text", "text": SYSTEM, "cache_control": {"type": "ephemeral"}}],
             messages=messages,
             tools=tools.anthropic_schemas(),
             max_tokens=4096,

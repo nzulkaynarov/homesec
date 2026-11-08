@@ -229,3 +229,52 @@ def format_usage(
     if gateway:
         lines.append(f"Шлюз: {gateway}")
     return "\n".join(lines)
+
+
+TELEGRAM_MESSAGE_LIMIT = 4000  # Telegram rejects messages above 4096 characters
+
+
+def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
+    """Split long text for Telegram, preferring line breaks."""
+    parts: list[str] = []
+    rest = text
+    while len(rest) > limit:
+        cut = rest.rfind("\n", 0, limit)
+        if cut <= 0:
+            cut = limit
+        parts.append(rest[:cut])
+        rest = rest[cut:].lstrip("\n")
+    if rest or not parts:
+        parts.append(rest)
+    return parts
+
+
+def escape_markdown(text: str) -> str:
+    """Escape user or model text for Telegram legacy Markdown."""
+    for char in ("\\", "_", "*", "`", "["):
+        text = text.replace(char, "\\" + char)
+    return text
+
+
+FEATURE_LABELS = {
+    "orchestrator": "ассистент",
+    "tutor": "репетитор",
+    "quiz": "викторина",
+    "digest": "дайджест",
+    "watchdog": "алерты",
+    "stt": "голос",
+}
+
+
+def format_spend_by_person(rows: list[tuple[str, float, int, dict]], week_usd: float) -> str:
+    """Today's estimated AI spend per person and feature."""
+    if not rows:
+        return f"Расход сегодня: $0.00\nЗа 7 дней: ${week_usd:.2f}"
+    lines = ["💵 Расход сегодня (оценка):"]
+    for name, usd, requests, features in rows:
+        top = sorted(features.items(), key=lambda item: item[1], reverse=True)
+        detail = ", ".join(f"{FEATURE_LABELS.get(k, k)} ${v:.2f}" for k, v in top)
+        lines.append(f"• {name}: ${usd:.2f}, запросов {requests} ({detail})")
+    lines.append(f"Итого сегодня: ${sum(r[1] for r in rows):.2f}")
+    lines.append(f"За 7 дней: ${week_usd:.2f}")
+    return "\n".join(lines)

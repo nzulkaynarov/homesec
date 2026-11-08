@@ -12,7 +12,7 @@ from datetime import datetime, timedelta
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from ..models import Device, EventLog, QuotaUsage
+from ..models import Device, EventLog, Person, QuotaUsage
 from ..services import adguard
 from ..services.quota import QUOTA_CATEGORY_LABELS
 from . import client
@@ -80,10 +80,23 @@ def collect_digest_data(db: Session) -> dict:
         "dns_queries_today": stats.get("num_dns_queries"),
         "dns_blocked_today": stats.get("num_blocked_filtering"),
         "screen_time": screen_time,
+        "kid_ai_requests": _kid_ai_requests(db),
+        "kid_safety_alerts": by_kind.get("kid_safety", 0),
         "kid_top_domains": {
             name: [d for d, _ in counter.most_common(10)]
             for name, counter in kid_domains.items()
         },
+    }
+
+
+def _kid_ai_requests(db: Session) -> dict[str, int]:
+    """How many AI requests each child made today."""
+    ledger = client.ledger_for_day(db)
+    kids = db.scalars(select(Person).where(Person.role == "kid"))
+    return {
+        kid.name: ledger[f"person:{kid.id}"]["requests"]
+        for kid in kids
+        if f"person:{kid.id}" in ledger
     }
 
 
@@ -101,6 +114,10 @@ def _fallback_digest(data: dict) -> str:
         lines.append(f"🆕 {msg}")
     for msg in data["blocks"][-5:]:
         lines.append(f"⛔ {msg}")
+    for name, requests in data.get("kid_ai_requests", {}).items():
+        lines.append(f"🎓 {name}: запросов к репетитору и викторине {requests}")
+    if data.get("kid_safety_alerts"):
+        lines.append(f"🚨 Обращений ребёнка, требующих внимания: {data['kid_safety_alerts']}")
     if data["errors"]:
         lines.append(f"⚠️ Ошибок за сутки: {len(data['errors'])}")
     if len(lines) == 1:
@@ -114,16 +131,17 @@ def daily_digest(db: Session) -> str:
     if not client.is_configured():
         return _fallback_digest(data)
     try:
-        response = client.ask(
-            db,
-            system=DIGEST_SYSTEM,
-            messages=[{
-                "role": "user",
-                "content": "Данные за сутки в JSON:\n" + json.dumps(data, ensure_ascii=False),
-            }],
-            max_tokens=2048,
-            thinking=True,
-        )
+        with client.attribute(client.Caller(feature="digest")):
+            response = client.ask(
+                db,
+                system=DIGEST_SYSTEM,
+                messages=[{
+                    "role": "user",
+                    "content": "Данные за сутки в JSON:\n" + json.dumps(data, ensure_ascii=False),
+                }],
+                max_tokens=2048,
+                thinking=True,
+            )
         text = "".join(b.text for b in response.content if b.type == "text").strip()
         return text or _fallback_digest(data)
     except client.AiError as e:

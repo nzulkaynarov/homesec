@@ -340,6 +340,8 @@ def test_handle_voice_transcription_success(monkeypatch):
     msg.bot = mock_bot
     msg.chat.id = 12345
     msg.voice.file_id = "file_123"
+    msg.voice.duration = 5
+    msg.from_user.id = 111
     msg.voice.mime_type = "audio/ogg"
     msg.answer = AsyncMock()
 

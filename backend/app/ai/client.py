@@ -8,6 +8,10 @@
 
 import json
 import logging
+from collections.abc import Iterator
+from contextlib import contextmanager
+from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import datetime
 
 from sqlalchemy.orm import Session
@@ -18,6 +22,14 @@ from ..models import kv_get, kv_set
 log = logging.getLogger("homesec.ai")
 
 USAGE_KEY_PREFIX = "ai_usage:"  # ai_usage:2026-07-14 -> {"input":..,"output":..,"requests":..}
+LEDGER_KEY_PREFIX = (
+    "ai_ledger:"  # ai_ledger:2026-07-14 -> {caller: {"usd":..,"requests":..,"features":{..}}}
+)
+
+# USD per 1M tokens as (input, output). Keys match settings model names by substring.
+MODEL_PRICES = {"opus": (5.0, 25.0), "sonnet": (3.0, 15.0), "haiku": (0.30, 2.50)}
+CACHE_READ_MULTIPLIER = 0.1
+CACHE_WRITE_MULTIPLIER = 1.25
 
 
 class AiError(Exception):
@@ -26,6 +38,60 @@ class AiError(Exception):
 
 class BudgetExceeded(AiError):
     pass
+
+
+@dataclass(frozen=True)
+class Caller:
+    """Who a model call is made for, used for cost attribution and per-person limits."""
+
+    user: str = "system"
+    session: str = "system"
+    feature: str = "unknown"
+    role: str = "system"
+
+
+_current_caller: ContextVar[Caller | None] = ContextVar("homesec_ai_caller", default=None)
+
+
+def current_caller() -> Caller:
+    return _current_caller.get() or Caller()
+
+
+@contextmanager
+def attribute(caller: Caller) -> Iterator[None]:
+    """Attribute model calls made inside this block, including asyncio.to_thread workers."""
+    token = _current_caller.set(caller)
+    try:
+        yield
+    finally:
+        _current_caller.reset(token)
+
+
+def attribution_headers(caller: Caller) -> dict[str, str]:
+    """Headers the LunaGPT gateway uses to attribute spend in Langfuse."""
+    return {
+        "X-Luna-Client": "homesec",
+        "X-Luna-User": caller.user,
+        "X-Luna-Session": caller.session,
+        "X-Luna-Feature": caller.feature,
+    }
+
+
+def estimate_usd(
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cache_read_tokens: int = 0,
+    cache_write_tokens: int = 0,
+) -> float:
+    """Estimate request cost from list prices; unknown models count as free."""
+    prices = next((p for name, p in MODEL_PRICES.items() if name in model), (0.0, 0.0))
+    input_cost = (
+        input_tokens
+        + cache_read_tokens * CACHE_READ_MULTIPLIER
+        + cache_write_tokens * CACHE_WRITE_MULTIPLIER
+    ) * prices[0]
+    return (input_cost + output_tokens * prices[1]) / 1_000_000
 
 
 def is_configured() -> bool:
@@ -54,6 +120,42 @@ def _record_usage(db: Session, input_tokens: int, output_tokens: int) -> None:
     kv_set(db, _usage_key(), json.dumps(usage))
 
 
+def _ledger_key(now: datetime | None = None) -> str:
+    return LEDGER_KEY_PREFIX + (now or datetime.now()).strftime("%Y-%m-%d")
+
+
+def ledger_for_day(db: Session, now: datetime | None = None) -> dict:
+    """Per-caller spend for one day."""
+    raw = kv_get(db, _ledger_key(now), "")
+    if not raw:
+        return {}
+    try:
+        return json.loads(raw)
+    except ValueError:
+        return {}
+
+
+def record_spend(db: Session, caller: Caller, usd: float) -> None:
+    """Add one request to the per-caller, per-feature ledger."""
+    ledger = ledger_for_day(db)
+    entry = ledger.setdefault(caller.user, {"usd": 0.0, "requests": 0, "features": {}})
+    entry["usd"] += usd
+    entry["requests"] += 1
+    entry["features"][caller.feature] = entry["features"].get(caller.feature, 0.0) + usd
+    kv_set(db, _ledger_key(), json.dumps(ledger))
+
+
+def spent_today_usd(db: Session, user: str) -> float:
+    return float(ledger_for_day(db).get(user, {}).get("usd", 0.0))
+
+
+def _check_personal_limit(db: Session, caller: Caller) -> None:
+    if caller.role != "kid" or settings.ai_kid_daily_usd <= 0:
+        return
+    if spent_today_usd(db, caller.user) >= settings.ai_kid_daily_usd:
+        raise BudgetExceeded("На сегодня твой лимит ИИ закончился. Приходи завтра! 🌙")
+
+
 def budget_left(db: Session) -> int | None:
     """Сколько токенов осталось на сегодня; None = лимит не задан."""
     if not settings.ai_daily_token_budget:
@@ -65,7 +167,7 @@ def budget_left(db: Session) -> int | None:
 def ask(
     db: Session,
     messages: list[dict],
-    system: str = "",
+    system: str | list[dict] = "",
     tools: list[dict] | None = None,
     model: str | None = None,
     max_tokens: int = 4096,
@@ -76,6 +178,8 @@ def ask(
     Возвращает объект Message SDK; поднимает AiError/BudgetExceeded."""
     if not is_configured():
         raise AiError("ИИ не настроен: задайте HS_ANTHROPIC_API_KEY в .env")
+    caller = current_caller()
+    _check_personal_limit(db, caller)
     left = budget_left(db)
     if left is not None and left <= 0:
         raise BudgetExceeded(
@@ -106,6 +210,8 @@ def ask(
     if settings.ai_base_url:
         client_kwargs["base_url"] = settings.ai_base_url
 
+    kwargs["extra_headers"] = attribution_headers(caller)
+
     client = anthropic.Anthropic(**client_kwargs)
     try:
         response = client.messages.create(**kwargs)
@@ -116,5 +222,16 @@ def ask(
     except anthropic.APIConnectionError as e:
         raise AiError("Claude API недоступен (нет интернета?)") from e
 
-    _record_usage(db, response.usage.input_tokens, response.usage.output_tokens)
+    usage = response.usage
+    cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)
+    cache_write = int(getattr(usage, "cache_creation_input_tokens", 0) or 0)
+    # Cache reads cost a tenth of input, so they do not consume the daily token budget.
+    _record_usage(db, usage.input_tokens + cache_write, usage.output_tokens)
+    record_spend(
+        db,
+        caller,
+        estimate_usd(
+            kwargs["model"], usage.input_tokens, usage.output_tokens, cache_read, cache_write
+        ),
+    )
     return response
