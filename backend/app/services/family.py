@@ -113,10 +113,12 @@ def get_presence_status(db: Session) -> dict[str, Any]:
     """Собирает радар присутствия: кто из людей дома (по личным устройствам),
     статус общих медиа-устройств (ТВ/колонки) и умного дома (IoT)."""
     online_ips: set[str] = set()
+    router_answered = True
     try:
         with mikrotik.api_session() as api:
             online_ips = mikrotik.get_online_ips(api)
     except Exception as e:
+        router_answered = False
         log.warning("радар: ошибка чтения ARP с роутера: %s", e)
 
     people = list(db.scalars(select(Person).order_by(Person.id)))
@@ -151,6 +153,8 @@ def get_presence_status(db: Session) -> dict[str, Any]:
     iot_online = sum(1 for d in iot_devs if d.ip and d.ip in online_ips)
 
     return {
+        "router_answered": router_answered,
+        "checked_at": datetime.now(),
         "people": people_status,
         "shared": shared_status,
         "iot_total": len(iot_devs),
@@ -161,6 +165,8 @@ def get_presence_status(db: Session) -> dict[str, Any]:
 def format_presence(status: dict[str, Any]) -> str:
     """Форматирует радар присутствия для Telegram."""
     lines = ["🏠 *Радар «Кто дома»*:\n"]
+    if not status.get("router_answered", True):
+        return lines[0] + "⚠️ Роутер не ответил, сейчас не могу сказать, кто дома."
 
     people = status.get("people", [])
     if people:
@@ -192,7 +198,10 @@ def format_presence(status: dict[str, Any]) -> str:
         iot_online = status.get("iot_online", 0)
         lines.append(f"🤖 *Умный дом (IoT):* {iot_online} из {iot_total} устройств в сети.")
 
-    return "\n".join(lines)
+    checked_at = status.get("checked_at")
+    if checked_at is not None:
+        lines.append(f"🕐 Проверено в {checked_at:%H:%M:%S}")
+    return "\n".join(lines).rstrip()
 
 
 MORNING_HOUR = 7

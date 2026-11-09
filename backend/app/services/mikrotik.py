@@ -166,10 +166,26 @@ def _normalize_limit(limit: str) -> str:
     return "/".join(part(p) for p in limit.split("/"))
 
 
+LIVE_ARP_STATUSES = {"reachable", "delay", "probe"}
+DEAD_ARP_STATUSES = {"failed", "incomplete"}
+
+
 def get_online_ips(api) -> set[str]:
-    """IP устройств, замеченных в ARP-таблице (грубый признак «онлайн»)."""
-    ips = set()
+    """Addresses present right now; a table row alone proves nothing, RouterOS keeps failed ones.
+
+    A sleeping phone goes stale in ARP yet keeps renewing its DHCP lease, so an active lease
+    counts unless the router has just tried the address and got no answer."""
+    live, dead = set(), set()
     for row in api.path("ip", "arp"):
-        if row.get("address") and not row.get("invalid", False):
-            ips.add(row["address"])
-    return ips
+        if not row.get("address") or row.get("invalid", False):
+            continue
+        if row.get("status") in LIVE_ARP_STATUSES:
+            live.add(row["address"])
+        elif row.get("status") in DEAD_ARP_STATUSES:
+            dead.add(row["address"])
+    bound = {
+        row.get("active-address") or row.get("address")
+        for row in api.path("ip", "dhcp-server", "lease")
+        if row.get("status") == "bound"
+    }
+    return live | (bound - dead - {None})

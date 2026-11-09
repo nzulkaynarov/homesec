@@ -110,6 +110,7 @@ def test_presence_status_and_formatting(db):
     assert "🟢 👤 *Папа* — дома" in text
     assert "⚪ 🎒 *Аня* — не в сети" in text
     assert "🟢 *Гостиная ТВ* — онлайн" in text
+    assert "🕐 Проверено в" in text
     assert "0 из 1 устройств в сети" in text
 
 
@@ -195,3 +196,10 @@ def test_dynamic_quiz_and_active_store(db):
 
     family_svc.clear_active_quiz(db, p.id)
     assert family_svc.get_active_quiz(db, p.id) is None
+
+
+def test_presence_says_so_when_the_router_is_silent(db):
+    with patch("app.services.mikrotik.api_session", side_effect=OSError("no route")):
+        status = family_svc.get_presence_status(db)
+    text = family_svc.format_presence(status)
+    assert "Роутер не ответил" in text and "не в сети" not in text

@@ -164,10 +164,47 @@ def test_make_lease_static_replaces_dynamic_and_is_idempotent():
     assert len(api.calls) == before  # уже статический — роутер не трогаем
 
 
+def _presence(arp, leases=()):
+    tables = {"ip/arp": list(arp), "ip/dhcp-server/lease": list(leases)}
+    return mikrotik.get_online_ips(FakeApi(tables))
+
+
 def test_get_online_ips_skips_invalid_arp():
-    api = FakeApi({"ip/arp": [
-        {"address": "192.168.88.30"},
-        {"address": "192.168.88.31", "invalid": True},
-        {"address": ""},
-    ]})
-    assert mikrotik.get_online_ips(api) == {"192.168.88.30"}
+    assert _presence([
+        {"address": "192.168.88.30", "status": "reachable"},
+        {"address": "192.168.88.31", "status": "reachable", "invalid": True},
+        {"address": "", "status": "reachable"},
+    ]) == {"192.168.88.30"}
+
+
+@pytest.mark.parametrize("status", ["reachable", "delay", "probe"])
+def test_answering_device_is_online(status):
+    assert _presence([{"address": "192.168.88.30", "status": status}]) == {"192.168.88.30"}
+
+
+@pytest.mark.parametrize("status", ["failed", "incomplete", "stale", "permanent"])
+def test_table_row_alone_does_not_mean_online(status):
+    assert _presence([{"address": "192.168.88.30", "status": status}]) == set()
+
+
+def test_sleeping_phone_with_active_lease_is_online():
+    assert _presence(
+        [{"address": "192.168.88.30", "status": "stale"}],
+        [{"address": "192.168.88.30", "status": "bound"}],
+    ) == {"192.168.88.30"}
+
+
+def test_expired_lease_does_not_count():
+    assert _presence([], [{"address": "192.168.88.30", "status": "waiting"}]) == set()
+
+
+def test_failed_arp_beats_a_lease_that_has_not_expired_yet():
+    assert _presence(
+        [{"address": "192.168.88.30", "status": "failed"}],
+        [{"address": "192.168.88.30", "status": "bound"}],
+    ) == set()
+
+
+def test_dynamic_lease_uses_its_active_address():
+    leases = [{"address": "0.0.0.0", "active-address": "192.168.88.31", "status": "bound"}]
+    assert _presence([], leases) == {"192.168.88.31"}
