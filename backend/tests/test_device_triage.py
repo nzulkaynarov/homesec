@@ -265,3 +265,17 @@ def test_already_sorted_group_moves_on(db):
 def test_vendor_comes_from_the_bundled_registry():
     assert asyncio.run(triage.vendor_of("00:BB:C1:00:00:01")) == "CANON INC."
     assert asyncio.run(triage.vendor_of("not a mac")) is None
+
+
+def test_infrastructure_choice_is_offered_and_sorts_the_device(db):
+    device = _device(db, 90, label="MiWiFi", prefix="52")
+    labels = [
+        button.callback_data
+        for row in triage.card_keyboard(device.id, 0, 1).inline_keyboard
+        for button in row
+    ]
+    assert f"trgc:{device.id}:infra:0" in labels
+    device_triage.sort_group(db, device.id, None, "infra")
+    db.refresh(device)
+    assert device.kind == "infra" and device.group == "infra"
+    assert device_triage.list_groups(db) == []

@@ -278,8 +278,8 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
     quota_spent = quota.exhausted(db, devices, now)  # {device_id: категории}
     self_ips = get_self_ips()
     for dev in devices:
-        if not dev.ip or dev.ip in self_ips:
-            continue  # пропускаем саму малинку — она инфраструктура, не клиент
+        if not dev.ip or dev.ip in self_ips or dev.kind == "infra":
+            continue  # the network's own equipment is never a client, whatever its flags say
         group = dev.group
         spent = quota_spent.get(dev.id, set())
         if group in GROUP_ADDRESS_LISTS:

@@ -17,7 +17,7 @@ from ..services import device_triage
 log = logging.getLogger("homesec.bot.triage")
 
 BTN_TRIAGE = "🗂 Разбор устройств"
-KIND_LABELS = {"shared": "общее устройство", "iot": "умный дом"}
+KIND_LABELS = {"shared": "общее устройство", "iot": "умный дом", "infra": "инфраструктура"}
 ALREADY_SORTED = "Это устройство уже разобрали."
 Card = tuple[str, InlineKeyboardMarkup | None]
 
@@ -65,6 +65,11 @@ def card_keyboard(device_id: int, index: int, total: int) -> InlineKeyboardMarku
             InlineKeyboardButton(
                 text="🔌 Умный дом", callback_data=f"trgc:{device_id}:iot:{index}"
             ),
+        ],
+        [
+            InlineKeyboardButton(
+                text="🛠 Инфраструктура", callback_data=f"trgc:{device_id}:infra:{index}"
+            )
         ],
     ]
     if total > 1:

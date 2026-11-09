@@ -218,6 +218,8 @@ def apply_merge(db: Session, dup: Device, target: Device) -> None:
 
 
 def _guard_self(dev: Device) -> None:
+    if dev.kind == "infra":
+        raise ToolError(f"{dev.name} — это инфраструктура сети. Её блокировать нельзя.")
     if dev.ip and dev.ip in enforcement.get_self_ips():
         raise ToolError(
             f"{dev.name} ({dev.ip}) — это сама малинка (DNS и панель). "
@@ -235,6 +237,8 @@ def _device_row(d: Device, pauses: list[Pause]) -> dict:
         owner = "📺 Общие (ТВ/Колонки)"
     elif d.kind == "iot":
         owner = "🤖 Умный дом (IoT)"
+    elif d.kind == "infra":
+        owner = "🛠 Инфраструктура"
     return {
         "id": d.id,
         "name": d.name,
@@ -647,16 +651,25 @@ def assign_device(
 def set_device_kind(
     db: Session,
     device_id: Annotated[int, "id устройства из list_devices"],
-    kind: Annotated[str, "personal (личное) | shared (ТВ/колонка) | iot (умный дом)"],
+    kind: Annotated[
+        str, "personal (личное) | shared (ТВ/колонка) | iot (умный дом) | infra (роутер, сервер)"
+    ],
 ) -> str:
-    """Устанавливает категорию устройства: личное, общее (ТВ/приставка) или умный дом."""
+    """Устанавливает категорию устройства: личное, общее, умный дом или инфраструктура."""
     dev = _device_or_error(db, device_id)
     k = kind.strip().lower()
-    if k not in ("personal", "shared", "iot"):
-        raise ToolError("Категория должна быть personal, shared или iot")
+    if k not in ("personal", "shared", "iot", "infra"):
+        raise ToolError("Категория должна быть personal, shared, iot или infra")
     dev.kind = k
+    if k == "infra":
+        dev.person = None  # equipment belongs to the home, so no person's limits can reach it
     db.commit()
-    labels = {"personal": "Личное", "shared": "Общее (ТВ/Колонка)", "iot": "Умный дом (IoT)"}
+    labels = {
+        "personal": "Личное",
+        "shared": "Общее (ТВ/Колонка)",
+        "iot": "Умный дом (IoT)",
+        "infra": "Инфраструктура",
+    }
     return f"{dev.name}: установлена категория «{labels[k]}»"
 
 

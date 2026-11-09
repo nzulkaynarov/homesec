@@ -13,15 +13,17 @@ GROUP_LABELS = {
     "guest": "Гости",
     "shared": "Общие (ТВ/Колонки)",
     "iot": "Умный дом (IoT)",
+    "infra": "Инфраструктура",
     "unknown": "Неизвестные",
 }
 
 # Категории домашних устройств
-DEVICE_KINDS = ("personal", "shared", "iot")
+DEVICE_KINDS = ("personal", "shared", "iot", "infra")
 DEVICE_KIND_LABELS = {
     "personal": "Личное",
     "shared": "Общее (ТВ/Колонка)",
     "iot": "Умный дом (IoT)",
+    "infra": "Инфраструктура",
 }
 
 # Соответствие групп address-list'ам на MikroTik
@@ -60,7 +62,8 @@ class Device(Base):
     ip: Mapped[str] = mapped_column(String(15), default="")
     name: Mapped[str] = mapped_column(String(64), default="")
     hostname: Mapped[str] = mapped_column(String(64), default="")  # из DHCP-lease
-    kind: Mapped[str] = mapped_column(String(16), default="personal")  # personal | shared | iot
+    # personal | shared | iot | infra
+    kind: Mapped[str] = mapped_column(String(16), default="personal")
     person_id: Mapped[int | None] = mapped_column(ForeignKey("people.id"), nullable=True)
     blocked_manual: Mapped[bool] = mapped_column(Boolean, default=False)
     speed_limit: Mapped[str] = mapped_column(String(32), default="")  # напр. "10M/10M"
@@ -72,6 +75,8 @@ class Device(Base):
 
     @property
     def group(self) -> str:
+        if self.kind == "infra":
+            return "infra"
         if self.kind == "iot":
             return "iot"
         if self.kind == "shared":
