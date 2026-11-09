@@ -30,8 +30,9 @@ from ..ai import orchestrator, tools
 from ..config import settings
 from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get, log_event
 from ..services import family as family_svc
-from . import texts, triage
+from . import device_menu, texts, triage
 from .access import AccessMiddleware
+from .device_menu import BTN_DEVICES
 from .triage import BTN_TRIAGE
 
 log = logging.getLogger("homesec.bot")
@@ -101,8 +102,8 @@ def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
             keyboard=[
                 [KeyboardButton(text="🏠 Кто дома"), KeyboardButton(text="⏳ Квоты")],
                 [KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="📺 Общие устройства")],
-                [KeyboardButton(text=BTN_TRIAGE), KeyboardButton(text="📝 Заметки")],
-                [KeyboardButton(text="❓ Помощь")],
+                [KeyboardButton(text=BTN_TRIAGE), KeyboardButton(text=BTN_DEVICES)],
+                [KeyboardButton(text="📝 Заметки"), KeyboardButton(text="❓ Помощь")],
             ],
             resize_keyboard=True,
         )
@@ -518,6 +519,7 @@ _access = AccessMiddleware(_notify_owner_about_access_request, texts.START_UNAUT
 router.message.outer_middleware(_access)
 router.callback_query.outer_middleware(_access)
 triage.register(router)
+device_menu.register(router)
 
 
 AI_RATE_LIMIT = 8  # requests per window for one person
