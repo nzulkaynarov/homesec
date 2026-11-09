@@ -23,22 +23,35 @@ def is_this_pi(device: Device) -> bool:
     return bool(device.ip and device.ip in enforcement.get_self_ips())
 
 
+def describe(device: Device) -> str:
+    """The name, plus what the device calls itself and its address, to tell similar ones apart."""
+    hostname = device.hostname.strip()
+    name = f"{device.name} ({hostname})" if hostname and hostname != device.name else device.name
+    return f"{name} · .{device.ip.rsplit('.', 1)[-1]}" if device.ip else name
+
+
 def overview(db: Session) -> list[dict[str, Any]]:
-    devices = list(db.scalars(select(Device)))
-    counts: dict[str, int] = {}
-    for device in devices:
-        counts[section_of(device)] = counts.get(section_of(device), 0) + 1
-    people = [
-        {"key": f"p{p.id}", "label": f"👤 {p.name}", "count": counts.get(f"p{p.id}", 0)}
-        for p in db.scalars(select(Person).order_by(Person.name))
+    members: dict[str, list[str]] = {}
+    for device in db.scalars(select(Device).order_by(Device.name, Device.id)):
+        members.setdefault(section_of(device), []).append(describe(device))
+    sections = [
+        (f"p{p.id}", f"👤 {p.name}") for p in db.scalars(select(Person).order_by(Person.name))
     ]
-    other = [
-        {"key": "shared", "label": "📺 Общие", "count": counts.get("shared", 0)},
-        {"key": "iot", "label": "🔌 Умный дом", "count": counts.get("iot", 0)},
-        {"key": "infra", "label": "🛠 Инфраструктура", "count": counts.get("infra", 0)},
-        {"key": NO_OWNER, "label": "❓ Без владельца", "count": counts.get(NO_OWNER, 0)},
+    sections += [
+        ("shared", "📺 Общие"),
+        ("iot", "🔌 Умный дом"),
+        ("infra", "🛠 Инфраструктура"),
+        (NO_OWNER, "❓ Без владельца"),
     ]
-    return people + other
+    return [
+        {
+            "key": key,
+            "label": label,
+            "count": len(members.get(key, [])),
+            "devices": members.get(key, []),
+        }
+        for key, label in sections
+    ]
 
 
 def devices_in(db: Session, section: str) -> list[Device]:
