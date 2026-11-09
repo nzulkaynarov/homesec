@@ -30,8 +30,9 @@ from ..ai import orchestrator, tools
 from ..config import settings
 from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get, log_event
 from ..services import family as family_svc
-from . import texts
+from . import texts, triage
 from .access import AccessMiddleware
+from .triage import BTN_TRIAGE
 
 log = logging.getLogger("homesec.bot")
 router = Router()
@@ -100,7 +101,8 @@ def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
             keyboard=[
                 [KeyboardButton(text="🏠 Кто дома"), KeyboardButton(text="⏳ Квоты")],
                 [KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="📺 Общие устройства")],
-                [KeyboardButton(text="📝 Заметки"), KeyboardButton(text="❓ Помощь")],
+                [KeyboardButton(text=BTN_TRIAGE), KeyboardButton(text="📝 Заметки")],
+                [KeyboardButton(text="❓ Помощь")],
             ],
             resize_keyboard=True,
         )
@@ -515,6 +517,7 @@ async def _handle_kid_tutor(message: Message, user_text: str) -> None:
 _access = AccessMiddleware(_notify_owner_about_access_request, texts.START_UNAUTHORIZED)
 router.message.outer_middleware(_access)
 router.callback_query.outer_middleware(_access)
+triage.register(router)
 
 
 AI_RATE_LIMIT = 8  # requests per window for one person

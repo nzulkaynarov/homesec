@@ -9,7 +9,7 @@ from datetime import datetime
 from typing import Literal
 
 from fastapi import APIRouter, Depends, Header, HTTPException
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
@@ -17,7 +17,7 @@ from ..ai import tools
 from ..config import settings
 from ..db import get_db
 from ..models import BonusRequest, Device, Person, kv_set
-from ..services import bonus, device_triage, family
+from ..services import bonus, family
 
 router = APIRouter(prefix="/api/luna/v1", tags=["luna"])
 
@@ -50,17 +50,6 @@ class SharedState(BaseModel):
     state: Literal["kid", "off", "adult"]
     hours: float | None = Field(default=None, gt=0, le=24)
     until_morning: bool = False
-
-
-class TriageDecision(BaseModel):
-    person_id: int | None = None
-    kind: Literal["shared", "iot"] | None = None
-
-    @model_validator(mode="after")
-    def exactly_one_destination(self) -> "TriageDecision":
-        if (self.person_id is None) == (self.kind is None):
-            raise ValueError("Choose either an owner or a device kind")
-        return self
 
 
 class QuizResult(BaseModel):
@@ -117,21 +106,6 @@ def set_shared_state(device_id: int, body: SharedState, db: Session = Depends(ge
         raise HTTPException(status_code=422, detail="Adult mode needs a duration")
     family.set_shared_state(db, device, body.state, hours)
     return _shared_view(device)
-
-
-@router.get("/device-triage", dependencies=[Depends(require_token)])
-def device_triage_queue(db: Session = Depends(get_db)) -> list[dict]:
-    return device_triage.list_groups(db)
-
-
-@router.post("/device-triage/{device_id}", dependencies=[Depends(require_token)])
-def sort_device_group(device_id: int, body: TriageDecision, db: Session = Depends(get_db)) -> dict:
-    try:
-        return device_triage.sort_group(db, device_id, body.person_id, body.kind)
-    except LookupError as exc:
-        raise HTTPException(status_code=404, detail="Device or person is gone") from exc
-    except tools.ToolError as exc:
-        raise HTTPException(status_code=409, detail=str(exc)) from exc
 
 
 @router.get("/people", dependencies=[Depends(require_token)])
