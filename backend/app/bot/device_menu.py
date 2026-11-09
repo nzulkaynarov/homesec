@@ -15,6 +15,7 @@ from .triage import vendor_of
 
 BTN_DEVICES = "📱 Устройства"
 PAGE_SIZE = 10
+TEXT_LIMIT = 4000  # Telegram rejects messages above 4096 characters
 GONE = "Этого устройства уже нет."
 Card = tuple[str, InlineKeyboardMarkup]
 
@@ -47,17 +48,19 @@ async def _overview(notice: str = "") -> Card:
         if s["count"] or s["key"].startswith("p")
     ]
     prefix = f"{notice}\n\n" if notice else ""
-    return f"{prefix}📱 Устройства. Выбери, чьи показать.", InlineKeyboardMarkup(
-        inline_keyboard=rows
-    )
+    blocks = [
+        f"{s['label']}: {s['count']}\n" + "\n".join(f"• {name}" for name in s["devices"])
+        for s in sections
+        if s["devices"]
+    ]
+    listing = "\n\n".join(blocks) or "Устройств пока нет."
+    text = f"{prefix}📱 Все устройства\n\n{listing}\n\nЧтобы сменить владельца, нажми на группу."
+    return text[:TEXT_LIMIT], InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 def _section_rows(db: Any, section: str) -> tuple[str, list[tuple[int, str]]]:
     title = next((s["label"] for s in device_owners.overview(db) if s["key"] == section), "")
-    rows = [
-        (d.id, f"{d.name} · .{d.ip.rsplit('.', 1)[-1]}" if d.ip else d.name)
-        for d in device_owners.devices_in(db, section)
-    ]
+    rows = [(d.id, device_owners.describe(d)) for d in device_owners.devices_in(db, section)]
     return title, rows
 
 

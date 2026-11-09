@@ -68,7 +68,7 @@ def test_overview_counts_owners_and_kinds(db):
     _device(db, 11, kind="shared")
     _device(db, 12)
     text, actions = _run(device_menu.cb_overview, "dm")
-    assert "Устройства" in text
+    assert "Все устройства" in text
     assert (
         f"dms:p{person.id}:0" in actions and "dms:shared:0" in actions and "dms:none:0" in actions
     )
@@ -182,3 +182,19 @@ def test_menu_sits_behind_the_access_middleware():
 
 def test_callback_data_fits_telegram_limit():
     assert len(f"dmy:{10**9}:{10**9}:p{10**9}:999".encode()) <= 64
+
+
+def test_overview_lists_every_device_with_what_tells_it_apart(db):
+    person = _person(db)
+    _device(db, 10, name="Igra", hostname="iPad-Kamila", person_id=person.id)
+    _device(db, 11, name="Sony", kind="shared")
+    text, _ = _run(device_menu.cb_overview, "dm")
+    assert "• Igra (iPad-Kamila) · .10" in text and "• Sony · .11" in text
+    assert "👤 Камила: 1" in text and "📺 Общие: 1" in text
+
+
+def test_overview_stays_within_the_telegram_limit(db):
+    for octet in range(1, 200):
+        _device(db, octet, name="Очень длинное имя устройства " * 2)
+    text, _ = _run(device_menu.cb_overview, "dm")
+    assert len(text) <= device_menu.TEXT_LIMIT
