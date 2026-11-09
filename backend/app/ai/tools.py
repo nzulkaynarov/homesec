@@ -199,6 +199,24 @@ def _device_or_error(db: Session, device_id: int) -> Device:
     return dev
 
 
+def apply_merge(db: Session, dup: Device, target: Device) -> None:
+    """Moves a duplicate's addresses and linked rows to the target and removes it.
+    The caller commits, so several merges can share one transaction."""
+    for dm in db.scalars(select(DeviceMac).where(DeviceMac.device_id == dup.id)):
+        dm.device_id = target.id
+    if not db.scalar(select(DeviceMac).where(DeviceMac.mac == dup.mac)):
+        db.add(DeviceMac(device_id=target.id, mac=dup.mac))
+    if dup.ip:  # дубль — более свежий lease, актуальный адрес у него
+        target.ip = dup.ip
+    # Учёт минут, бонусы, заявки и паузы дубля переезжают вместе с MAC —
+    # иначе телефон, сменивший «приватный» MAC днём, после объединения терял
+    # накопленное за день экранное время, а висящая заявка ребёнка указывала
+    # на удалённую запись (кнопка родителя падала с «Не нашёл устройство»).
+    move_device_rows(db, dup.id, target.id)
+    db.delete(dup)
+    db.flush()  # sessions run without autoflush; the next merge must see these rows
+
+
 def _guard_self(dev: Device) -> None:
     if dev.ip and dev.ip in enforcement.get_self_ips():
         raise ToolError(
@@ -596,19 +614,8 @@ def merge_devices(
     dup = _device_or_error(db, int(duplicate_id))
     target = _device_or_error(db, int(target_id))
     _guard_self(dup)
-    for dm in db.scalars(select(DeviceMac).where(DeviceMac.device_id == dup.id)):
-        dm.device_id = target.id
-    if not db.scalar(select(DeviceMac).where(DeviceMac.mac == dup.mac)):
-        db.add(DeviceMac(device_id=target.id, mac=dup.mac))
-    if dup.ip:  # дубль — более свежий lease, актуальный адрес у него
-        target.ip = dup.ip
-    # Учёт минут, бонусы, заявки и паузы дубля переезжают вместе с MAC —
-    # иначе телефон, сменивший «приватный» MAC днём, после объединения терял
-    # накопленное за день экранное время, а висящая заявка ребёнка указывала
-    # на удалённую запись (кнопка родителя падала с «Не нашёл устройство»).
-    move_device_rows(db, dup.id, target.id)
     dup_label = f"{dup.name} ({dup.mac})"
-    db.delete(dup)
+    apply_merge(db, dup, target)
     db.commit()
     return f"Объединено: {dup_label} → «{target.name}»; правила и владелец сохранены"
 
