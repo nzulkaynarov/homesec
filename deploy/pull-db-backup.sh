@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Pulls a verified snapshot of the HomeSec database from the Pi to this PC.
+# Pulls a verified snapshot of the HomeSec database from the Pi to this PC,
+# then a copy of the router configuration.
 # Run by the user timer in deploy/pc; setup is in docs/05-operations.md.
 set -euo pipefail
 umask 077
@@ -9,6 +10,8 @@ PI_BACKEND=${HOMESEC_PI_BACKEND:-/opt/homesec/backend}
 BACKUP_DIR=${HOMESEC_BACKUP_DIR:-/data/backups/homesec}
 KEEP=${HOMESEC_BACKUP_KEEP:-30}
 HC_URL=${HOMESEC_BACKUP_HC_URL:-}
+# Read-only router user that logs in with this PC's key; set it empty to skip.
+ROUTER_HOST=${HOMESEC_ROUTER_HOST-hs-backup@192.168.88.1}
 SCRIPT_DIR=$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)
 
 ping_monitor() {
@@ -52,4 +55,22 @@ partial=""
 find "$BACKUP_DIR" -maxdepth 1 -name 'homesec-*.db' | sort | head -n "-$KEEP" | xargs -r rm --
 
 echo "saved $target ($(stat -c %s "$target") bytes)"
+
+if [ -n "$ROUTER_HOST" ]; then
+  partial=$(mktemp "$BACKUP_DIR/.partial.XXXXXX")
+  ssh -o BatchMode=yes -o ConnectTimeout=15 -o LogLevel=ERROR "$ROUTER_HOST" /export > "$partial"
+  # The export leaves out passwords and Wi-Fi keys, but a router script keeps
+  # the Telegram bot token in plain text, so it never reaches the disk here.
+  sed -i -E 's/[0-9]{8,12}:[A-Za-z0-9_-]{30,}/<telegram-bot-token>/g' "$partial"
+  if ! grep -q '^/ip ' "$partial"; then
+    echo "error: router export has no /ip section" >&2
+    exit 1
+  fi
+  router_target="$BACKUP_DIR/router-$(date +%Y%m%d-%H%M%S).rsc"
+  mv "$partial" "$router_target"
+  partial=""
+  find "$BACKUP_DIR" -maxdepth 1 -name 'router-*.rsc' | sort | head -n "-$KEEP" | xargs -r rm --
+  echo "saved $router_target ($(stat -c %s "$router_target") bytes)"
+fi
+
 ping_monitor ""

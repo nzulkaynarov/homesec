@@ -19,7 +19,9 @@ def _executable(path: pathlib.Path, body: str) -> None:
     path.chmod(path.stat().st_mode | stat.S_IEXEC)
 
 
-def _run(tmp_path: pathlib.Path, ssh_body: str, keep: int = 30) -> subprocess.CompletedProcess:
+def _run(
+    tmp_path: pathlib.Path, ssh_body: str, keep: int = 30, router_host: str = ""
+) -> subprocess.CompletedProcess:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     _executable(bin_dir / "ssh", ssh_body)
@@ -30,6 +32,7 @@ def _run(tmp_path: pathlib.Path, ssh_body: str, keep: int = 30) -> subprocess.Co
         "HOMESEC_BACKUP_DIR": str(tmp_path / "backups"),
         "HOMESEC_BACKUP_KEEP": str(keep),
         "HOMESEC_BACKUP_HC_URL": HC_URL,
+        "HOMESEC_ROUTER_HOST": router_host,
     }
     return subprocess.run([str(SCRIPT)], env=env, capture_output=True, text=True)
 
@@ -134,3 +137,40 @@ def test_heartbeat_is_scheduled_only_when_configured(monkeypatch):
     monkeypatch.setattr(scheduler.settings, "healthcheck_url", "https://hc-ping.com/x")
     scheduler.start()
     assert "heartbeat" in added
+
+
+TOKEN = "1234567890:AAbbCCddEEffGGhhIIjjKKllMMnnOOppQQ"
+
+
+def _router_ssh(backend: pathlib.Path, export: str) -> str:
+    """The database comes from the Pi, the configuration from the router."""
+    return (
+        'case "$*" in\n'
+        f'  *router*) cat <<"RSC"\n{export}\nRSC\n  ;;\n'
+        f'  *) exec python3 - "{backend}" ;;\n'
+        "esac"
+    )
+
+
+def test_router_export_is_saved_without_the_bot_token(tmp_path):
+    export = f'/ip address\nadd address=192.168.88.1/24\n/system script\nadd source="t={TOKEN}"'
+    ssh = _router_ssh(_live_backend(tmp_path), export)
+    result = _run(tmp_path, ssh, router_host="hs-backup@router")
+
+    assert result.returncode == 0, result.stderr
+    [copy] = sorted((tmp_path / "backups").glob("router-*.rsc"))
+    text = copy.read_text()
+    assert TOKEN not in text and "<telegram-bot-token>" in text and "/ip address" in text
+    assert stat.S_IMODE(copy.stat().st_mode) == 0o600
+    assert _pings(tmp_path) == [HC_URL]
+
+
+def test_empty_router_export_is_reported(tmp_path):
+    ssh = _router_ssh(_live_backend(tmp_path), "# nothing")
+    result = _run(tmp_path, ssh, router_host="hs-backup@router")
+
+    assert result.returncode != 0
+    assert list((tmp_path / "backups").glob("router-*.rsc")) == []
+    assert list((tmp_path / "backups").glob(".partial*")) == []
+    assert len(_snapshots(tmp_path)) == 1  # the database copy is kept
+    assert _pings(tmp_path) == [f"{HC_URL}/fail"]
