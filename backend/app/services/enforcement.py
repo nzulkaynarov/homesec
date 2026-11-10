@@ -217,6 +217,61 @@ def _fold_into(db: Session, target: Device, mac: str, ip: str) -> None:
     )
 
 
+def known_macs(db: Session) -> dict[str, Device]:
+    """Every address of every device, primary and folded ones, upper case."""
+    devices = {d.id: d for d in db.scalars(select(Device))}
+    known = {d.mac.upper(): d for d in devices.values()}
+    for row in db.scalars(select(DeviceMac)):
+        device = devices.get(row.device_id)
+        if device is not None:
+            known.setdefault(row.mac.upper(), device)
+    return known
+
+
+def follow_arp(db: Session, devices: list[Device], live: list[tuple[str, str]]) -> list[Device]:
+    """Catch devices with a hand-set address, which DHCP never reports.
+
+    A known device that answers on another address gets that address, so its
+    rules follow it; an unknown one becomes a new device like any other."""
+    known = known_macs(db)
+    by_mac: dict[str, set[str]] = {}
+    for ip, mac in live:
+        by_mac.setdefault(mac, set()).add(ip)
+    for mac, ips in sorted(by_mac.items()):
+        dev = known.get(mac)
+        if dev is not None:
+            if dev.ip in ips:
+                continue
+            ip = sorted(ips)[0]
+            dev.ip = ip
+            db.commit()
+            log_event(
+                db, "ip_manual", f"«{dev.name}» ({mac}) отвечает на адресе {ip}, адрес обновлён."
+            )
+            _release_stale_ip(db, devices, dev, ip)
+            continue
+        ip = sorted(ips)[0]
+        dev = Device(mac=mac, ip=ip, name=mac, hostname="")
+        db.add(dev)
+        try:
+            db.commit()
+        except IntegrityError:
+            db.rollback()
+            continue
+        row = db.scalar(select(DeviceMac).where(DeviceMac.mac == mac))
+        if row is None:
+            db.add(DeviceMac(device_id=dev.id, mac=mac))
+        else:
+            row.device_id = dev.id
+        db.commit()
+        note = " ⚠️ случайный MAC" if is_random_mac(mac) else ""
+        message = f"Новое устройство: {mac} ({mac}, {ip}), адрес задан вручную{note}"
+        log_event(db, "device_new", message)
+        _release_stale_ip(db, devices, dev, ip)
+        devices.append(dev)
+    return devices
+
+
 def discover_devices(db: Session, api, answering: set[str] | None = None) -> list[Device]:
     """Синхронизирует DHCP-lease'ы с базой: новые MAC → новые устройства.
     Матчит по ВСЕМ MAC устройства (device_macs) — телефон с рандомизацией,
@@ -233,6 +288,10 @@ def discover_devices(db: Session, api, answering: set[str] | None = None) -> lis
     for lease in mikrotik.get_leases(api):
         mac = lease["mac"].upper()
         if not mac:
+            continue
+        # A pinned lease stays on the router after its device is gone; only an
+        # address the router actually handed out proves a device is here.
+        if mac not in known and lease.get("status", "bound") != "bound":
             continue
         # hostname задаёт само устройство — чистим, иначе он попадёт в текст
         # события, из которого бот достаёт MAC и номер заявки (см. safetext).
@@ -423,6 +482,10 @@ def reconcile(db: Session) -> dict:
     try:
         with _reconcile_lock(), mikrotik.api_session() as api:
             devices = discover_devices(db, api, mikrotik.get_answering_macs(api))
+            devices = follow_arp(db, devices, mikrotik.get_live_arp(api))
+            if devices:  # never prune against an empty or unreadable database
+                for mac in mikrotik.prune_pinned_leases(api, set(known_macs(db))):
+                    log_event(db, "lease_pruned", f"Снят закреплённый адрес удалённого {mac}")
             mark_seen(db, devices, mikrotik.get_online_ips(api))
             desired = _desired_state(db, devices)
             quota_blocked = desired["quota_blocked"]

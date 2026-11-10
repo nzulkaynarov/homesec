@@ -170,6 +170,40 @@ LIVE_ARP_STATUSES = {"reachable", "delay", "probe"}
 DEAD_ARP_STATUSES = {"failed", "incomplete"}
 
 
+HS_LEASE_PREFIX = "hs"  # make_lease_static's comment marks leases HomeSec pinned
+
+
+def get_live_arp(api, interface: str = "bridge") -> list[tuple[str, str]]:
+    """(ip, MAC) pairs answering on the home bridge right now, whatever DHCP thinks."""
+    return [
+        (row["address"], row["mac-address"].upper())
+        for row in api.path("ip", "arp")
+        if row.get("interface") == interface
+        and row.get("address")
+        and row.get("mac-address")
+        and not row.get("invalid", False)
+        and row.get("status") in LIVE_ARP_STATUSES
+    ]
+
+
+def prune_pinned_leases(api, keep_macs: set[str]) -> list[str]:
+    """Remove leases HomeSec pinned for devices that are gone; returns the MACs.
+
+    A pinned lease outlives the device record, and every lease used to be read
+    back as a device, so a deleted phone kept coming back as "new"."""
+    leases = api.path("ip", "dhcp-server", "lease")
+    removed = []
+    for row in list(leases):
+        mac = row.get("mac-address", "").upper()
+        pinned = not row.get("dynamic", False) and str(row.get("comment", "")).startswith(
+            HS_LEASE_PREFIX
+        )
+        if pinned and mac and mac not in keep_macs:
+            leases.remove(row[".id"])
+            removed.append(mac)
+    return removed
+
+
 def get_answering_macs(api) -> set[str]:
     """Hardware addresses that answered the router just now, upper case."""
     return {

@@ -334,3 +334,78 @@ def test_migration_drops_pseudo_people(tmp_path):
         assert c.execute(text("SELECT name FROM people")).scalars().all() == ["Нурбек"]
         owners = dict(c.execute(text("SELECT name, person_id FROM devices")).fetchall())
         assert owners == {"Nurbek": None, "iPhone": 1}
+
+
+class _Rows(list):
+    """A RouterOS table: iterable rows plus remove(id)."""
+
+    def remove(self, row_id):  # type: ignore[override]
+        self[:] = [r for r in self if r.get(".id") != row_id]
+
+
+class _Api:
+    def __init__(self, leases=(), arp=()):
+        self.tables = {("ip", "dhcp-server", "lease"): _Rows(leases), ("ip", "arp"): _Rows(arp)}
+
+    def path(self, *parts):
+        return self.tables[parts]
+
+
+def _lease(row_id, mac, dynamic, comment):
+    return {".id": row_id, "mac-address": mac, "dynamic": dynamic, "comment": comment}
+
+
+def _arp(interface, ip, mac, status):
+    return {"interface": interface, "address": ip, "mac-address": mac, "status": status}
+
+
+def test_unused_pinned_lease_does_not_recreate_a_deleted_device(db, monkeypatch):
+    leases = _leases(("56:6F:23:87:B0:71", "192.168.88.248", "iPhone"))
+    leases[0]["status"] = "waiting"
+    monkeypatch.setattr(enforcement.mikrotik, "get_leases", lambda api: leases)
+    assert enforcement.discover_devices(db, api=None) == []
+    assert db.query(Device).count() == 0
+
+
+def test_hand_set_address_moves_a_known_device(db):
+    dev = Device(mac="04:D9:F5:7F:73:51", ip="192.168.88.240", name="Alimbek")
+    db.add(dev)
+    db.commit()
+    db.add(DeviceMac(device_id=dev.id, mac=dev.mac))
+    db.commit()
+    enforcement.follow_arp(db, [dev], [("192.168.88.77", "04:D9:F5:7F:73:51")])
+    assert dev.ip == "192.168.88.77"
+    assert any(e.kind == "ip_manual" for e in db.query(EventLog))
+
+
+def test_unknown_device_with_hand_set_address_becomes_visible(db):
+    devices = enforcement.follow_arp(db, [], [("192.168.88.121", "B4:4C:3B:00:00:01")])
+    assert [(d.mac, d.ip) for d in devices] == [("B4:4C:3B:00:00:01", "192.168.88.121")]
+    event = db.query(EventLog).filter(EventLog.kind == "device_new").one()
+    assert "B4:4C:3B:00:00:01" in event.message and "вручную" in event.message
+
+
+def test_prune_removes_only_pinned_leases_of_gone_devices():
+    api = _Api(
+        leases=[
+            _lease("*1", "AA:00:00:00:00:01", False, "hs: iPhone"),
+            _lease("*2", "AA:00:00:00:00:02", False, "hs: Mac"),
+            _lease("*3", "AA:00:00:00:00:03", True, ""),
+            _lease("*4", "AA:00:00:00:00:04", False, "printer"),
+        ]
+    )
+    removed = enforcement.mikrotik.prune_pinned_leases(api, {"AA:00:00:00:00:02"})
+    assert removed == ["AA:00:00:00:00:01"]
+    left = [r[".id"] for r in api.path("ip", "dhcp-server", "lease")]
+    assert left == ["*2", "*3", "*4"]
+
+
+def test_live_arp_reads_only_answering_home_addresses():
+    api = _Api(
+        arp=[
+            _arp("bridge", "192.168.88.121", "b4:4c:3b:00:00:01", "reachable"),
+            _arp("bridge", "192.168.88.140", "28:EA:2D:00:00:01", "failed"),
+            _arp("ether1", "192.168.0.1", "00:00:00:00:00:01", "reachable"),
+        ]
+    )
+    assert enforcement.mikrotik.get_live_arp(api) == [("192.168.88.121", "B4:4C:3B:00:00:01")]
