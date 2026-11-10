@@ -221,3 +221,36 @@ def test_rules_menu_sits_behind_the_access_middleware():
 def test_callback_data_fits_telegram_limit():
     assert len(f"hrbe:{10**9}:weekend:2330:1000".encode()) <= 64
     assert len(f"dmvs:{10**9}:3:p{10**9}:999".encode()) <= 64
+
+
+def test_group_pause_from_the_ai_shows_up_and_can_be_lifted(db):
+    from datetime import timedelta
+
+    kid = _kid(db)
+    until = datetime.now() + timedelta(hours=8)
+    db.add(Pause(target_type="group", target="kid", until=until, reason="Ночной сон"))
+    db.commit()
+    text, actions = _run(rules_menu.cb_overview, "hr")
+    assert f"пауза всем детям до {until:%H:%M}" in text and "hrra" in actions
+    assert f"⏸ Пауза до {until:%H:%M}" in text  # the child's own summary shows it too
+    text, _ = _run(rules_menu.cb_resume, f"hrr:{kid.id}")
+    assert "пауза всем детям" in text  # a group pause is not lifted for one child
+    text, actions = _run(rules_menu.cb_resume_kids, "hrra")
+    assert "Снято пауз: 1" in text and "hrra" not in actions
+    assert house_rules.paused_until(db, kid.id) is None
+
+
+def test_device_pause_counts_for_its_owner(db):
+    from datetime import timedelta
+
+    kid = _kid(db)
+    phone = Device(mac="00:11:22:33:44:09", ip="192.168.88.90", name="iPhone", person_id=kid.id)
+    db.add(phone)
+    db.commit()
+    db.add(
+        Pause(target_type="device", target=str(phone.id), until=datetime.now() + timedelta(hours=1))
+    )
+    db.commit()
+    assert house_rules.paused_until(db, kid.id) is not None
+    house_rules.resume(db, kid.id)
+    assert house_rules.paused_until(db, kid.id) is None

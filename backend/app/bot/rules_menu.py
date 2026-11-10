@@ -53,20 +53,25 @@ def _hhmm(value: str) -> str:
     return f"{value[:2]}:{value[2:]}"
 
 
-def _overview_data(db: Any) -> list[tuple[int, str, list[str]]]:
-    return [
+def _overview_data(db: Any) -> tuple[list[tuple[int, str, list[str]]], Any]:
+    kids = [
         (p.id, p.name, house_rules.summary(db, p))
         for p in house_rules.people(db)
         if p.role == "kid"
     ]
+    return kids, house_rules.kids_paused_until(db)
 
 
 async def _overview(notice: str = "") -> Card:
-    kids = await _call(_overview_data)
+    kids, group_until = await _call(_overview_data)
     blocks = [f"🎒 {name}\n" + "\n".join(lines) for _, name, lines in kids]
     body = "\n\n".join(blocks) or "Детей в списке нет. Добавьте их в «👥 Люди»."
+    if group_until is not None:
+        body = f"⏸ Сейчас пауза всем детям до {group_until:%H:%M}\n\n{body}"
     text = (f"{notice}\n\n" if notice else "") + f"📋 Правила для детей\n\n{body}"
     rows = [[_button(f"🎒 {name}", f"hrp:{pid}")] for pid, name, _ in kids]
+    if group_until is not None:
+        rows.append([_button("▶️ Снять паузу всем детям", "hrra")])
     rows.append([_button("⏸ Пауза всем детям до утра", "hrza")])
     rows.append([_button("👥 Люди", "hrl")])
     return text, _markup(rows)
@@ -348,6 +353,11 @@ async def cb_pause_all(cb: CallbackQuery) -> None:
     await _show(cb, await _overview(f"⏸ Пауза до утра: детей {count}"))
 
 
+async def cb_resume_kids(cb: CallbackQuery) -> None:
+    count = await _call(house_rules.resume_kids)
+    await _show(cb, await _overview(f"▶️ Снято пауз: {count}" if count else "Пауз не было."))
+
+
 async def cb_people(cb: CallbackQuery) -> None:
     if isinstance(cb.message, Message):
         _typing.pop((cb.message.chat.id, cb.from_user.id), None)
@@ -401,7 +411,7 @@ def register(router: Router) -> None:
     """Attach to the router that carries the access middleware, before any catch-all text."""
     router.message.register(btn_rules, F.text == BTN_RULES)
     router.message.register(on_text, waiting_for_text)
-    exact = {"hr": cb_overview, "hrza": cb_pause_all, "hrl": cb_people}
+    exact = {"hr": cb_overview, "hrza": cb_pause_all, "hrra": cb_resume_kids, "hrl": cb_people}
     for data, handler in exact.items():
         router.callback_query.register(handler, F.data == data)
     prefixed = {

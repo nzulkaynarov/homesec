@@ -39,7 +39,7 @@ from ..models import (
     kv_set,
     log_event,
 )
-from ..services import adguard, enforcement, mikrotik
+from ..services import adguard, enforcement, house_rules, mikrotik
 from ..services import family as family_svc
 from ..services import quota as quota_svc
 from ..services.device_links import move_device_rows
@@ -417,24 +417,48 @@ def set_speed_limit(
     return f"Лимит скорости снят: {dev.name} ({dev.ip or dev.mac})"
 
 
+def next_clock(clock: str, now: datetime) -> datetime:
+    """The next moment the clock shows HH:MM. The model asked for a pause "until 9:00"
+    at 00:44 once and computed 600 minutes, so the code does the arithmetic."""
+    try:
+        moment = datetime.strptime(clock.strip(), "%H:%M")
+    except ValueError as exc:
+        raise ToolError(f"Время «{clock}» не похоже на ЧЧ:ММ") from exc
+    target = now.replace(hour=moment.hour, minute=moment.minute, second=0, microsecond=0)
+    return target if target > now else target + timedelta(days=1)
+
+
+def minutes_until(clock: str, now: datetime) -> int:
+    return max(1, round((next_clock(clock, now) - now).total_seconds() / 60))
+
+
 @tool(mutating=True)
 def pause_internet(
     db: Session,
     target: Annotated[str, "группа (kid/guest/unknown) или устройство: id, имя или MAC"],
-    minutes: Annotated[int, "длительность паузы в минутах (1–1440)"],
+    minutes: Annotated[int, "длительность паузы в минутах (1–1440); 0, если задано until"] = 0,
     reason: Annotated[str, "короткая причина, попадает в журнал"] = "",
+    until: Annotated[
+        str, "до какого времени ЧЧ:ММ, например 09:00; ближайшее такое время, минуты не считай"
+    ] = "",
 ) -> str:
     """Временно выключает интернет группе или устройству («пауза до …»).
+    Если человек назвал время окончания, передай until, а не minutes.
     Снимается автоматически по истечении времени или через resume_internet."""
-    minutes = int(minutes)
+    now = datetime.now()
+    if until.strip():
+        until_at = next_clock(until, now)
+        minutes = minutes_until(until, now)
+    else:
+        minutes = int(minutes)
+        until_at = now + timedelta(minutes=minutes)
     if not 1 <= minutes <= 1440:
         raise ToolError("Длительность паузы — от 1 до 1440 минут")
-    until = datetime.now() + timedelta(minutes=minutes)
     t = target.strip()
     if t in GROUPS:
         if t == "adult":
             raise ToolError("Группу взрослых ставить на паузу нельзя")
-        db.add(Pause(target_type="group", target=t, until=until, reason=reason))
+        db.add(Pause(target_type="group", target=t, until=until_at, reason=reason))
         db.commit()
         label = GROUP_LABELS[t]
     else:
@@ -442,10 +466,42 @@ def pause_internet(
         if dev is None:
             raise ToolError(f"Не нашёл устройство «{target}» — уточните имя или id")
         _guard_self(dev)
-        db.add(Pause(target_type="device", target=str(dev.id), until=until, reason=reason))
+        db.add(Pause(target_type="device", target=str(dev.id), until=until_at, reason=reason))
         db.commit()
         label = f"{dev.name} ({dev.ip or dev.mac})"
-    return f"Пауза для {label} до {until:%H:%M} ({minutes} мин)"
+    return f"Пауза для {label} до {until_at:%H:%M} ({minutes} мин)"
+
+
+@tool(mutating=True)
+def set_bedtime(
+    db: Session,
+    who: Annotated[str, "имя ребёнка или kid — все дети"],
+    nights: Annotated[str, "school — ночи вс–чт (перед будним днём), weekend — пт–сб, all — все"],
+    start: Annotated[str, "когда выключать, ЧЧ:ММ, например 21:30"],
+    end: Annotated[str, "когда включать утром, ЧЧ:ММ, например 07:00"],
+) -> str:
+    """Постоянный отбой: каждую ночь интернет детей выключается в start и
+    включается в end. Используй, когда просят выключать интернет регулярно
+    («каждую ночь», «по будням»); разовую паузу ставит pause_internet."""
+    choice = {"school": ["school"], "weekend": ["weekend"], "all": ["school", "weekend"]}
+    if nights not in choice:
+        raise ToolError("nights: school, weekend или all")
+    key = who.strip()
+    people = list(db.scalars(select(Person).order_by(Person.name)))
+    if key.lower() in ("kid", "kids", "дети"):
+        targets = [p for p in people if p.role == "kid"]
+    else:
+        targets = [p for p in people if p.name.lower() == key.lower()]
+    if not targets:
+        raise ToolError(f"Не нашёл ребёнка «{who}». Есть: " + ", ".join(p.name for p in people))
+    try:
+        for person in targets:
+            for night in choice[nights]:
+                house_rules.set_bedtime(db, person.id, night, start, end)
+    except house_rules.RuleError as exc:
+        raise ToolError(str(exc)) from exc
+    names = ", ".join(p.name for p in targets)
+    return f"Отбой {start}–{end} ({nights}) для: {names}"
 
 
 @tool(mutating=True)

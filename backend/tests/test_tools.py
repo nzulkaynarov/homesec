@@ -217,3 +217,34 @@ def test_list_devices_online_from_router(db, dev, monkeypatch):
     rows = {r["name"]: r for r in tools.run_tool(db, "list_devices", {})}
     assert rows["Планшет"]["online"] is True
     assert rows["офлайн"]["online"] is False
+
+
+def test_pause_until_a_clock_time_does_the_arithmetic():
+    from datetime import datetime
+
+    night = datetime(2026, 11, 11, 0, 44)
+    assert tools.minutes_until("09:00", night) == 496
+    assert tools.minutes_until("00:30", night) == 1426  # already passed: tomorrow
+    with pytest.raises(tools.ToolError):
+        tools.minutes_until("9 утра", night)
+
+
+def test_pause_tool_accepts_until(db, monkeypatch):
+    monkeypatch.setattr(tools.enforcement, "reconcile", lambda s: None)
+    result = tools.run_tool(db, "pause_internet", {"target": "kid", "until": "23:59"})
+    assert "до 23:59" in result
+
+
+def test_set_bedtime_tool_makes_a_rule_for_every_child(db, monkeypatch):
+    from app.models import Rule
+
+    monkeypatch.setattr(tools.enforcement, "reconcile", lambda s: None)
+    db.query(Rule).delete()
+    db.add_all([Person(name="Аня", role="kid"), Person(name="Папа", role="adult")])
+    db.commit()
+    result = tools.run_tool(
+        db, "set_bedtime", {"who": "kid", "nights": "all", "start": "21:30", "end": "07:00"}
+    )
+    assert "Аня" in result and "Папа" not in result
+    assert db.query(Rule).count() == 2
+    assert tools.is_mutating("set_bedtime")

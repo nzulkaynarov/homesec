@@ -149,14 +149,50 @@ def set_limit(db: Session, person_id: int, category: str, minutes: int) -> str:
     return result
 
 
+def _pauses_for(db: Session, person: Person, now: datetime) -> list[Pause]:
+    """Every active pause that reaches this person: on them, on one of their
+    devices, or on their whole group. The AI and the old pause menu set group
+    and device pauses, and the rules menu used to show none of them."""
+    device_ids = {
+        str(i) for i in db.scalars(select(Device.id).where(Device.person_id == person.id))
+    }
+    group = "kid" if person.role == "kid" else None
+    return [
+        p
+        for p in db.scalars(select(Pause).where(Pause.until > now))
+        if (p.target_type == "person" and p.target == str(person.id))
+        or (p.target_type == "device" and p.target in device_ids)
+        or (p.target_type == "group" and p.target == group)
+    ]
+
+
 def paused_until(db: Session, person_id: int, now: datetime | None = None) -> datetime | None:
     now = now or datetime.now()
+    pauses = _pauses_for(db, _person(db, person_id), now)
+    return max((p.until for p in pauses), default=None)
+
+
+def kids_paused_until(db: Session, now: datetime | None = None) -> datetime | None:
+    """End of a pause set on the whole children group, if one is active."""
+    now = now or datetime.now()
     rows = db.scalars(
-        select(Pause).where(
-            Pause.target_type == "person", Pause.target == str(person_id), Pause.until > now
-        )
+        select(Pause).where(Pause.target_type == "group", Pause.target == "kid", Pause.until > now)
     )
     return max((p.until for p in rows), default=None)
+
+
+def resume_kids(db: Session) -> int:
+    """Lift every pause that keeps children offline: group, person and device ones."""
+    now = datetime.now()
+    rows: dict[int, Pause] = {}
+    for kid in db.scalars(select(Person).where(Person.role == "kid")):
+        rows.update({p.id: p for p in _pauses_for(db, kid, now)})
+    for row in rows.values():
+        db.delete(row)
+    db.commit()
+    if rows:
+        _changed(db, f"Сняты паузы детей: {len(rows)}")
+    return len(rows)
 
 
 def wake_time(db: Session, person_id: int, now: datetime | None = None) -> datetime:
@@ -186,15 +222,14 @@ def pause(db: Session, person_id: int, minutes: int | None) -> str:
 
 def resume(db: Session, person_id: int) -> str:
     person = _person(db, person_id)
-    rows = list(
-        db.scalars(
-            select(Pause).where(Pause.target_type == "person", Pause.target == str(person_id))
-        )
-    )
+    rows = [p for p in _pauses_for(db, person, datetime.now()) if p.target_type != "group"]
     for row in rows:
         db.delete(row)
     db.commit()
     removed = len(rows)
+    if kids_paused_until(db) is not None and person.role == "kid":
+        _changed(db, f"Пауза для {person.name} снята, общая пауза детей осталась")
+        return "Личная пауза снята, но действует пауза всем детям: снимите её на экране «Правила»"
     if removed:
         _changed(db, f"Пауза для {person.name} снята")
     return "▶️ Пауза снята" if removed else "Паузы не было"
