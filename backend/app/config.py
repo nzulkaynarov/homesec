@@ -30,6 +30,7 @@ class Settings(BaseSettings):
     block_unknown: bool = False
     database_path: str = "./homesec.db"
     scheduler_enabled: bool = True  # выключается для локальной разработки/тестов
+    healthcheck_url: str = ""  # Healthchecks.io ping URL; empty disables the heartbeat
 
     # ИИ-слой (Claude API или шлюз LunaGPT); пустой ключ = ИИ-фичи выключены, остальное работает
     anthropic_api_key: str = ""

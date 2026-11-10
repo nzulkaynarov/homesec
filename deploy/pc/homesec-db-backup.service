@@ -1,0 +1,9 @@
+[Unit]
+Description=HomeSec: pull a verified database snapshot from the Pi
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=oneshot
+EnvironmentFile=-%h/.config/homesec-backup.env
+ExecStart=%h/projects/homesec/deploy/pull-db-backup.sh

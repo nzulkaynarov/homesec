@@ -5,10 +5,12 @@
 import logging
 from datetime import datetime, timedelta
 
+import httpx
 from apscheduler.schedulers.background import BackgroundScheduler
 from sqlalchemy import delete
 
 from . import db
+from .config import settings
 from .models import (
     EventLog,
     Pause,
@@ -26,6 +28,7 @@ log = logging.getLogger("homesec.scheduler")
 scheduler = BackgroundScheduler()
 
 EVENT_RETENTION_DAYS = 90
+HEARTBEAT_MINUTES = 5
 
 
 def _tick() -> None:
@@ -89,6 +92,15 @@ def _cleanup() -> None:
         session.close()
 
 
+def _heartbeat() -> None:
+    """Tell the external monitor the Pi is alive, so its silence raises an alert."""
+    try:
+        httpx.get(settings.healthcheck_url, timeout=10).raise_for_status()
+    except httpx.HTTPError as exc:
+        # The URL is a secret: log only the error type.
+        log.warning("heartbeat ping failed: %s", type(exc).__name__)
+
+
 def start() -> None:
     scheduler.add_job(_tick, "interval", minutes=1, id="reconcile", coalesce=True, max_instances=1)
     scheduler.add_job(_asap_tick, "interval", seconds=3, id="reconcile_asap",
@@ -96,6 +108,9 @@ def start() -> None:
     scheduler.add_job(_quota_tick, "interval", minutes=1, id="quota",
                       coalesce=True, max_instances=1)
     scheduler.add_job(_cleanup, "cron", hour=3, minute=30, id="cleanup", coalesce=True)
+    if settings.healthcheck_url:
+        scheduler.add_job(_heartbeat, "interval", minutes=HEARTBEAT_MINUTES, id="heartbeat",
+                          coalesce=True, max_instances=1)
     scheduler.start()
     _tick()  # применить состояние сразу при старте
 

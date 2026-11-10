@@ -156,3 +156,43 @@ RouterOS 7.23 не матчит IP-префикс, find возвращает п�
 - Не менять firewall-правила из панели/кода — код управляет только списками
   `hs-*` и очередями `hs-dev-*`, правила принадлежат `.rsc`-скриптам.
 - Не пушить в `main` непроверенное — это прод-деплой в течение минуты.
+
+## Резервная копия базы и внешний контроль
+
+Ночью таймер на ПК забирает с Pi снимок базы, проверяет `PRAGMA integrity_check`
+и хранит последние 30 копий в `/data/backups/homesec`. Снимок делается через
+`VACUUM INTO`: он согласован и безопасен для живой базы в WAL
+([документация SQLite](https://www.sqlite.org/lang_vacuum.html)). Если ПК ночью
+выключен, копия снимется при следующем включении (`Persistent=true`).
+
+Установка на ПК, один раз:
+
+```bash
+ssh-copy-id znz@192.168.88.2
+mkdir -p ~/.config/systemd/user
+cp ~/projects/homesec/deploy/pc/homesec-db-backup.* ~/.config/systemd/user/
+systemctl --user daemon-reload
+systemctl --user enable --now homesec-db-backup.timer
+loginctl enable-linger "$USER"
+```
+
+Проверка и восстановление:
+
+```bash
+systemctl --user start homesec-db-backup.service
+journalctl --user -u homesec-db-backup.service -n 20
+ls -l /data/backups/homesec
+```
+
+Для восстановления остановить `homesec` и `homesec-bot`, удалить на Pi файлы
+`homesec.db-wal` и `homesec.db-shm`, заменить `homesec.db` копией и запустить
+службы снова.
+
+Внешний контроль — две проверки на [Healthchecks.io](https://healthchecks.io/docs/http_api/):
+
+| Проверка | Период / запас | Где задаётся URL |
+|---|---|---|
+| Pi жив | 5 минут / 10 минут | `HS_HEALTHCHECK_URL` в `/opt/homesec/backend/.env`, затем рестарт `homesec` |
+| Копия снята | 1 день / 12 часов | `HOMESEC_BACKUP_HC_URL` в `~/.config/homesec-backup.env` на ПК |
+
+Пустой URL отключает проверку. URL проверок — секреты, в git их не класть.
