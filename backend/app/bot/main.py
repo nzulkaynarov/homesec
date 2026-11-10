@@ -17,6 +17,7 @@ from ..ai import analyst, watchdog
 from ..config import settings
 from ..db import Base, engine
 from ..migrations import ensure_schema
+from ..services import family as family_svc
 from . import handlers, luna_watch, notify, texts
 from .health import default_monitor
 
@@ -28,9 +29,18 @@ WATCHDOG_INTERVAL = 15 * 60  # эвристики аномалий, сек
 DIGEST_HOUR = 21  # ежедневный дайджест в 21:00 локального времени
 
 
+def _parent_ids() -> set[int]:
+    s = dbmod.session()
+    try:
+        return family_svc.parent_chat_ids(s)
+    finally:
+        s.close()
+
+
 async def _broadcast(bot: Bot, chat_ids: set[int], text: str, keyboard=None) -> None:
+    """Send to the configured chats and to every parent linked in the bot since."""
     parts = texts.split_message(text)
-    for chat_id in chat_ids:
+    for chat_id in chat_ids | await asyncio.to_thread(_parent_ids):
         try:
             for part in parts[:-1]:
                 await bot.send_message(chat_id, part)

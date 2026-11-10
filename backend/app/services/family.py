@@ -89,6 +89,19 @@ QUIZ_QUESTIONS = [
 ]
 
 
+def parent_chat_ids(db: Session) -> set[int]:
+    """Chats that get alerts: the owner chats from settings plus every linked parent.
+
+    Before this, only HS_TELEGRAM_CHAT_IDS were told anything, so a second parent
+    approved in the bot never heard about new devices or a child's request."""
+    linked = db.scalars(
+        select(Person.telegram_id).where(
+            Person.telegram_id.is_not(None), Person.bot_role.in_(("owner", "admin"))
+        )
+    )
+    return set(settings.telegram_allowed_ids) | {int(t) for t in linked if t is not None}
+
+
 def get_user_role(db: Session, telegram_id: int) -> tuple[str, Person | None]:
     """Определяет роль пользователя в семейном боте.
     Приоритет:

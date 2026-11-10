@@ -346,7 +346,7 @@ def test_pause_presets_keyboard():
     assert "pz:kid:30" in callbacks
     assert "pz:kid:60" in callbacks
     assert "pz:kid:30:dinner" in callbacks
-    assert "pz:kid:480" in callbacks
+    assert "pz:kid:morning" in callbacks and "pz:resume" in callbacks
     assert "pz:guest:60" in callbacks
     assert "pz:select" in callbacks
 

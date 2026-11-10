@@ -145,6 +145,12 @@ def set_blocked(db: Session, device_id: int, blocked: bool) -> str:
     return str(tools.run_tool(db, name, {"device_id": device_id}, source="bot"))
 
 
+def set_speed(db: Session, device_id: int, limit: str) -> str:
+    _device(db, device_id)
+    args = {"device_id": device_id, "limit": limit}
+    return str(tools.run_tool(db, "set_speed_limit", args, source="bot"))
+
+
 def merge_candidates(db: Session, device_id: int, limit: int = 10) -> list[Device]:
     """Other records most likely to be the same device: same network name, then same owner."""
     device = _device(db, device_id)

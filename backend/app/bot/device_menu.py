@@ -26,6 +26,8 @@ STILL_ONLINE = (
 )
 STALE_TITLE = f"🧹 Не в сети больше {device_owners.STALE_DAYS} дней"
 MENU_TEXTS = access.ADULT_BUTTONS | {"❓ Помощь"}
+# upload/download, as RouterOS simple queues take them
+SPEED_PRESETS = ("2M/2M", "5M/5M", "10M/10M", "20M/20M")
 Card = tuple[str, InlineKeyboardMarkup]
 
 # (chat, user) -> (device, section, page, deadline): who is typing a new name for what.
@@ -129,6 +131,7 @@ def _device_view(db: Any, device_id: int) -> dict[str, Any] | None:
         "online": device_owners.is_online(device),
         "seen": device_owners.seen_text(device),
         "blocked": device.blocked_manual,
+        "speed": device.speed_limit,
     }
 
 
@@ -163,6 +166,8 @@ def _card_actions(view: dict[str, Any], device_id: int, section: str, page: int)
         actions.append(_button("🗑 Удалить", f"dmx:{here}"))
     if actions:
         rows.append(actions)
+    if view["kind"] != "infra":
+        rows.append([_button("🐢 Скорость", f"dmv:{here}")])
     return rows
 
 
@@ -178,6 +183,8 @@ async def _device(device_id: int, section: str, page: int, notice: str = "") -> 
     lines.append(f"MAC: {view['mac']}")
     if view["blocked"]:
         lines.append("⛔ Заблокировано вручную")
+    if view["speed"]:
+        lines.append(f"🐢 Скорость: {view['speed']}")
     if not view["random"]:
         vendor = await vendor_of(view["mac"])
         if vendor:
@@ -361,6 +368,36 @@ async def _block(device_id: int, on: bool, section: str, page: int) -> Card:
     return await _device(device_id, section, page, f"✅ {result}")
 
 
+async def _speed_pick(device_id: int, section: str, page: int) -> Card:
+    view = await _call(_device_view, device_id)
+    if view is None:
+        return await _section(section, page, GONE)
+    buttons = [
+        _button(
+            limit.split("/")[0].replace("M", " Мбит/с"), f"dmvs:{device_id}:{i}:{section}:{page}"
+        )
+        for i, limit in enumerate(SPEED_PRESETS)
+    ]
+    rows = [buttons[:2], buttons[2:]]
+    rows.append([_button("Без ограничения", f"dmvs:{device_id}:-1:{section}:{page}")])
+    rows.append([_button("← Назад", f"dmd:{device_id}:{section}:{page}")])
+    now = view["speed"] or "без ограничения"
+    return f"Скорость «{view['name']}» сейчас: {now}. Какую поставить?", InlineKeyboardMarkup(
+        inline_keyboard=rows
+    )
+
+
+async def _speed(device_id: int, preset: int, section: str, page: int) -> Card:
+    limit = SPEED_PRESETS[preset] if 0 <= preset < len(SPEED_PRESETS) else ""
+    try:
+        result = await _call(device_owners.set_speed, device_id, limit)
+    except LookupError:
+        return await _section(section, page, GONE)
+    except ToolError as exc:
+        return await _device(device_id, section, page, f"⚠️ {exc}")
+    return await _device(device_id, section, page, f"✅ {result}")
+
+
 def waiting_for_name(message: Message) -> bool:
     """True when this sender was asked for a device name and is now typing it."""
     if message.from_user is None:
@@ -487,6 +524,16 @@ async def cb_delete(cb: CallbackQuery) -> None:
     await _show(cb, await _delete(int(device_id), section, int(page)))
 
 
+async def cb_speed_pick(cb: CallbackQuery) -> None:
+    device_id, section, page = _parts(cb)
+    await _show(cb, await _speed_pick(int(device_id), section, int(page)))
+
+
+async def cb_speed(cb: CallbackQuery) -> None:
+    device_id, preset, section, page = _parts(cb)
+    await _show(cb, await _speed(int(device_id), int(preset), section, int(page)))
+
+
 async def cb_purge_confirm(cb: CallbackQuery) -> None:
     await _show(cb, await _purge_confirm())
 
@@ -514,5 +561,7 @@ def register(router: Router) -> None:
     router.callback_query.register(cb_block, F.data.startswith("dmb:"))
     router.callback_query.register(cb_delete_confirm, F.data.startswith("dmx:"))
     router.callback_query.register(cb_delete, F.data.startswith("dmxy:"))
+    router.callback_query.register(cb_speed_pick, F.data.startswith("dmv:"))
+    router.callback_query.register(cb_speed, F.data.startswith("dmvs:"))
     router.callback_query.register(cb_purge_confirm, F.data == "dmz")
     router.callback_query.register(cb_purge, F.data == "dmzy")

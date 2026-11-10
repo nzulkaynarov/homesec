@@ -30,9 +30,11 @@ from ..ai import orchestrator, tools
 from ..config import settings
 from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get, log_event
 from ..services import family as family_svc
-from . import device_menu, texts, triage
+from ..services import house_rules
+from . import device_menu, rules_menu, texts, triage
 from .access import AccessMiddleware
 from .device_menu import BTN_DEVICES
+from .rules_menu import BTN_RULES
 
 log = logging.getLogger("homesec.bot")
 router = Router()
@@ -101,8 +103,8 @@ def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
             keyboard=[
                 [KeyboardButton(text="🏠 Кто дома"), KeyboardButton(text="⏳ Квоты")],
                 [KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="📺 Общие устройства")],
-                [KeyboardButton(text=BTN_DEVICES), KeyboardButton(text="📝 Заметки")],
-                [KeyboardButton(text="❓ Помощь")],
+                [KeyboardButton(text=BTN_DEVICES), KeyboardButton(text=BTN_RULES)],
+                [KeyboardButton(text="📝 Заметки"), KeyboardButton(text="❓ Помощь")],
             ],
             resize_keyboard=True,
         )
@@ -134,9 +136,18 @@ def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
     return None
 
 
-def access_request_keyboard(requester_id: int) -> InlineKeyboardMarkup:
-    """Кнопки родителю при онбординге нового участника семьи."""
-    return InlineKeyboardMarkup(inline_keyboard=[
+def access_request_keyboard(
+    requester_id: int, unlinked: list[tuple[int, str]] | None = None
+) -> InlineKeyboardMarkup:
+    """Кнопки родителю при онбординге нового участника семьи.
+
+    People already in the list but without Telegram come first: picking one links
+    the account to that person, so their devices and rules apply to them."""
+    linked = [
+        [InlineKeyboardButton(text=f"Это {name}", callback_data=f"acc:{requester_id}:link:{pid}")]
+        for pid, name in (unlinked or [])
+    ]
+    return InlineKeyboardMarkup(inline_keyboard=linked + [
         [
             InlineKeyboardButton(text="🛡 Родитель", callback_data=f"acc:{requester_id}:admin"),
             InlineKeyboardButton(text="🎒 Ребёнок", callback_data=f"acc:{requester_id}:kid"),
@@ -189,10 +200,45 @@ def bonus_request_direct_keyboard(person_id: int) -> InlineKeyboardMarkup:
 
 # ---------- синхронные вспомогательные функции ----------
 
+def _parent_ids_sync() -> set[int]:
+    s = dbmod.session()
+    try:
+        return family_svc.parent_chat_ids(s)
+    finally:
+        s.close()
+
+
 def _get_user_role_sync(telegram_id: int) -> tuple[str, Person | None]:
     s = dbmod.session()
     try:
         return family_svc.get_user_role(s, telegram_id)
+    finally:
+        s.close()
+
+
+def _unlinked_people_sync() -> list[tuple[int, str]]:
+    s = dbmod.session()
+    try:
+        query = select(Person).where(Person.telegram_id.is_(None)).order_by(Person.name)
+        return [(p.id, p.name) for p in s.scalars(query)]
+    finally:
+        s.close()
+
+
+def _link_telegram_sync(requester_id: int, person_id: int) -> tuple[str, str]:
+    """Attach a Telegram account to a person already in the list; returns (message, role)."""
+    s = dbmod.session()
+    try:
+        person = s.get(Person, person_id)
+        if person is None:
+            return "Этого человека уже нет в списке.", "deny"
+        if s.scalar(select(Person).where(Person.telegram_id == requester_id)) is not None:
+            return "Этот Telegram уже привязан к другому человеку.", "deny"
+        role = "kid" if person.role == "kid" else "admin"
+        person.telegram_id, person.bot_role = requester_id, role
+        s.commit()
+        label = family_svc.ROLE_LABELS.get(role, role)
+        return f"Telegram привязан к «{person.name}», роль: {label}.", role
     finally:
         s.close()
 
@@ -423,13 +469,14 @@ async def _notify_owner_about_access_request(message: Message) -> None:
         f"({texts.escape_markdown(uname)}, ID: `{user.id}`)\n\n"
         f"Выберите роль для нового участника семьи:"
     )
+    unlinked = await asyncio.to_thread(_unlinked_people_sync)
     for owner_id in settings.telegram_allowed_ids:
         try:
             await message.bot.send_message(
                 owner_id,
                 text,
                 parse_mode="Markdown",
-                reply_markup=access_request_keyboard(user.id),
+                reply_markup=access_request_keyboard(user.id, unlinked),
             )
         except Exception:
             log.exception("не удалось отправить запрос доступа владельцу %s", owner_id)
@@ -455,7 +502,7 @@ async def _forward_time_request_to_parents(
         f"Сколько добавить?"
     )
     kb = bonus_request_direct_keyboard(person_id)
-    for parent_id in settings.telegram_allowed_ids:
+    for parent_id in await asyncio.to_thread(_parent_ids_sync):
         try:
             await message.bot.send_message(
                 parent_id, text, parse_mode="Markdown", reply_markup=kb
@@ -481,7 +528,7 @@ async def _alert_parents_about_kid(message: Message, person: Person | None, text
     await asyncio.to_thread(_log_kid_safety_sync, name)
     if not message.bot:
         return
-    for parent_id in settings.telegram_allowed_ids:
+    for parent_id in await asyncio.to_thread(_parent_ids_sync):
         try:
             await message.bot.send_message(
                 parent_id, f"🚨 {name} написал(а) ассистенту, стоит поговорить:\n\n{text[:1000]}"
@@ -519,6 +566,7 @@ router.message.outer_middleware(_access)
 router.callback_query.outer_middleware(_access)
 triage.register(router)
 device_menu.register(router)
+rules_menu.register(router)
 
 
 AI_RATE_LIMIT = 8  # requests per window for one person
@@ -928,7 +976,7 @@ async def handle_task_photo(message: Message) -> None:
     task = (message.caption or "без описания")[:500]
     caption = f"✅ {person.name} сделал(а) дело: {task}\n\nСколько минут начислить?"
     delivered = False
-    for parent_id in settings.telegram_allowed_ids:
+    for parent_id in await asyncio.to_thread(_parent_ids_sync):
         try:
             await message.bot.send_photo(
                 parent_id,
@@ -1028,6 +1076,14 @@ async def cmd_unblock(message: Message, command: CommandObject) -> None:
     await _device_command(message, command, "unblock_device")
 
 
+def _resume_all_sync() -> int:
+    s = dbmod.session()
+    try:
+        return house_rules.resume_all(s)
+    finally:
+        s.close()
+
+
 def pause_presets_keyboard() -> InlineKeyboardMarkup:
     """Быстрые пресеты для /pause без аргументов."""
     return InlineKeyboardMarkup(inline_keyboard=[
@@ -1037,13 +1093,14 @@ def pause_presets_keyboard() -> InlineKeyboardMarkup:
         ],
         [
             InlineKeyboardButton(text="🍽 Ужин (30м)", callback_data="pz:kid:30:dinner"),
-            InlineKeyboardButton(text="🌙 До утра (8ч)", callback_data="pz:kid:480"),
+            InlineKeyboardButton(text="🌙 До утра", callback_data="pz:kid:morning"),
         ],
         [
             InlineKeyboardButton(text="👥 Гости 1ч", callback_data="pz:guest:60"),
             InlineKeyboardButton(text="🔍 Выбрать устройство", callback_data="pz:select"),
         ],
         [
+            InlineKeyboardButton(text="▶️ Снять все паузы", callback_data="pz:resume"),
             InlineKeyboardButton(text="✖ Отмена", callback_data="pick:cancel"),
         ],
     ])
@@ -1065,7 +1122,18 @@ async def cb_pause_preset(cb: CallbackQuery) -> None:
                 reply_markup=device_pick_keyboard(candidates, "pause_internet", extra=":30"),
             )
         return
-    target, minutes = action, int(parts[2])
+    if action == "resume":
+        removed = await asyncio.to_thread(_resume_all_sync)
+        await cb.answer()
+        if isinstance(cb.message, Message):
+            text = f"▶️ Снято пауз: {removed}" if removed else "Активных пауз нет."
+            await cb.message.edit_text(text, reply_markup=None)
+        return
+    target = action
+    if parts[2] == "morning":  # until 07:00, not a fixed 8 hours from now
+        minutes = max(1, round(family_svc.hours_until_morning() * 60))
+    else:
+        minutes = int(parts[2])
     reason = "ужин" if len(parts) > 3 and parts[3] == "dinner" else ""
     args: dict[str, Any] = {"target": target, "minutes": minutes}
     if reason:
@@ -1457,9 +1525,12 @@ async def cb_access_request(cb: CallbackQuery) -> None:
                 requester_name = line.replace("Пользователь:", "").split("(")[0].strip()
                 break
 
-    msg = await asyncio.to_thread(
-        _assign_telegram_access_sync, requester_id, role, requester_name
-    )
+    if role == "link" and len(parts) > 3:
+        msg, role = await asyncio.to_thread(_link_telegram_sync, requester_id, int(parts[3]))
+    else:
+        msg = await asyncio.to_thread(
+            _assign_telegram_access_sync, requester_id, role, requester_name
+        )
     await cb.answer()
     if isinstance(cb.message, Message):
         await cb.message.edit_text(f"{cb.message.text}\n\n➡ {msg}", reply_markup=None)
@@ -1539,7 +1610,7 @@ async def cb_quiz(cb: CallbackQuery) -> None:
             f"Вопрос: _{res['question']}_\n\n"
             f"Ребёнок дал верный ответ и получил бонус *+15 минут* интернета."
         )
-        for parent_id in settings.telegram_allowed_ids:
+        for parent_id in await asyncio.to_thread(_parent_ids_sync):
             try:
                 await cb.bot.send_message(parent_id, parent_text, parse_mode="Markdown")
             except Exception:
