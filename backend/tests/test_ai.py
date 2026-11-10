@@ -238,6 +238,57 @@ def test_digest_fallback_without_key(db, kid_device, monkeypatch):
     assert "500" in text and "Новое устройство" in text
 
 
+def _digest_with_model(db, monkeypatch, reply=None, local="luna-local"):
+    """Run the digest with a fake model and return the text and the models that were asked."""
+    monkeypatch.setattr(analyst.adguard, "get_stats",
+                        lambda: {"num_dns_queries": 500, "num_blocked_filtering": 42})
+    monkeypatch.setattr(analyst.adguard, "get_query_log", lambda limit=1000: [])
+    monkeypatch.setattr(analyst.settings, "ai_model_local", local)
+    monkeypatch.setattr(client, "is_configured", lambda: True)
+    asked = []
+
+    def fake_ask(db_, model, **kw):
+        asked.append(model)
+        if reply is None:
+            raise client.AiError("the PC is off")
+        return _message([SimpleNamespace(type="text", text=reply)])
+
+    monkeypatch.setattr(client, "ask", fake_ask)
+    return analyst.daily_digest(db), asked
+
+
+def test_digest_uses_only_the_local_model(db, monkeypatch):
+    text, asked = _digest_with_model(db, monkeypatch, "DNS: 500 запросов, 42 заблокировано")
+    assert asked == ["luna-local"]
+    assert text == "DNS: 500 запросов, 42 заблокировано"
+
+
+def test_digest_falls_back_to_the_plain_summary_not_a_paid_model(db, monkeypatch):
+    text, asked = _digest_with_model(db, monkeypatch)
+    assert asked == ["luna-local"]
+    assert "DNS: 500 запросов" in text
+
+
+def test_digest_without_a_local_model_is_the_plain_summary(db, monkeypatch):
+    text, asked = _digest_with_model(db, monkeypatch, "текст", local="")
+    assert asked == []
+    assert "DNS: 500 запросов" in text
+
+
+def test_digest_with_an_invented_number_is_discarded(db, monkeypatch):
+    text, _ = _digest_with_model(db, monkeypatch, "DNS: 777 запросов")
+    assert "777" not in text
+    assert "DNS: 500 запросов" in text
+
+
+def test_digest_cannot_hide_a_child_safety_alert(db, monkeypatch):
+    from app.models import log_event
+
+    log_event(db, "kid_safety", "тревожное сообщение")
+    text, _ = _digest_with_model(db, monkeypatch, "День прошёл спокойно")
+    assert text.startswith("🚨 Обращений ребёнка, требующих внимания: 1")
+
+
 def test_digest_data_collects_kid_domains(db, kid_device, monkeypatch):
     monkeypatch.setattr(analyst.adguard, "get_stats", lambda: {})
     monkeypatch.setattr(
