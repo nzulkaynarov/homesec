@@ -50,7 +50,9 @@
   :error "Не нашёл домашнюю DHCP-сеть по comment=defconf. Смотри '/ip dhcp-server network print' — контроль НЕ включён."
 }
 :foreach n in=$lanNets do={
-  /ip dhcp-server network set $n dns-server="$piAddr,$routerAddr"
+  # Only the Pi since 2026-11-10: a second resolver made clients stick to the router,
+  # hiding them from per-child rules. Failover is dhcp-dns-follow.rsc now.
+  /ip dhcp-server network set $n dns-server=$piAddr
   # Самопроверка: убеждаемся, что запись действительно легла.
   :local ok false
   :foreach d in=[/ip dhcp-server network get $n dns-server] do={
