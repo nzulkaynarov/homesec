@@ -18,8 +18,7 @@ from ..models import (
     active_pauses,
     log_event,
 )
-from ..services import mikrotik, quota
-from ..services.device_links import purge_device_rows
+from ..services import device_owners, mikrotik, quota
 from ..services.enforcement import reconcile
 from ..services.quota import QUOTA_CATEGORIES
 from ..templates_env import templates
@@ -148,11 +147,10 @@ async def unblock_device(device_id: int, tasks: BackgroundTasks, db: Session = D
 
 @router.post("/devices/{device_id}/delete")
 async def delete_device(device_id: int, tasks: BackgroundTasks, db: Session = Depends(get_db)):
-    dev = db.get(Device, device_id)
-    if dev:
-        purge_device_rows(db, dev.id)
-        db.delete(dev)
-        db.commit()
+    try:
+        device_owners.delete(db, device_id)
+    except LookupError:
+        pass  # already gone, e.g. a second click
     tasks.add_task(_reconcile_bg)
     return RedirectResponse("/devices", status_code=302)
 

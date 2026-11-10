@@ -170,6 +170,17 @@ LIVE_ARP_STATUSES = {"reachable", "delay", "probe"}
 DEAD_ARP_STATUSES = {"failed", "incomplete"}
 
 
+def get_answering_macs(api) -> set[str]:
+    """Hardware addresses that answered the router just now, upper case."""
+    return {
+        row["mac-address"].upper()
+        for row in api.path("ip", "arp")
+        if row.get("mac-address")
+        and not row.get("invalid", False)
+        and row.get("status") in LIVE_ARP_STATUSES
+    }
+
+
 def get_online_ips(api) -> set[str]:
     """Addresses present right now; a table row alone proves nothing, RouterOS keeps failed ones.
 

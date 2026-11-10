@@ -147,6 +147,7 @@ async def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
     )
+    logging.getLogger("httpx").setLevel(logging.WARNING)  # one line per request otherwise
     if not settings.telegram_bot_token:
         log.info("HS_TELEGRAM_BOT_TOKEN не задан — бот выключен, выходим")
         return

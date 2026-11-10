@@ -1,6 +1,7 @@
 """Moving any device to another owner or kind from the Telegram menu."""
 
 import asyncio
+from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
@@ -42,10 +43,22 @@ def _device(db, octet=10, name="iPhone", **kwargs) -> Device:
     return device
 
 
+CHAT, USER = 100, 7
+
+
 def _press(data: str) -> MagicMock:
     cb = MagicMock(data=data, answer=AsyncMock())
+    cb.from_user.id = USER
     cb.message = MagicMock(spec=Message, edit_text=AsyncMock())
+    cb.message.chat = MagicMock(id=CHAT)
     return cb
+
+
+def _typed(text: str) -> MagicMock:
+    message = MagicMock(spec=Message, text=text, answer=AsyncMock())
+    message.chat = MagicMock(id=CHAT)
+    message.from_user = MagicMock(id=USER)
+    return message
 
 
 def _run(handler, data: str) -> tuple[str, list[str]]:
@@ -55,6 +68,12 @@ def _run(handler, data: str) -> tuple[str, list[str]]:
     return call.args[0], [
         b.callback_data for row in call.kwargs["reply_markup"].inline_keyboard for b in row
     ]
+
+
+def _gone(db, device: Device) -> bool:
+    device_id = device.__dict__.get("id") or device.id  # read before expiry reloads it
+    db.expire_all()
+    return db.query(Device).filter_by(id=device_id).count() == 0
 
 
 def _fresh(db, device: Device) -> Device:
@@ -198,3 +217,100 @@ def test_overview_stays_within_the_telegram_limit(db):
         _device(db, octet, name="Очень длинное имя устройства " * 2)
     text, _ = _run(device_menu.cb_overview, "dm")
     assert len(text) <= device_menu.TEXT_LIMIT
+
+
+def _ago(**kwargs) -> datetime:
+    return datetime.now() - timedelta(**kwargs)
+
+
+def test_card_shows_when_last_seen_and_new_actions(db):
+    device = _device(db, 10, last_seen=_ago(days=3))
+    text, actions = _run(device_menu.cb_device, f"dmd:{device.id}:none:0")
+    assert "В сети: 3 дн назад" in text
+    for prefix in ("dmr:", "dmm:", "dmx:", "dmb:"):
+        assert any(a.startswith(prefix) for a in actions), prefix
+
+
+def test_online_device_cannot_be_deleted(db):
+    device = _device(db, 10, last_seen=_ago(minutes=1))
+    text, actions = _run(device_menu.cb_device, f"dmd:{device.id}:none:0")
+    assert "сейчас в сети" in text and not any(a.startswith("dmx:") for a in actions)
+    text, _ = _run(device_menu.cb_delete, f"dmxy:{device.id}:none:0")
+    assert device_menu.STILL_ONLINE in text and not _gone(db, device)
+
+
+def test_delete_asks_then_removes(db):
+    device = _device(db, 10, last_seen=_ago(days=40))
+    text, actions = _run(device_menu.cb_delete_confirm, f"dmx:{device.id}:none:0")
+    assert "Удалить" in text and f"dmxy:{device.id}:none:0" in actions
+    text, _ = _run(device_menu.cb_delete, f"dmxy:{device.id}:none:0")
+    assert "удалено" in text and _gone(db, device)
+    assert db.get(KVState, "reconcile_asap").value == "1"
+
+
+def test_rename_takes_the_next_typed_message(db):
+    device = _device(db, 10, name="iPhone")
+    text, _ = _run(device_menu.cb_rename, f"dmr:{device.id}:none:0")
+    assert "Как назвать" in text
+    message = _typed("Телефон бабушки")
+    assert device_menu.waiting_for_name(message)
+    asyncio.run(device_menu.on_name(message))
+    assert _fresh(db, device).name == "Телефон бабушки"
+    assert "✅" in message.answer.await_args.args[0]
+    assert not device_menu.waiting_for_name(_typed("ещё текст"))
+
+
+def test_menu_button_cancels_rename(db):
+    device = _device(db, 10)
+    _run(device_menu.cb_rename, f"dmr:{device.id}:none:0")
+    assert not device_menu.waiting_for_name(_typed(device_menu.BTN_DEVICES))
+    assert not device_menu.waiting_for_name(_typed("Новое имя"))
+
+
+def test_merge_offers_same_name_first_and_folds(db):
+    person = _person(db)
+    keep = _device(db, 10, name="Watch", hostname="Watch", person_id=person.id)
+    _device(db, 11, name="Sony", hostname="Bravia")
+    fold = _device(db, 12, name="Watch", hostname="Watch", person_id=person.id)
+    _, actions = _run(device_menu.cb_merge_pick, f"dmm:{keep.id}:none:0")
+    picks = [a for a in actions if a.startswith("dmg:")]
+    assert picks[0] == f"dmg:{keep.id}:{fold.id}:none:0"
+    text, actions = _run(device_menu.cb_merge_confirm, f"dmg:{keep.id}:{fold.id}:none:0")
+    assert "Отменить нельзя" in text
+    text, _ = _run(device_menu.cb_merge, f"dmgy:{keep.id}:{fold.id}:none:0")
+    assert "Объединено" in text
+    assert _gone(db, fold) and not _gone(db, keep)
+
+
+def test_block_and_unblock_from_the_card(db):
+    device = _device(db, 10)
+    text, actions = _run(device_menu.cb_block, f"dmb:{device.id}:1:none:0")
+    assert _fresh(db, device).blocked_manual and f"dmb:{device.id}:0:none:0" in actions
+    _run(device_menu.cb_block, f"dmb:{device.id}:0:none:0")
+    assert not _fresh(db, device).blocked_manual
+
+
+def test_stale_screen_purges_only_ownerless_unblocked(db):
+    person = _person(db)
+    gone = _device(db, 10, name="Старый", last_seen=_ago(days=40))
+    mine = _device(db, 11, name="Мой", person_id=person.id, last_seen=_ago(days=40))
+    held = _device(db, 12, name="Блок", blocked_manual=True, last_seen=_ago(days=40))
+    fresh = _device(db, 13, name="Свежий", last_seen=_ago(days=2))
+    text, actions = _run(device_menu.cb_overview, "dm")
+    assert "dms:stale:0" in actions
+    text, actions = _run(device_menu.cb_section, "dms:stale:0")
+    assert "больше 30 дней: 3" in text and "dmz" in actions
+    text, _ = _run(device_menu.cb_purge_confirm, "dmz")
+    assert "Старый" in text and "Мой" not in text and "Блок" not in text
+    _run(device_menu.cb_purge, "dmzy")
+    assert _gone(db, gone)
+    assert all(not _gone(db, d) for d in (mine, held, fresh))
+
+
+def test_never_seen_old_record_counts_as_stale(db):
+    device = _device(db, 10, first_seen=_ago(days=90))
+    assert device_owners.is_stale(device) and device in device_owners.stale(db)
+
+
+def test_new_callback_data_fits_telegram_limit():
+    assert len(f"dmgy:{10**9}:{10**9}:p{10**9}:999".encode()) <= 64

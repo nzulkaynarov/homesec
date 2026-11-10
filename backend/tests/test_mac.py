@@ -207,7 +207,11 @@ def test_migration_backfills_device_macs(tmp_path):
         # схема старой версии: devices без hostname, device_macs уже создана
         # create_all'ом при деплое
         c.execute(text("CREATE TABLE devices (id INTEGER PRIMARY KEY, "
-                       "mac VARCHAR(17), ip VARCHAR(15))"))
+                       "mac VARCHAR(17), ip VARCHAR(15), person_id INTEGER)"))
+        c.execute(text("CREATE TABLE quota_usage (id INTEGER PRIMARY KEY, device_id INTEGER, "
+                       "date VARCHAR(10), category VARCHAR(16), minutes INTEGER)"))
+        c.execute(text("INSERT INTO quota_usage (device_id, date, category, minutes) VALUES "
+                       "(1, '2026-11-01', 'internet', 5), (1, '2026-11-08', 'internet', 3)"))
         c.execute(text("CREATE TABLE device_macs (id INTEGER PRIMARY KEY, "
                        "device_id INTEGER, mac VARCHAR(17))"))
         c.execute(text("INSERT INTO devices (mac, ip) VALUES ('AA:BB:CC:DD:EE:FF', '')"))
@@ -217,4 +221,116 @@ def test_migration_backfills_device_macs(tmp_path):
         assert rows == [(1, "AA:BB:CC:DD:EE:FF")]
         c.execute(text("SELECT hostname FROM devices"))  # колонка появилась
         c.execute(text("SELECT tool FROM pending_actions"))  # таблица из миграции №2
+        seen = c.execute(text("SELECT last_seen FROM devices")).scalar()
+        assert seen == "2026-11-08 12:00:00.000000"  # migration 6 backfill
     assert run_migrations(eng, MIGRATIONS) == 0  # повторно — ничего
+
+
+def _private(db, mac, ip, hostname, person=None, **kwargs):
+    dev = Device(
+        mac=mac,
+        ip=ip,
+        name=hostname,
+        hostname=hostname,
+        person_id=person.id if person else None,
+        **kwargs,
+    )
+    db.add(dev)
+    db.commit()
+    db.add(DeviceMac(device_id=dev.id, mac=mac))
+    db.commit()
+    return dev
+
+
+def test_rotated_private_address_folds_into_its_owner(db, monkeypatch):
+    mom = Person(name="Мама", role="adult")
+    db.add(mom)
+    db.commit()
+    watch = _private(db, "16:89:32:95:B6:1E", "192.168.88.38", "Watch", mom)
+    monkeypatch.setattr(
+        enforcement.mikrotik,
+        "get_leases",
+        lambda api: _leases(("BA:B8:F9:D1:E1:82", "192.168.88.41", "Watch")),
+    )
+    devices = enforcement.discover_devices(db, api=None, answering={"BA:B8:F9:D1:E1:82"})
+    assert len(devices) == 1 and db.query(Device).count() == 1
+    assert watch.ip == "192.168.88.41"
+    assert {m.mac for m in db.query(DeviceMac)} == {"16:89:32:95:B6:1E", "BA:B8:F9:D1:E1:82"}
+    kinds = [e.kind for e in db.query(EventLog)]
+    assert "device_merged" in kinds and "device_new" not in kinds
+
+
+def test_shared_name_between_people_is_not_folded(db, monkeypatch):
+    mom, son = Person(name="Мама", role="adult"), Person(name="Сын", role="kid")
+    db.add_all([mom, son])
+    db.commit()
+    _private(db, "92:F2:05:D5:F1:84", "192.168.88.54", "iPhone", mom)
+    _private(db, "2E:F6:F1:2B:07:93", "192.168.88.44", "iPhone", son)
+    monkeypatch.setattr(
+        enforcement.mikrotik,
+        "get_leases",
+        lambda api: _leases(("56:6F:23:87:B0:71", "192.168.88.48", "iPhone")),
+    )
+    devices = enforcement.discover_devices(db, api=None, answering=set())
+    new = next(d for d in devices if d.mac == "56:6F:23:87:B0:71")
+    assert new.person_id is None  # a guest's iPhone must not get anyone's rights
+
+
+def test_answering_twin_is_a_second_device(db, monkeypatch):
+    mom = Person(name="Мама", role="adult")
+    db.add(mom)
+    db.commit()
+    _private(db, "16:89:32:95:B6:1E", "192.168.88.38", "Watch", mom)
+    monkeypatch.setattr(
+        enforcement.mikrotik,
+        "get_leases",
+        lambda api: _leases(("BA:B8:F9:D1:E1:82", "192.168.88.41", "Watch")),
+    )
+    devices = enforcement.discover_devices(db, api=None, answering={"16:89:32:95:B6:1E"})
+    assert len(devices) == 2
+
+
+def test_mark_seen_stamps_online_devices_sparingly(db):
+    from datetime import datetime, timedelta
+
+    on = Device(mac="00:11:22:33:44:01", ip="192.168.88.10", name="on")
+    off = Device(mac="00:11:22:33:44:02", ip="192.168.88.11", name="off")
+    db.add_all([on, off])
+    db.commit()
+    now = datetime(2026, 11, 10, 12, 0)
+    enforcement.mark_seen(db, [on, off], {"192.168.88.10"}, now)
+    assert on.last_seen == now and off.last_seen is None
+    enforcement.mark_seen(db, [on], {"192.168.88.10"}, now + timedelta(minutes=2))
+    assert on.last_seen == now  # within SEEN_STEP: no write
+    later = now + enforcement.SEEN_STEP
+    enforcement.mark_seen(db, [on], {"192.168.88.10"}, later)
+    assert on.last_seen == later
+
+
+def test_migration_drops_pseudo_people(tmp_path):
+    eng = create_engine(f"sqlite:///{tmp_path / 'people.db'}")
+    Base.metadata.create_all(eng)
+    with eng.begin() as c:
+        c.execute(
+            text(
+                "INSERT INTO people (id, name, role, bot_role) VALUES "
+                "(1, 'Нурбек', 'adult', 'owner'), (9, 'Известные', 'guest', 'guest'), "
+                "(10, 'Неизвестные', 'guest', 'guest')"
+            )
+        )
+        c.execute(
+            text(
+                "INSERT INTO devices (mac, ip, name, hostname, kind, person_id, "
+                "blocked_manual, speed_limit, first_seen) VALUES "
+                "('58:6C:25:F9:7E:FA', '', 'Nurbek', '', 'personal', 9, 0, '', "
+                "'2026-08-08 00:00:00'), "
+                "('92:F2:05:D5:F1:84', '', 'iPhone', '', 'personal', 1, 0, '', "
+                "'2026-07-13 00:00:00')"
+            )
+        )
+        c.execute(text("PRAGMA user_version = 6"))
+    run_migrations(eng, MIGRATIONS)
+    with eng.connect() as c:
+        assert c.execute(text("SELECT name FROM people")).scalars().all() == ["Нурбек"]
+        owners = dict(c.execute(text("SELECT name, person_id FROM devices")).fetchall())
+        assert owners == {"Nurbek": None, "iPhone": 1}

@@ -16,6 +16,11 @@ from .routers import auth_routes, dashboard, devices, luna_api, people, portal, 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s")
 
+# The scheduler logs every 3-second job run and httpx every request at INFO. That filled
+# the 64 MB journal in about a day, hiding why the Pi went down and wearing the SD card.
+for _noisy in ("apscheduler", "httpx"):
+    logging.getLogger(_noisy).setLevel(logging.WARNING)
+
 
 def _seed_policies() -> None:
     db = session()

@@ -33,7 +33,6 @@ from ..services import family as family_svc
 from . import device_menu, texts, triage
 from .access import AccessMiddleware
 from .device_menu import BTN_DEVICES
-from .triage import BTN_TRIAGE
 
 log = logging.getLogger("homesec.bot")
 router = Router()
@@ -102,8 +101,8 @@ def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
             keyboard=[
                 [KeyboardButton(text="🏠 Кто дома"), KeyboardButton(text="⏳ Квоты")],
                 [KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="📺 Общие устройства")],
-                [KeyboardButton(text=BTN_TRIAGE), KeyboardButton(text=BTN_DEVICES)],
-                [KeyboardButton(text="📝 Заметки"), KeyboardButton(text="❓ Помощь")],
+                [KeyboardButton(text=BTN_DEVICES), KeyboardButton(text="📝 Заметки")],
+                [KeyboardButton(text="❓ Помощь")],
             ],
             resize_keyboard=True,
         )
@@ -669,8 +668,7 @@ async def cmd_status(message: Message) -> None:
 
 @router.message(Command("devices"))
 async def cmd_devices(message: Message) -> None:
-    rows = await asyncio.to_thread(run_tool_sync, "list_devices", {})
-    await message.answer(texts.format_devices(rows))
+    await device_menu.btn_devices(message)
 
 
 @router.message(Command("who"))
@@ -1203,76 +1201,6 @@ async def cmd_quota(message: Message) -> None:
     items = await asyncio.to_thread(_collect_quota_sync)
     kb = quota_buttons_keyboard(items)
     await message.answer(texts.format_quota(items), reply_markup=kb)
-
-
-def _find_merge_candidates_sync() -> list[tuple[dict, dict, str]]:
-    """Находит пары (дубль, оригинал) устройств-кандидатов на объединение.
-    Возвращает: [(dup_dict, target_dict, причина)]."""
-    s = dbmod.session()
-    try:
-        devices = list(s.scalars(select(Device).order_by(Device.id)))
-        candidates: list[tuple[dict, dict, str]] = []
-        seen_pairs: set[tuple[int, int]] = set()
-
-        for d1 in devices:
-            for d2 in devices:
-                if d1.id >= d2.id:
-                    continue
-                reason = ""
-                h1 = (d1.hostname or "").strip().lower()
-                h2 = (d2.hostname or "").strip().lower()
-                n1 = (d1.name or "").strip().lower()
-                n2 = (d2.name or "").strip().lower()
-                if h1 and h2 and h1 == h2:
-                    reason = f"совпадает hostname «{d1.hostname}»"
-                elif n1 and n2 and n1 == n2:
-                    reason = f"совпадает имя «{d1.name}»"
-                if reason:
-                    # Решаем, кто вероятнее дубль: без владельца или со случайным MAC
-                    if d1.person_id is None and d2.person_id is not None:
-                        dup, tgt = d1, d2
-                    elif d2.person_id is None and d1.person_id is not None:
-                        dup, tgt = d2, d1
-                    elif d1.mac_is_random and not d2.mac_is_random:
-                        dup, tgt = d1, d2
-                    elif d2.mac_is_random and not d1.mac_is_random:
-                        dup, tgt = d2, d1
-                    else:
-                        dup, tgt = (d2, d1) if d2.id > d1.id else (d1, d2)
-                    pair = (dup.id, tgt.id)
-                    if pair not in seen_pairs:
-                        seen_pairs.add(pair)
-                        candidates.append((
-                            {"id": dup.id, "name": dup.name, "mac": dup.mac, "ip": dup.ip},
-                            {"id": tgt.id, "name": tgt.name, "mac": tgt.mac, "ip": tgt.ip},
-                            reason,
-                        ))
-        return candidates
-    finally:
-        s.close()
-
-
-@router.message(Command("merge"))
-async def cmd_merge(message: Message) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
-    if role == "kid":
-        await message.answer("Эта функция доступна только родителям 🛡")
-        return
-    candidates = await asyncio.to_thread(_find_merge_candidates_sync)
-    if not candidates:
-        await message.answer(
-            "Подозрительных дублей не найдено: у всех устройств уникальные имена и hostnames."
-        )
-        return
-    await message.answer(f"Найдено подозрительных дублей: {len(candidates)}")
-    for dup, tgt, reason in candidates:
-        text = (
-            f"🔁 Кандидат на объединение ({reason}):\n"
-            f"Дубль: #{dup['id']} {dup['name']} ({dup['mac']}, {dup['ip'] or '—'})\n"
-            f"Оригинал: #{tgt['id']} {tgt['name']} ({tgt['mac']}, {tgt['ip'] or '—'})"
-        )
-        await message.answer(text, reply_markup=merge_keyboard(dup["id"], tgt["id"]))
 
 
 def _collect_usage_sync() -> tuple[dict, int, int | None, str]:

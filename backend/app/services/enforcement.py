@@ -155,7 +155,69 @@ def _release_stale_ip(db: Session, devices: list[Device], owner: Device, ip: str
                       f"у «{other.name}» ({other.mac}) адрес сброшен.")
 
 
-def discover_devices(db: Session, api) -> list[Device]:
+SEEN_STEP = timedelta(minutes=5)  # coarse enough to spare the SD card a write every minute
+
+
+def mark_seen(
+    db: Session, devices: list[Device], online: set[str], now: datetime | None = None
+) -> None:
+    """Remember when each device was last online, for the bot's 'seen N days ago'."""
+    now = now or datetime.now()
+    changed = False
+    for dev in devices:
+        if (
+            dev.ip
+            and dev.ip in online
+            and (dev.last_seen is None or now - dev.last_seen >= SEEN_STEP)
+        ):
+            dev.last_seen = now
+            changed = True
+    if changed:
+        db.commit()
+
+
+def _same_hostname(devices: list[Device], hostname: str) -> list[Device]:
+    key = hostname.casefold()
+    return [d for d in devices if d.hostname and d.hostname.casefold() == key]
+
+
+def _rotation_target(db: Session, twins: list[Device], answering: set[str] | None) -> Device | None:
+    """The device a new private address belongs to, when nothing else can claim it.
+
+    Phones, watches and laptops change their private address, and the family has
+    several devices called "iPhone". So it folds only when every record with this
+    name is one person's private-address device and none of them is answering on
+    its own address right now: two devices cannot be one."""
+    if answering is None or not twins:
+        return None
+    if len({d.person_id for d in twins}) != 1 or twins[0].person_id is None:
+        return None
+    if any(d.kind != "personal" or not d.mac_is_random for d in twins):
+        return None
+    ids = [d.id for d in twins]
+    macs = {
+        m.upper() for m in db.scalars(select(DeviceMac.mac).where(DeviceMac.device_id.in_(ids)))
+    }
+    if (macs | {d.mac.upper() for d in twins}) & answering:
+        return None
+    return min(twins, key=lambda d: d.id)
+
+
+def _fold_into(db: Session, target: Device, mac: str, ip: str) -> None:
+    row = db.scalar(select(DeviceMac).where(DeviceMac.mac == mac))
+    if row is None:
+        db.add(DeviceMac(device_id=target.id, mac=mac))
+    else:  # left behind by a deleted device
+        row.device_id = target.id
+    if ip:
+        target.ip = ip
+    db.commit()
+    log_event(
+        db, "device_merged", f"«{target.name}» сменил приватный адрес, новый {mac} записан к нему."
+    )
+
+
+def discover_devices(db: Session, api, answering: set[str] | None = None) -> list[Device]:
     """Синхронизирует DHCP-lease'ы с базой: новые MAC → новые устройства.
     Матчит по ВСЕМ MAC устройства (device_macs) — телефон с рандомизацией,
     объединённый с исходным устройством, не плодит дублей. Новое устройство
@@ -176,6 +238,13 @@ def discover_devices(db: Session, api) -> list[Device]:
         # события, из которого бот достаёт MAC и номер заявки (см. safetext).
         hostname = clean_label(lease["hostname"])
         dev = known.get(mac)
+        if dev is None and hostname and is_random_mac(mac):
+            target = _rotation_target(db, _same_hostname(devices, hostname), answering)
+            if target is not None:
+                _fold_into(db, target, mac, lease["ip"])
+                known[mac] = target
+                _release_stale_ip(db, devices, target, lease["ip"])
+                continue
         if dev is None:
             dev = Device(mac=mac, ip=lease["ip"], name=hostname or mac, hostname=hostname)
             db.add(dev)
@@ -214,13 +283,14 @@ def discover_devices(db: Session, api) -> list[Device]:
             log_event(db, "device_new",
                       f"Новое устройство: {dev.name} ({mac}, {lease['ip']}){note}")
             if hostname:
-                twin = next(
-                    (d for d in devices if d.hostname and d.hostname == hostname), None
-                )
+                twins = [d for d in devices if d.hostname == hostname and d.id != dev.id]
+                twin = twins[0] if twins else None
                 if twin is not None:
                     # Наследуем владельца, блокировку и ограничение скорости близнеца,
                     # чтобы ротация приватного MAC не снимала родительский контроль мгновенно.
-                    if twin.person_id is not None:
+                    # When several people own devices with this name, any choice could
+                    # hand a stranger's phone an adult's rights, so the owner stays empty.
+                    if twin.person_id is not None and len({d.person_id for d in twins}) == 1:
                         dev.person_id = twin.person_id
                     if twin.blocked_manual:
                         dev.blocked_manual = True
@@ -352,7 +422,8 @@ def reconcile(db: Session) -> dict:
 
     try:
         with _reconcile_lock(), mikrotik.api_session() as api:
-            devices = discover_devices(db, api)
+            devices = discover_devices(db, api, mikrotik.get_answering_macs(api))
+            mark_seen(db, devices, mikrotik.get_online_ips(api))
             desired = _desired_state(db, devices)
             quota_blocked = desired["quota_blocked"]
             for list_name, ips in desired["lists"].items():

@@ -121,4 +121,12 @@ add name=hs-guest-limit target=192.168.90.0/24 max-limit=20M/20M comment="hs: gu
 # ----------------------------------------------------------------------------
 # /ip dhcp-server lease add address=192.168.88.2 mac-address=XX:XX:XX:XX:XX:XX server=defconf comment="hs: raspberry-pi"
 
+# ----------------------------------------------------------------------------
+# 8. Тише и безопаснее: сервер теста скорости не нужен, а входы панели по API
+#    раз в минуту вытесняли из журнала роутера все остальные события.
+#    Неудачные входы остаются: у них тема error.
+# ----------------------------------------------------------------------------
+/tool bandwidth-server set enabled=no
+/system logging set [find topics=info action=memory] topics=info,!account
+
 :put "HomeSec base config imported. Now change the 'homesec' user password if you kept the placeholder!"

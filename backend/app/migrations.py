@@ -80,6 +80,23 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
     ]),
     # Shared devices can be opened for adults until a set time.
     (5, ["ALTER TABLE devices ADD COLUMN adult_until DATETIME"]),
+    # When a device was last online. Minute counts are the only history there is
+    # (kept 30 days), so a device without any stays empty and reads as long gone.
+    (6, [
+        "ALTER TABLE devices ADD COLUMN last_seen DATETIME",
+        "UPDATE devices SET last_seen = ("
+        "SELECT max(date) || ' 12:00:00.000000' FROM quota_usage "
+        "WHERE quota_usage.device_id = devices.id)",
+    ]),
+    # "Известные" and "Неизвестные" were stored as guest people, which hid their
+    # devices from sorting. Their devices go back to having no owner.
+    (7, [
+        "UPDATE devices SET person_id = NULL WHERE person_id IN ("
+        "SELECT id FROM people WHERE role = 'guest' AND telegram_id IS NULL "
+        "AND name IN ('Известные', 'Неизвестные'))",
+        "DELETE FROM people WHERE role = 'guest' AND telegram_id IS NULL "
+        "AND name IN ('Известные', 'Неизвестные')",
+    ]),
 ]
 
 

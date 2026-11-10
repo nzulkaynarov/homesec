@@ -68,6 +68,8 @@ class Device(Base):
     blocked_manual: Mapped[bool] = mapped_column(Boolean, default=False)
     speed_limit: Mapped[str] = mapped_column(String(32), default="")  # напр. "10M/10M"
     first_seen: Mapped[datetime] = mapped_column(DateTime, default=datetime.now)
+    # Last time the router saw it answer; None means not since this was recorded.
+    last_seen: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # A shared device counts as an adult's until this moment, then returns to kid mode.
     adult_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
 

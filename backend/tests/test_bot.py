@@ -56,37 +56,6 @@ def test_format_status_and_devices():
     assert "⏳ Планшет: игры 1:20/2:00" in text  # прогресс квоты экранного времени
     assert texts.hhmm(0) == "0:00" and texts.hhmm(65) == "1:05"
 
-    rows = [{"id": 1, "name": "Планшет", "group_label": "Дети", "owner": "Миша",
-             "blocked_manual": True, "paused_until": None, "speed_limit": "5M/20M"}]
-    text = texts.format_devices(rows)
-    assert "Планшет" in text and "⛔" in text and "🐢 5M/20M" in text
-    assert texts.format_devices([]) == "Устройств пока нет."
-
-
-def test_format_devices_groups_by_owner_with_online():
-    rows = [
-        {"id": 2, "name": "mystery", "group_label": "Неизвестные", "owner": None,
-         "blocked_manual": False, "paused_until": None, "speed_limit": "", "online": False},
-        {"id": 1, "name": "Планшет", "group_label": "Дети", "owner": "Миша",
-         "blocked_manual": False, "paused_until": None, "speed_limit": "", "online": True},
-        {"id": 3, "name": "Ноут", "group_label": "Взрослые", "owner": "Папа",
-         "blocked_manual": False, "paused_until": None, "speed_limit": "", "online": False},
-    ]
-    text = texts.format_devices(rows)
-    # люди по алфавиту, безхозные — в конце под «Неизвестные»
-    assert text.index("Миша:") < text.index("Папа:") < text.index("Неизвестные:")
-    assert "🟢 #1 Планшет (Дети)" in text
-    assert "⚪ #3 Ноут (Взрослые)" in text
-    assert "Роутер недоступен" not in text
-
-
-def test_format_devices_router_down_marks_unknown():
-    rows = [{"id": 1, "name": "Планшет", "group_label": "Дети", "owner": None,
-             "blocked_manual": False, "paused_until": None, "speed_limit": "",
-             "online": None}]
-    text = texts.format_devices(rows)
-    assert "⚪ #1 Планшет" in text
-    assert "Роутер недоступен — онлайн-статус неизвестен" in text
 
 
 def test_health_debounce():
@@ -438,29 +407,6 @@ def test_format_quota_and_keyboard():
     callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
     assert "pick:add_bonus_time:42:15:internet" in callbacks
     assert "pick:add_bonus_time:42:30:internet" in callbacks
-
-
-def test_find_merge_candidates(db):
-    from app.bot.handlers import _find_merge_candidates_sync
-    from app.models import Device, Person
-
-    p = Person(name="Аня", role="kid")
-    db.add(p)
-    db.commit()
-
-    d1 = Device(mac="10:22:33:44:55:66", ip="192.168.88.51", name="iPhone-Аня",
-                hostname="iphone-anya", person_id=p.id)
-    d2 = Device(mac="AA:BB:CC:DD:EE:FF", ip="192.168.88.52", name="iPhone-Аня",
-                hostname="iphone-anya", person_id=None)
-    db.add_all([d1, d2])
-    db.commit()
-
-    candidates = _find_merge_candidates_sync()
-    assert len(candidates) >= 1
-    # d2 (random MAC, no person) must be duplicate, d1 must be target
-    matching = [c for c in candidates if c[0]["id"] == d2.id and c[1]["id"] == d1.id]
-    assert len(matching) == 1
-    assert "iphone-anya" in matching[0][2]
 
 
 def test_format_usage():

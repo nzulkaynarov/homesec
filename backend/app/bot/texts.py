@@ -15,7 +15,6 @@ BOT_COMMANDS: list[tuple[str, str]] = [
     ("quota", "Экранное время и остаток квот"),
     ("note", "Сохранить семейную заметку"),
     ("notes", "Семейная память и заметки"),
-    ("merge", "Поиск и объединение MAC-дублей"),
     ("usage", "Расход токенов ИИ-шлюза"),
     ("digest", "Дайджест за сутки прямо сейчас"),
     ("help", "Все команды и подсказки"),
@@ -40,7 +39,7 @@ START_PARENT = (
     "Привет! Я — бот HomeSec 🛡\n\n"
     "/status — состояние сети\n"
     "/who — радар «Кто дома»\n"
-    "/devices — список устройств\n"
+    "/devices — устройства: владелец, имя, объединение, удаление\n"
     "/quota — экранное время детей\n"
     "/pause — быстрая пауза\n"
     "/movie — Общие устройства\n"
@@ -72,7 +71,7 @@ HELP = (
     "Я — бот HomeSec, слежу за домашней сетью.\n\n"
     "/status — состояние сети и сервисов\n"
     "/who — радар «Кто дома» и статус ТВ\n"
-    "/devices — список устройств\n"
+    "/devices — устройства: владелец, имя, объединение, удаление\n"
     "/block <имя|id> — заблокировать интернет устройству\n"
     "/unblock <имя|id> — снять блокировку\n"
     "/pause <имя|группа> [минут] — пауза интернета (без аргументов — быстрые кнопки)\n"
@@ -82,7 +81,6 @@ HELP = (
     "/quota — экранное время и квоты детей сегодня\n"
     "/note <текст> — сохранить семейную заметку\n"
     "/notes — семейная память и заметки\n"
-    "/merge — поиск и объединение случайных MAC-дублей\n"
     "/usage — статистика расхода токенов ИИ\n"
     "/digest — дайджест за сутки прямо сейчас\n\n"
     "Можно писать свободным текстом или слать голосовые сообщения — "
@@ -120,36 +118,6 @@ def format_status(s: dict) -> str:
     for q in s.get("screen_time", []):  # экранное время: «игры 1:20/2:00»
         lines.append(f"⏳ {q['device']}: {q['label'].lower()} "
                      f"{hhmm(q['used_minutes'])}/{hhmm(q['limit_minutes'])}")
-    return "\n".join(lines)
-
-
-def format_devices(rows: list[dict]) -> str:
-    """Группировка по владельцам (люди по алфавиту, безхозные — в конце под
-    «Неизвестные»), метка онлайн 🟢/⚪ (online=None — роутер недоступен)."""
-    if not rows:
-        return "Устройств пока нет."
-    by_owner: dict[str, list[dict]] = {}
-    for r in rows:
-        by_owner.setdefault(r.get("owner") or "", []).append(r)
-    owners = sorted(k for k in by_owner if k)
-    if "" in by_owner:
-        owners.append("")
-
-    lines = ["Устройства"]
-    for owner in owners:
-        lines += ["", f"{owner or 'Неизвестные'}:"]
-        for r in by_owner[owner]:
-            marks = ""
-            if r["blocked_manual"]:
-                marks += " ⛔"
-            if r["paused_until"]:
-                marks += f" ⏸ до {r['paused_until'][11:16]}"
-            if r["speed_limit"]:
-                marks += f" 🐢 {r['speed_limit']}"
-            dot = "🟢" if r.get("online") else "⚪"
-            lines.append(f"{dot} #{r['id']} {r['name']} ({r['group_label']}){marks}")
-    if any(r.get("online") is None for r in rows):
-        lines += ["", "⚠️ Роутер недоступен — онлайн-статус неизвестен"]
     return "\n".join(lines)
 
 
