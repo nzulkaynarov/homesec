@@ -9,11 +9,11 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import Device, Rule, active_pauses
-from . import quota
+from . import quota, unlock
 from .enforcement import rule_is_active
 
 
-def _rule_until(rule: Rule, now: datetime) -> datetime | None:
+def rule_until(rule: Rule, now: datetime) -> datetime | None:
     """Когда закончится активное сейчас окно правила."""
     try:
         end_h, end_m = (int(x) for x in rule.end_time.split(":"))
@@ -50,7 +50,7 @@ def restriction_for_ip(db: Session, ip: str) -> dict | None:
         )
         or (p.target_type == "group" and p.target == dev.group)
     ]
-    if my_pauses:
+    if my_pauses and (dev.person_id is None or unlock.open_until(db, dev.person_id, now) is None):
         return {"kind": "pause", "until": max(p.until for p in my_pauses), **base}
 
     if any(r["category"] == "internet" and r["used"] >= r["limit"] for r in quota_rows):
@@ -69,7 +69,7 @@ def restriction_for_ip(db: Session, ip: str) -> dict | None:
             or (rule.target_type == "device" and str(rule.target) == str(dev.id))
         ):
             return {"kind": "rule", "rule_name": rule.name,
-                    "until": _rule_until(rule, now), **base}
+                    "until": rule_until(rule, now), **base}
 
     if dev.group == "unknown" and settings.block_unknown:
         return {"kind": "unknown", **base}

@@ -17,7 +17,7 @@ from ..ai import tools
 from ..config import settings
 from ..db import get_db
 from ..models import BonusRequest, Device, Person, kv_set
-from ..services import bonus, family
+from ..services import bonus, family, house_rules
 
 router = APIRouter(prefix="/api/luna/v1", tags=["luna"])
 
@@ -152,12 +152,37 @@ def person_quota(name: str, db: Session = Depends(get_db)) -> list[dict]:
     return [row for row in tools.get_quota_status(db) if row["device_id"] in device_ids]
 
 
+def _clock(moment: datetime | None) -> str | None:
+    return moment.isoformat(timespec="minutes") if moment is not None else None
+
+
+def _restriction_view(db: Session, person: Person) -> dict | None:
+    found = house_rules.restriction(db, person.id)
+    if found is None:
+        return None
+    return {key: _clock(value) if key != "kind" else value for key, value in found.items()}
+
+
+@router.get("/people/{name}/restriction", dependencies=[Depends(require_token)])
+def person_restriction(name: str, db: Session = Depends(get_db)) -> dict:
+    """What keeps the person offline now: bedtime or a pause, with local times
+    (kind, until, pause_until after bedtime, open_until of a parent's window)."""
+    return {"restriction": _restriction_view(db, _person_or_404(db, name))}
+
+
 @router.post("/people/{name}/time-requests", status_code=201, dependencies=[Depends(require_token)])
 def create_time_request(name: str, body: TimeRequest, db: Session = Depends(get_db)) -> dict:
-    devices = _devices_of(db, _person_or_404(db, name))
+    """More minutes, or during a pause a window through it. Never during bedtime:
+    parents do not answer at night, and the morning opens it anyway."""
+    person = _person_or_404(db, name)
+    devices = _devices_of(db, person)
     if not devices:
         raise HTTPException(status_code=404, detail="Person has no devices")
-    request = bonus.create_request(db, devices[0], "internet", body.reason)
+    restriction = house_rules.restriction(db, person.id)
+    if restriction is not None and restriction["kind"] == "bedtime":
+        raise HTTPException(status_code=409, detail="Bedtime: requests open in the morning")
+    category = bonus.PAUSE_CATEGORY if restriction is not None else "internet"
+    request = bonus.create_request(db, devices[0], category, body.reason)
     if request is None:
         raise HTTPException(
             status_code=409, detail="A request is already pending or was sent recently"
@@ -170,7 +195,12 @@ def time_request_status(request_id: int, db: Session = Depends(get_db)) -> dict:
     request = db.get(BonusRequest, request_id)
     if request is None:
         raise HTTPException(status_code=404, detail="Unknown request")
-    return {"id": request.id, "status": request.status, "minutes": request.minutes}
+    return {
+        "id": request.id,
+        "status": request.status,
+        "minutes": request.minutes,
+        "category": request.category,
+    }
 
 
 @router.get("/people/{name}/quiz", dependencies=[Depends(require_token)])

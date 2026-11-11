@@ -79,6 +79,9 @@ async def me_ask(
     ip = _client_ip(request)
     dev = db.scalar(select(Device).where(Device.ip == ip)) if ip else None
     if dev is not None:
+        current = restriction_for_ip(db, ip)
+        if current is not None and current["kind"] == "pause":
+            category = bonus.PAUSE_CATEGORY  # minutes would not help, a window through it would
         bonus.create_request(db, dev, category, reason)  # None при антиспаме — молча
     # Post/Redirect/Get: после отправки браузер стоит на обычной GET-странице,
     # F5 не предлагает отправить заявку повторно.

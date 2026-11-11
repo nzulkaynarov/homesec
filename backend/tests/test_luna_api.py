@@ -1,15 +1,27 @@
 """Network API for Luna and the outage watch on the Pi."""
 
 from datetime import datetime, timedelta
+from unittest.mock import patch
 
 import pytest
 from fastapi.testclient import TestClient
 
-from app.bot import luna_watch
+from app.bot import handlers, luna_watch
 from app.config import settings
 from app.db import Base, engine, session
 from app.main import app
-from app.models import BonusRequest, Device, EventLog, KVState, Person, QuotaBonus, kv_set
+from app.models import (
+    BonusRequest,
+    Device,
+    EventLog,
+    KVState,
+    Pause,
+    Person,
+    QuotaBonus,
+    Rule,
+    kv_set,
+)
+from app.services import enforcement, house_rules
 
 AUTH = {"Authorization": "Bearer test-token"}
 
@@ -19,7 +31,8 @@ def db(monkeypatch):
     monkeypatch.setattr(settings, "luna_api_token", "test-token")
     Base.metadata.create_all(engine)
     s = session()
-    for model in (BonusRequest, QuotaBonus, EventLog, KVState, Device, Person):
+    monkeypatch.setattr(enforcement, "get_self_ips", lambda: {"192.168.88.2"})
+    for model in (BonusRequest, QuotaBonus, EventLog, KVState, Pause, Rule, Device, Person):
         s.query(model).delete()
     s.commit()
     yield s
@@ -174,3 +187,80 @@ def test_link_unknown_person(db, client):
         ).status_code
         == 404
     )
+
+
+def _bedtime_now(db, person):
+    now = datetime.now()
+    start, end = now - timedelta(hours=1), now + timedelta(hours=1)
+    db.add(
+        Rule(
+            name="Отбой",
+            target_type="person",
+            target=str(person.id),
+            days="0,1,2,3,4,5,6",
+            start_time=f"{start:%H:%M}",
+            end_time=f"{end:%H:%M}",
+        )
+    )
+    db.commit()
+    return end
+
+
+def _blocked(db):
+    db.expire_all()
+    return enforcement._desired_state(db, list(db.query(Device)))["lists"]["hs-blocked"]
+
+
+def test_no_restriction_by_default(db, client, kid):
+    url = "/api/luna/v1/people/Миша/restriction"
+    assert client.get(url, headers=AUTH).json() == {"restriction": None}
+
+
+def test_bedtime_is_reported_and_refuses_requests(db, client, kid):
+    end = _bedtime_now(db, kid)
+    found = client.get("/api/luna/v1/people/Миша/restriction", headers=AUTH).json()["restriction"]
+    assert found["kind"] == "bedtime" and found["until"] == f"{end:%Y-%m-%dT%H:%M}"
+    url = "/api/luna/v1/people/Миша/time-requests"
+    assert client.post(url, json={}, headers=AUTH).status_code == 409
+    assert db.query(BonusRequest).count() == 0
+
+
+def test_pause_request_opens_a_window_and_the_pause_returns(db, client, kid):
+    until = datetime.now() + timedelta(hours=2)
+    db.add(Pause(target_type="group", target="kid", until=until, reason="ИИ"))
+    db.commit()
+    assert "192.168.88.50" in _blocked(db)
+    found = client.get("/api/luna/v1/people/Миша/restriction", headers=AUTH).json()["restriction"]
+    assert (found["kind"], found["open_until"]) == ("pause", None)
+
+    created = client.post("/api/luna/v1/people/Миша/time-requests", json={}, headers=AUTH)
+    request_id = created.json()["id"]
+    assert db.get(BonusRequest, request_id).category == "pause"
+    buttons = handlers.bonus_request_keyboard(request_id, "pause").inline_keyboard
+    assert buttons[1][0].text == "▶️ До конца паузы"
+
+    result = handlers._resolve_bonus_request(request_id, "30")
+    assert "Интернет открыт до" in result
+    assert "192.168.88.50" not in _blocked(db)
+    status = client.get(f"/api/luna/v1/time-requests/{request_id}", headers=AUTH).json()
+    assert status["status"] == "approved" and status["category"] == "pause"
+    assert 29 <= status["minutes"] <= 30
+    found = client.get("/api/luna/v1/people/Миша/restriction", headers=AUTH).json()["restriction"]
+    assert found["open_until"] is not None
+
+    later = datetime.now() + timedelta(minutes=31)
+    db.expire_all()
+    state = enforcement._desired_state
+    with patch.object(enforcement, "datetime", wraps=datetime) as clock:
+        clock.now.return_value = later
+        assert "192.168.88.50" in state(db, list(db.query(Device)))["lists"]["hs-blocked"]
+
+
+def test_window_never_opens_bedtime(db, client, kid):
+    _bedtime_now(db, kid)
+    db.add(
+        Pause(target_type="person", target=str(kid.id), until=datetime.now() + timedelta(hours=1))
+    )
+    db.commit()
+    house_rules.open_through_pause(db, kid.id, 30)
+    assert "192.168.88.50" in _blocked(db)

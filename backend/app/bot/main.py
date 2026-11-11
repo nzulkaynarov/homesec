@@ -73,6 +73,16 @@ def _collect_notifications() -> list[tuple[str, dict, str, int | None, list, int
         s.close()
 
 
+def _request_category(request_id: int) -> str:
+    from ..services import bonus
+
+    s = dbmod.session()
+    try:
+        return bonus.category_of(s, request_id)
+    finally:
+        s.close()
+
+
 async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
     while True:
         try:
@@ -93,7 +103,8 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
                     kb = handlers.bonus_keyboard(dev["id"])
                 elif kind == "bonus_request" and request_id is not None:
                     text = f"🙏 {message}"
-                    kb = handlers.bonus_request_keyboard(request_id)
+                    category = await asyncio.to_thread(_request_category, request_id)
+                    kb = handlers.bonus_request_keyboard(request_id, category)
                 else:
                     text = texts.format_new_device(dev)
                     kb = handlers.new_device_keyboard(dev["id"], people)

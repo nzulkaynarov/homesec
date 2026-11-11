@@ -1377,15 +1377,22 @@ def bonus_keyboard(dev_id: int, minutes: int = 30) -> InlineKeyboardMarkup:
 BONUS_PRESETS = {"15": 15, "30": 30, "day": 720}
 
 
-def bonus_request_keyboard(request_id: int) -> InlineKeyboardMarkup:
-    """Кнопки под заявкой ребёнка: +15 / +30 / до конца дня / Отказать."""
+def bonus_request_keyboard(request_id: int, category: str = "internet") -> InlineKeyboardMarkup:
+    """Кнопки под заявкой ребёнка: +15 / +30 / до конца дня / Отказать.
+    Для просьбы во время паузы третья кнопка открывает интернет до её конца."""
+    from ..services.bonus import PAUSE_CATEGORY
+
+    if category == PAUSE_CATEGORY:
+        whole = InlineKeyboardButton(text="▶️ До конца паузы", callback_data=f"br:{request_id}:day")
+    else:
+        whole = InlineKeyboardButton(text="🌞 До конца дня", callback_data=f"br:{request_id}:day")
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(text="➕ 15 мин", callback_data=f"br:{request_id}:15"),
             InlineKeyboardButton(text="➕ 30 мин", callback_data=f"br:{request_id}:30"),
         ],
         [
-            InlineKeyboardButton(text="🌞 До конца дня", callback_data=f"br:{request_id}:day"),
+            whole,
             InlineKeyboardButton(text="🚫 Отказать", callback_data=f"br:{request_id}:no"),
         ],
     ])
@@ -1408,6 +1415,8 @@ def _resolve_bonus_request(request_id: int, choice: str) -> str:
         if choice == "no":
             bonus.resolve(s, req, "denied")
             return "Отказано. Ребёнок увидит это на своей странице."
+        if req.category == bonus.PAUSE_CATEGORY:
+            return _open_through_pause(s, req, choice)
         minutes = BONUS_PRESETS.get(choice, 30)
         cat_label = QUOTA_CATEGORY_LABELS.get(req.category, req.category)
         try:
@@ -1422,6 +1431,25 @@ def _resolve_bonus_request(request_id: int, choice: str) -> str:
         return f"✅ Одобрено ({label}, {cat_label}). Время добавлено."
     finally:
         s.close()
+
+
+def _open_through_pause(s, req, choice: str) -> str:
+    """Approve a request sent during a pause: open the child's internet for a
+    while; the pause itself stays and takes over again afterwards."""
+    from ..services import bonus
+
+    dev = s.get(Device, req.device_id)
+    if dev is None or dev.person_id is None:
+        return "Устройство без владельца, открыть интернет некому."
+    minutes = None if choice == "day" else BONUS_PRESETS.get(choice, 30)
+    try:
+        until = house_rules.open_through_pause(s, dev.person_id, minutes)
+    except house_rules.RuleError as e:
+        bonus.resolve(s, req, "approved", 0)
+        return str(e)
+    opened = max(1, round((until - datetime.now()).total_seconds() / 60))
+    bonus.resolve(s, req, "approved", opened)
+    return f"✅ Интернет открыт до {until:%H:%M}, потом пауза продолжится."
 
 
 @router.callback_query(F.data.startswith("br:"))

@@ -20,7 +20,10 @@ from ..models import (
     kv_set,
     log_event,
 )
+from . import unlock
+from .enforcement import rule_is_active
 from .quota import QUOTA_CATEGORY_LABELS
+from .restrictions import rule_until
 from .safetext import clean_label
 
 # Nights are named by the evening they start on: 0 = Monday, as in Rule.days.
@@ -268,7 +271,65 @@ def summary(db: Session, person: Person, now: datetime | None = None) -> list[st
     until = paused_until(db, person.id, now)
     if until is not None:
         lines.append(f"⏸ Пауза до {until:%H:%M}")
+        opened = unlock.open_until(db, person.id, now)
+        if opened is not None:
+            lines.append(f"🔓 Открыто родителем до {opened:%H:%M}")
     return lines
+
+
+def bedtime_until(db: Session, person_id: int, now: datetime | None = None) -> datetime | None:
+    """End of the schedule that keeps this person offline right now, if any:
+    their own bedtime, their group's schedule or one on any of their devices."""
+    now = now or datetime.now()
+    person = _person(db, person_id)
+    device_ids = {
+        str(i) for i in db.scalars(select(Device.id).where(Device.person_id == person.id))
+    }
+    ends = [
+        rule_until(rule, now)
+        for rule in db.scalars(select(Rule))
+        if rule_is_active(rule, now)
+        and (
+            (rule.target_type == "person" and str(rule.target) == str(person.id))
+            or (rule.target_type == "group" and rule.target == person.role)
+            or (rule.target_type == "device" and str(rule.target) in device_ids)
+        )
+    ]
+    return max((end for end in ends if end is not None), default=None)
+
+
+def restriction(db: Session, person_id: int, now: datetime | None = None) -> dict[str, Any] | None:
+    """What keeps the person offline now, for Luna: bedtime first, since a
+    parent does not open it at night, then a pause, which a parent can open for
+    a while. Times are naive local datetimes."""
+    now = now or datetime.now()
+    paused = paused_until(db, person_id, now)
+    bedtime = bedtime_until(db, person_id, now)
+    if bedtime is not None:
+        later = paused if paused is not None and paused > bedtime else None
+        return {"kind": "bedtime", "until": bedtime, "pause_until": later, "open_until": None}
+    if paused is not None:
+        return {
+            "kind": "pause",
+            "until": paused,
+            "pause_until": None,
+            "open_until": unlock.open_until(db, person_id, now),
+        }
+    return None
+
+
+def open_through_pause(db: Session, person_id: int, minutes: int | None) -> datetime:
+    """Let the person through their pauses for some minutes; None means until
+    the pause ends. The pause stays and takes over again when the window closes."""
+    person = _person(db, person_id)
+    now = datetime.now()
+    paused = paused_until(db, person_id, now)
+    if paused is None:
+        raise RuleError("Паузы сейчас нет, интернет и так открыт")
+    until = paused if minutes is None else min(paused, now + timedelta(minutes=minutes))
+    until = unlock.open_window(db, person_id, until)
+    _changed(db, f"Интернет для {person.name} открыт до {until:%H:%M} поверх паузы")
+    return until
 
 
 def people(db: Session) -> list[Person]:
@@ -347,5 +408,6 @@ def delete_person(db: Session, person_id: int) -> str:
     name = person.name
     db.delete(person)
     db.commit()
+    unlock.close_window(db, person_id)
     _changed(db, f"Удалён человек: {name}")
     return name

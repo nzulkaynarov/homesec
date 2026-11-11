@@ -26,7 +26,7 @@ from ..models import (
     is_random_mac,
     log_event,
 )
-from . import adguard, mikrotik, quota
+from . import adguard, mikrotik, quota, unlock
 from .adguard import SERVICE_CATEGORIES
 from .safetext import clean_label
 
@@ -387,13 +387,19 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
                 active_person_blocks.add(str(r.target))
             else:
                 active_device_blocks.add(str(r.target))
-    for p in active_pauses(db, now):  # разовые «паузы до …» поверх расписаний
+    # One-off pauses sit on top of schedules; a parent-approved window lets one
+    # person through them, so they are kept apart from the rule blocks.
+    paused_groups: set[str] = set()
+    paused_people: set[str] = set()
+    paused_devices: set[str] = set()
+    for p in active_pauses(db, now):
         if p.target_type == "group":
-            active_group_blocks.add(p.target)
+            paused_groups.add(p.target)
         elif p.target_type == "person":
-            active_person_blocks.add(str(p.target))
+            paused_people.add(str(p.target))
         else:
-            active_device_blocks.add(str(p.target))
+            paused_devices.add(str(p.target))
+    open_people = unlock.open_people(db, now)
 
     lists: dict[str, set[str]] = {name: set() for name in GROUP_ADDRESS_LISTS.values()}
     lists["hs-blocked"] = set()
@@ -413,8 +419,14 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
         spent = quota_spent.get(dev.id, set())
         if group in GROUP_ADDRESS_LISTS:
             lists[GROUP_ADDRESS_LISTS[group]].add(dev.ip)
+        paused = dev.person_id not in open_people and (
+            group in paused_groups
+            or (dev.person_id is not None and str(dev.person_id) in paused_people)
+            or str(dev.id) in paused_devices
+        )
         blocked = (
-            dev.blocked_manual
+            paused
+            or dev.blocked_manual
             or group in active_group_blocks
             or (dev.person_id is not None and str(dev.person_id) in active_person_blocks)
             or str(dev.id) in active_device_blocks

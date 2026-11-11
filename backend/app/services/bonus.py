@@ -14,6 +14,9 @@ from .safetext import REASON_LIMIT, clean_label
 
 # Антиспам: не чаще одной заявки с устройства за это окно (как cooldown портала).
 REQUEST_COOLDOWN = timedelta(minutes=10)
+# A request to be let through a pause rather than for more quota minutes.
+PAUSE_CATEGORY = "pause"
+PAUSE_LABEL = "открыть интернет на время паузы"
 # Заявки старше суток считаются протухшими (родитель не ответил) — не блокируют
 # новые и не показываются как «ожидает».
 REQUEST_TTL = timedelta(hours=24)
@@ -51,7 +54,7 @@ def create_request(db: Session, dev: Device, category: str,
     """Создаёт заявку, если антиспам позволяет. Пишет событие bonus_request
     (MAC + req#id в тексте) — его подхватывает бот и шлёт родителю кнопки.
     Возвращает заявку или None, если сейчас нельзя (ждёт/слишком часто)."""
-    if category not in quota.QUOTA_CATEGORIES:
+    if category not in (*quota.QUOTA_CATEGORIES, PAUSE_CATEGORY):
         category = "internet"
     if not can_request(db, dev.id):
         return None
@@ -62,7 +65,8 @@ def create_request(db: Session, dev: Device, category: str,
                        reason=clean_label(reason, REASON_LIMIT), status="pending")
     db.add(req)
     db.commit()
-    cat_label = quota.QUOTA_CATEGORY_LABELS.get(category, category)
+    cat_label = PAUSE_LABEL if category == PAUSE_CATEGORY else quota.QUOTA_CATEGORY_LABELS.get(
+        category, category)
     log_event(db, "bonus_request",
               f"Запрос времени: {dev.name} ({dev.mac}, {dev.ip}) просит «{cat_label}»"
               + (f" — «{req.reason}»" if req.reason else "") + f" [req#{req.id}]")
@@ -74,3 +78,8 @@ def resolve(db: Session, req: BonusRequest, status: str, minutes: int = 0) -> No
     req.minutes = minutes
     req.resolved = datetime.now()
     db.commit()
+
+
+def category_of(db: Session, request_id: int) -> str:
+    req = db.get(BonusRequest, request_id)
+    return req.category if req is not None else "internet"
