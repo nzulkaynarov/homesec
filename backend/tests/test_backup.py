@@ -119,6 +119,7 @@ def test_heartbeat_failure_does_not_log_the_secret_url(monkeypatch):
         raise httpx.ConnectError(f"cannot reach {url}")
 
     monkeypatch.setattr(scheduler.httpx, "get", refuse)
+    monkeypatch.setattr(scheduler, "enforcement_status", lambda db: (True, ""))
     scheduler._heartbeat()
 
     assert logged == ["heartbeat ping failed: ConnectError"]

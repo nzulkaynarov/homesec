@@ -21,7 +21,7 @@ from .models import (
     kv_set,
 )
 from .services import quota
-from .services.enforcement import reconcile
+from .services.enforcement import enforcement_status, reconcile
 
 log = logging.getLogger("homesec.scheduler")
 
@@ -93,7 +93,19 @@ def _cleanup() -> None:
 
 
 def _heartbeat() -> None:
-    """Tell the external monitor the Pi is alive, so its silence raises an alert."""
+    """Tell the external monitor that rules are being applied, so its silence raises an alert.
+
+    A live Pi whose reconcile keeps failing must look dead from outside, so the ping is sent only
+    while the last full reconcile is fresh.
+    """
+    session = db.session()
+    try:
+        fresh, _error = enforcement_status(session)
+    finally:
+        session.close()
+    if not fresh:
+        log.warning("heartbeat skipped: rules have not been applied for a while")
+        return
     try:
         httpx.get(settings.healthcheck_url, timeout=10).raise_for_status()
     except httpx.HTTPError as exc:

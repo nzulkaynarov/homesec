@@ -24,6 +24,8 @@ from ..models import (
     Rule,
     active_pauses,
     is_random_mac,
+    kv_get,
+    kv_set,
     log_event,
 )
 from . import adguard, mikrotik, quota, unlock
@@ -115,6 +117,41 @@ def _log_error_throttled(db: Session, key: str, msg: str) -> None:
     if last is None or now - last >= _ERROR_LOG_COOLDOWN:
         _last_error_log[key] = now
         log_event(db, "error", msg)
+
+
+LAST_OK_KEY = "reconcile_last_ok"
+LAST_ERROR_KEY = "reconcile_last_error"
+STALE_AFTER = timedelta(minutes=5)
+
+
+def _fail(db: Session, summary: dict, key: str, msg: str) -> None:
+    summary["ok"] = False
+    summary["errors"].append(msg)
+    log.warning("%s", msg)
+    _log_error_throttled(db, key, msg)
+
+
+def _record_outcome(db: Session, summary: dict) -> None:
+    """Remember the last full success, so a silent stop of enforcement can be noticed."""
+    try:
+        if summary["ok"]:
+            kv_set(db, LAST_OK_KEY, datetime.now().isoformat(timespec="seconds"))
+        else:
+            kv_set(db, LAST_ERROR_KEY, "; ".join(summary["errors"])[:300])
+    except Exception:  # noqa: BLE001 — the marker must never break enforcement itself
+        log.exception("could not record the reconcile outcome")
+        db.rollback()
+
+
+def enforcement_status(db: Session, now: datetime | None = None) -> tuple[bool, str]:
+    """(fresh, last error): fresh while the last full success is younger than STALE_AFTER."""
+    now = now or datetime.now()
+    last_ok = kv_get(db, LAST_OK_KEY)
+    try:
+        fresh = bool(last_ok) and now - datetime.fromisoformat(last_ok) < STALE_AFTER
+    except ValueError:
+        fresh = False
+    return fresh, kv_get(db, LAST_ERROR_KEY)
 
 
 def rule_is_active(rule: Rule, now: datetime | None = None) -> bool:
@@ -440,7 +477,7 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
         # Управляемые: все, кроме взрослых без ограничений (им — fasttrack)
         if group != "adult" or dev.speed_limit or blocked:
             lists["hs-managed"].add(dev.ip)
-        if dev.speed_limit:
+        if dev.speed_limit and mikrotik.valid_speed_limit(dev.speed_limit):
             queues[dev.ip] = dev.speed_limit
 
         policy = policies.get(group)
@@ -489,6 +526,7 @@ def reconcile(db: Session) -> dict:
         _log_error_throttled(db, "self_ip", msg)
         summary["ok"] = False
         summary["errors"].append(msg)
+        _record_outcome(db, summary)
         return summary
 
     try:
@@ -507,21 +545,27 @@ def reconcile(db: Session) -> dict:
                     for ip in added:
                         mikrotik.kill_connections(api, ip)
                         summary["newly_blocked"].append(ip)
-            mikrotik.queues_sync(api, desired["queues"])
+            # Очереди скорости отдельно: их сбой не должен останавливать AdGuard
+            # и блокировки, которые уже применены выше.
+            try:
+                mikrotik.queues_sync(api, desired["queues"])
+            except (mikrotik.MikrotikError, ValueError) as e:
+                _fail(db, summary, "queues", f"очереди скорости: {e}")
     except mikrotik.MikrotikError as e:
-        summary["ok"] = False
-        summary["errors"].append(str(e))
-        log.warning("%s", e)
-        _log_error_throttled(db, "mikrotik", str(e))
+        _fail(db, summary, "mikrotik", str(e))
+        _record_outcome(db, summary)
         return summary  # без роутера состояние AdGuard считать рано
+    except Exception as e:  # noqa: BLE001 — любой сбой должен стать видимым, а не тихим
+        log.exception("reconcile failed")
+        _fail(db, summary, "unexpected", f"{type(e).__name__}: {e}")
+        _record_outcome(db, summary)
+        return summary
 
     try:
         adguard.sync_clients(desired["ag_clients"])
     except adguard.AdGuardError as e:
-        summary["ok"] = False
-        summary["errors"].append(str(e))
-        log.warning("%s", e)
-        _log_error_throttled(db, "adguard", str(e))
+        _fail(db, summary, "adguard", str(e))
+    _record_outcome(db, summary)
 
     # События — только при ПЕРЕХОДЕ в заблокированное состояние (newly_blocked:
     # IP реально добавлен в hs-blocked), иначе бот спамил бы каждый тик.

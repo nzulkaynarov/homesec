@@ -3,6 +3,7 @@
 или обработку запроса) и закрывается — так не копятся зависшие сессии."""
 
 import logging
+import re
 import socket
 from contextlib import contextmanager
 
@@ -152,6 +153,14 @@ def queues_sync(api, desired: dict[str, str]) -> None:
     for name, (ip, limit) in desired_named.items():
         if name not in current:
             path.add(name=name, target=f"{ip}/32", **{"max-limit": limit})
+
+
+SPEED_LIMIT_RE = re.compile(r"^\d+(\.\d+)?[KMG]?/\d+(\.\d+)?[KMG]?$", re.IGNORECASE)
+
+
+def valid_speed_limit(limit: str) -> bool:
+    """A limit RouterOS accepts, such as 5M/20M (upload/download)."""
+    return bool(SPEED_LIMIT_RE.match(limit.strip()))
 
 
 def _normalize_limit(limit: str) -> str:

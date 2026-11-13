@@ -113,7 +113,10 @@ async def update_device(
     if dev:
         dev.name = name.strip() or dev.mac
         dev.person_id = int(person_id) if person_id else None
-        dev.speed_limit = speed_limit.strip()
+        limit = speed_limit.strip()
+        if limit and not mikrotik.valid_speed_limit(limit):
+            limit = dev.speed_limit  # a typo must not stop the router queues for everyone
+        dev.speed_limit = limit
         db.commit()
         # Закрепляем IP за устройством, чтобы правила по IP не «переехали»
         if dev.ip:

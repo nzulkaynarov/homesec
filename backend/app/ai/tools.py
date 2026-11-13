@@ -14,7 +14,6 @@ Telegram-бот читают и меняют состояние системы. 
 
 import inspect
 import json
-import re
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -254,7 +253,6 @@ def _device_row(d: Device, pauses: list[Pause]) -> dict:
     }
 
 
-_LIMIT_RE = re.compile(r"^\d+(\.\d+)?[KMG]?/\d+(\.\d+)?[KMG]?$", re.IGNORECASE)
 
 
 # ---------- инструменты: чтение ----------
@@ -408,7 +406,7 @@ def set_speed_limit(
     """Ставит или снимает лимит скорости для устройства."""
     dev = _device_or_error(db, device_id)
     limit = limit.strip()
-    if limit and not _LIMIT_RE.match(limit):
+    if limit and not mikrotik.valid_speed_limit(limit):
         raise ToolError(f"Неверный формат лимита «{limit}», ожидается вида 5M/20M")
     dev.speed_limit = limit
     db.commit()

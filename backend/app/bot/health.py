@@ -8,8 +8,9 @@ from dataclasses import dataclass, field
 
 import httpx
 
+from .. import db as dbmod
 from ..config import settings
-from ..services import adguard, mikrotik
+from ..services import adguard, enforcement, mikrotik
 
 log = logging.getLogger("homesec.bot.health")
 
@@ -34,6 +35,27 @@ def probe_panel() -> bool:
         return False
 
 
+def _enforcement() -> tuple[bool, str]:
+    session = dbmod.session()
+    try:
+        return enforcement.enforcement_status(session)
+    finally:
+        session.close()
+
+
+def probe_enforcement() -> bool:
+    """Rules really reach the router and AdGuard, not just that the router port answers."""
+    return _enforcement()[0]
+
+
+def enforcement_detail() -> str:
+    error = _enforcement()[1]
+    return f"последняя ошибка: {error}" if error else "причина неизвестна, смотрите журнал панели"
+
+
+ENFORCEMENT_CHECK = "Правила дома"
+
+
 @dataclass
 class _CheckState:
     fails: int = 0
@@ -47,6 +69,18 @@ class HealthMonitor:
     fail_after: int = 3
     ok_after: int = 2
     state: dict[str, _CheckState] = field(default_factory=dict)
+    failure_texts: dict[str, str] = field(default_factory=dict)
+    details: dict[str, Callable[[], str]] = field(default_factory=dict)
+
+    def _failure(self, name: str, fails: int) -> str:
+        text = self.failure_texts.get(name, f"не отвечает (проверок подряд: {fails})")
+        detail = self.details.get(name)
+        if detail is not None:
+            try:
+                text = f"{text}; {detail()}"
+            except Exception:
+                log.exception("подробности %s не получены", name)
+        return f"🔴 {name}: {text}"
 
     def tick(self) -> list[str]:
         """Прогоняет все проверки, возвращает сообщения для отправки."""
@@ -69,13 +103,23 @@ class HealthMonitor:
                 st.fails += 1
                 if not st.alerted and st.fails >= self.fail_after:
                     st.alerted = True
-                    messages.append(f"🔴 {name}: не отвечает (проверок подряд: {st.fails})")
+                    messages.append(self._failure(name, st.fails))
         return messages
 
 
 def default_monitor() -> HealthMonitor:
-    return HealthMonitor(checks={
-        "Роутер MikroTik": probe_router,
-        "AdGuard Home (DNS-фильтр)": probe_adguard,
-        "Панель HomeSec": probe_panel,
-    })
+    return HealthMonitor(
+        checks={
+            "Роутер MikroTik": probe_router,
+            "AdGuard Home (DNS-фильтр)": probe_adguard,
+            "Панель HomeSec": probe_panel,
+            ENFORCEMENT_CHECK: probe_enforcement,
+        },
+        failure_texts={
+            ENFORCEMENT_CHECK: (
+                "ограничения не применяются больше 5 минут, "
+                "новые блокировки и паузы не работают"
+            ),
+        },
+        details={ENFORCEMENT_CHECK: enforcement_detail},
+    )
