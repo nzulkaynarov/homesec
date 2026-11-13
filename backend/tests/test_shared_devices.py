@@ -95,27 +95,12 @@ def test_hours_until_morning(now, expected):
     assert family.hours_until_morning(now) == expected
 
 
-def test_api_lists_and_switches_shared_devices(db, tv):
+def test_luna_cannot_switch_shared_devices(db, tv):
+    """Shared devices are parents' network control and live in the HomeSec bot only."""
     client = TestClient(app)
-    assert client.get("/api/luna/v1/shared-devices", headers=AUTH).json()[0]["state"] == "kid"
+    assert client.get("/api/luna/v1/shared-devices", headers=AUTH).status_code == 404
     url = f"/api/luna/v1/shared-devices/{tv.id}/state"
-    result = client.post(url, json={"state": "adult", "until_morning": True}, headers=AUTH).json()
-    assert result["state"] == "adult" and result["until"]
-    assert client.post(url, json={"state": "off"}, headers=AUTH).json()["state"] == "off"
-
-
-def test_api_validates_requests(db, tv):
-    client = TestClient(app)
-    url = f"/api/luna/v1/shared-devices/{tv.id}/state"
-    assert client.post(url, json={"state": "adult"}, headers=AUTH).status_code == 422
-    assert client.post(url, json={"state": "nonsense"}, headers=AUTH).status_code == 422
-    assert client.post(url, json={"state": "off"}).status_code == 401
-    assert (
-        client.post(
-            "/api/luna/v1/shared-devices/99999/state", json={"state": "off"}, headers=AUTH
-        ).status_code
-        == 404
-    )
+    assert client.post(url, json={"state": "off"}, headers=AUTH).status_code == 404
 
 
 def test_shared_devices_do_not_count_as_personal(db, client=None):
