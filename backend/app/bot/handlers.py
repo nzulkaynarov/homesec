@@ -31,7 +31,7 @@ from ..config import settings
 from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get, log_event
 from ..services import family as family_svc
 from ..services import house_rules
-from . import device_menu, rules_menu, texts, triage
+from . import device_menu, pause_menu, rules_menu, texts, triage
 from .access import AccessMiddleware
 from .device_menu import BTN_DEVICES
 from .rules_menu import BTN_RULES
@@ -566,6 +566,7 @@ router.message.outer_middleware(_access)
 router.callback_query.outer_middleware(_access)
 triage.register(router)
 device_menu.register(router)
+pause_menu.register(router)
 rules_menu.register(router)
 
 
@@ -760,6 +761,7 @@ def _shared_actions_markup(dev_id: int) -> InlineKeyboardMarkup:
          InlineKeyboardButton(text="👶 Детский режим", callback_data=f"{action}:kid")],
         [InlineKeyboardButton(text="🍿 Взрослым на 3 часа", callback_data=f"{action}:3"),
          InlineKeyboardButton(text="🌙 Взрослым до утра", callback_data=f"{action}:m")],
+        [InlineKeyboardButton(text="⏸ Отключить на время", callback_data=f"pzt:d{dev_id}")],
         [InlineKeyboardButton(text="← Все устройства", callback_data="shl")],
     ])
 
@@ -1009,16 +1011,6 @@ async def btn_quota(message: Message) -> None:
     await cmd_quota(message)
 
 
-@router.message(F.text == "⏸ Пауза")
-async def btn_pause(message: Message) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
-    if role == "kid":
-        await message.answer("Эта функция доступна только родителям 🛡")
-        return
-    await cmd_pause(message, CommandObject(prefix="/", command="pause", args=""))
-
-
 @router.message(F.text == "📶 Wi-Fi")
 async def btn_wifi(message: Message) -> None:
     await message.answer("📶 Данные домашней Wi-Fi сети для гостей уточните у хозяев дома.")
@@ -1084,72 +1076,6 @@ def _resume_all_sync() -> int:
         s.close()
 
 
-def pause_presets_keyboard() -> InlineKeyboardMarkup:
-    """Быстрые пресеты для /pause без аргументов."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="⏸ Дети 30м", callback_data="pz:kid:30"),
-            InlineKeyboardButton(text="⏸ Дети 1ч", callback_data="pz:kid:60"),
-        ],
-        [
-            InlineKeyboardButton(text="🍽 Ужин (30м)", callback_data="pz:kid:30:dinner"),
-            InlineKeyboardButton(text="🌙 До утра", callback_data="pz:kid:morning"),
-        ],
-        [
-            InlineKeyboardButton(text="👥 Гости 1ч", callback_data="pz:guest:60"),
-            InlineKeyboardButton(text="🔍 Выбрать устройство", callback_data="pz:select"),
-        ],
-        [
-            InlineKeyboardButton(text="▶️ Снять все паузы", callback_data="pz:resume"),
-            InlineKeyboardButton(text="✖ Отмена", callback_data="pick:cancel"),
-        ],
-    ])
-
-
-@router.callback_query(F.data.startswith("pz:"))
-async def cb_pause_preset(cb: CallbackQuery) -> None:
-    parts = (cb.data or "").split(":")
-    if len(parts) < 2:
-        await cb.answer()
-        return
-    action = parts[1]
-    if action == "select":
-        await cb.answer()
-        candidates = await asyncio.to_thread(_find_candidates, "")
-        if isinstance(cb.message, Message):
-            await cb.message.edit_text(
-                "Выберите устройство для паузы на 30 мин:",
-                reply_markup=device_pick_keyboard(candidates, "pause_internet", extra=":30"),
-            )
-        return
-    if action == "resume":
-        removed = await asyncio.to_thread(_resume_all_sync)
-        await cb.answer()
-        if isinstance(cb.message, Message):
-            text = f"▶️ Снято пауз: {removed}" if removed else "Активных пауз нет."
-            await cb.message.edit_text(text, reply_markup=None)
-        return
-    target = action
-    if parts[2] == "morning":  # until 07:00, not a fixed 8 hours from now
-        minutes = max(1, round(family_svc.hours_until_morning() * 60))
-    else:
-        minutes = int(parts[2])
-    reason = "ужин" if len(parts) > 3 and parts[3] == "dinner" else ""
-    args: dict[str, Any] = {"target": target, "minutes": minutes}
-    if reason:
-        args["reason"] = reason
-    try:
-        result = await asyncio.to_thread(run_tool_sync, "pause_internet", args)
-    except tools.ToolError as e:
-        result = f"Не получилось: {e}"
-    except Exception:
-        log.exception("pause_internet упал")
-        result = "Ошибка при выполнении, подробности в журнале."
-    await cb.answer()
-    if isinstance(cb.message, Message):
-        await cb.message.edit_text(f"➡ {result}", reply_markup=None)
-
-
 @router.message(Command("pause"))
 async def cmd_pause(message: Message, command: CommandObject) -> None:
     user_id = message.from_user.id if message.from_user else 0
@@ -1159,10 +1085,8 @@ async def cmd_pause(message: Message, command: CommandObject) -> None:
         return
     raw = (command.args or "").strip()
     if not raw:
-        await message.answer(
-            "Быстрая пауза интернета. Выберите пресет или укажите время:",
-            reply_markup=pause_presets_keyboard(),
-        )
+        text, markup = await pause_menu.overview()
+        await message.answer(text, reply_markup=markup)
         return
     parts = raw.split()
     if len(parts) == 1 and parts[0].isdigit():

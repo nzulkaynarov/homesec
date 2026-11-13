@@ -338,50 +338,6 @@ def test_handle_voice_transcription_success(monkeypatch):
     assert msg.answer.called
 
 
-def test_pause_presets_keyboard():
-    from app.bot.handlers import pause_presets_keyboard
-
-    kb = pause_presets_keyboard()
-    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-    assert "pz:kid:30" in callbacks
-    assert "pz:kid:60" in callbacks
-    assert "pz:kid:30:dinner" in callbacks
-    assert "pz:kid:morning" in callbacks and "pz:resume" in callbacks
-    assert "pz:guest:60" in callbacks
-    assert "pz:select" in callbacks
-
-
-def test_cb_pause_preset(monkeypatch):
-    import asyncio
-    from unittest.mock import AsyncMock, MagicMock
-
-    from aiogram.types import Message
-
-    from app.bot import handlers
-
-    executed = []
-
-    def mock_run_tool(name, args, source="bot"):
-        executed.append((name, args))
-        return "Пауза включена"
-
-    monkeypatch.setattr(handlers, "run_tool_sync", mock_run_tool)
-
-    cb = MagicMock()
-    cb.data = "pz:kid:30:dinner"
-    cb.answer = AsyncMock()
-    msg = MagicMock(spec=Message)
-    msg.edit_text = AsyncMock()
-    cb.message = msg
-
-    asyncio.run(handlers.cb_pause_preset(cb))
-
-    assert len(executed) == 1
-    assert executed[0] == ("pause_internet", {"target": "kid", "minutes": 30, "reason": "ужин"})
-    msg.edit_text.assert_called_once()
-    assert "Пауза включена" in msg.edit_text.call_args[0][0]
-
-
 def test_format_quota_and_keyboard():
     from app.bot import texts
     from app.bot.handlers import quota_buttons_keyboard

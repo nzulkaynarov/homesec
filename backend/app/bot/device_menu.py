@@ -11,7 +11,8 @@ from sqlalchemy import select
 from .. import db as dbmod
 from ..ai.tools import ToolError
 from ..models import DEVICE_KIND_LABELS, Device, Person
-from ..services import device_owners, device_triage
+from ..services import device_owners, device_triage, pauses
+from ..services.pauses import Target
 from . import access
 from .triage import vendor_of
 
@@ -132,6 +133,12 @@ def _device_view(db: Any, device_id: int) -> dict[str, Any] | None:
         "seen": device_owners.seen_text(device),
         "blocked": device.blocked_manual,
         "speed": device.speed_limit,
+        "pausable": pauses.pausable(device),
+        "paused_until": (
+            pauses.paused_until(db, Target("device", device.id))
+            if pauses.pausable(device)
+            else None
+        ),
     }
 
 
@@ -166,6 +173,8 @@ def _card_actions(view: dict[str, Any], device_id: int, section: str, page: int)
         actions.append(_button("🗑 Удалить", f"dmx:{here}"))
     if actions:
         rows.append(actions)
+    if view["pausable"]:
+        rows.append([_button("⏸ Отключить на время", f"pzt:d{device_id}")])
     if view["kind"] != "infra":
         rows.append([_button("🐢 Скорость", f"dmv:{here}")])
     return rows
@@ -183,6 +192,8 @@ async def _device(device_id: int, section: str, page: int, notice: str = "") -> 
     lines.append(f"MAC: {view['mac']}")
     if view["blocked"]:
         lines.append("⛔ Заблокировано вручную")
+    if view["paused_until"] is not None:
+        lines.append(f"⏸ Без интернета до {view['paused_until']:%H:%M}")
     if view["speed"]:
         lines.append(f"🐢 Скорость: {view['speed']}")
     if not view["random"]:
