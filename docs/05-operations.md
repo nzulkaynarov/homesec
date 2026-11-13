@@ -203,3 +203,24 @@ ls -l /data/backups/homesec
 | Копия снята | 1 день / 12 часов | `HOMESEC_BACKUP_HC_URL` в `~/.config/homesec-backup.env` на ПК |
 
 Пустой URL отключает проверку. URL проверок — секреты, в git их не класть.
+
+## Сетевой экран и SSH на Pi
+
+С 13 ноября 2026 Pi принимает входящие соединения только на нужных портах (`deploy/pi/nftables.conf` → `/etc/nftables.conf`, служба `nftables`):
+
+- DNS 53: со всех адресов;
+- панель 8000: из домашней сети и гостевой 192.168.90.0/24, туда же роутер отправляет заблокированные устройства;
+- SSH 22 и админка AdGuard 3000: только из домашней сети.
+
+SSH пускает только по ключу (`deploy/pi/ssh-keys-only.conf` → `/etc/ssh/sshd_config.d/10-keys-only.conf`). Ключ этого компьютера уже добавлен. Новый ключ кладётся в `~znz/.ssh/authorized_keys` с компьютера, у которого доступ уже есть.
+
+Менять правила безопасно так: сначала поставить автоматический откат, потом применить, проверить и снять откат.
+
+```bash
+sudo systemd-run --unit=hs-fw-revert --on-active=10min /bin/sh -c "nft flush ruleset"
+sudo install -m 644 nftables.conf /etc/nftables.conf && sudo systemctl restart nftables
+# проверить ssh, DNS, панель с другого устройства, затем:
+sudo systemctl stop hs-fw-revert.timer
+```
+
+Без доступа по сети: клавиатура и монитор к Pi, затем `sudo nft flush ruleset`.
