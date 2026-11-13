@@ -18,6 +18,7 @@ from ..config import settings
 from ..db import Base, engine
 from ..migrations import ensure_schema
 from ..services import family as family_svc
+from ..services import followups
 from . import handlers, luna_watch, notify, texts
 from .health import default_monitor
 
@@ -27,6 +28,7 @@ NOTIFY_INTERVAL = 10  # опрос журнала на новые устройс
 HEALTH_INTERVAL = 60  # health-проверки, сек
 WATCHDOG_INTERVAL = 15 * 60  # эвристики аномалий, сек
 DIGEST_HOUR = 21  # ежедневный дайджест в 21:00 локального времени
+FOLLOWUP_INTERVAL = 5 * 60  # напоминания о заявках и недельная сводка, сек
 
 
 def _parent_ids() -> set[int]:
@@ -143,6 +145,35 @@ async def watchdog_loop(bot: Bot, chat_ids: set[int]) -> None:
         await asyncio.sleep(WATCHDOG_INTERVAL)
 
 
+def _followups() -> tuple[list[tuple[int, str, str]], str | None]:
+    """Reminders for waiting time requests, expired ones closed, and the weekly summary when due."""
+    s = dbmod.session()
+    try:
+        reminders = [(req.id, req.category, text) for req, text in followups.due_reminders(s)]
+        followups.expire_stale(s)
+        weekly = None
+        if followups.weekly_due(s):
+            weekly = followups.weekly_summary(s)
+            followups.mark_weekly_sent(s, datetime.now().date())
+        return reminders, weekly
+    finally:
+        s.close()
+
+
+async def followup_loop(bot: Bot, chat_ids: set[int]) -> None:
+    while True:
+        try:
+            reminders, weekly = await asyncio.to_thread(_followups)
+            for request_id, category, text in reminders:
+                keyboard = handlers.bonus_request_keyboard(request_id, category)
+                await _broadcast(bot, chat_ids, text, keyboard)
+            if weekly:
+                await _broadcast(bot, chat_ids, weekly)
+        except Exception:
+            log.exception("followup_loop")
+        await asyncio.sleep(FOLLOWUP_INTERVAL)
+
+
 def _build_digest() -> str:
     s = dbmod.session()
     try:
@@ -196,6 +227,7 @@ async def main() -> None:
         asyncio.create_task(health_loop(bot, allowed)),
         asyncio.create_task(watchdog_loop(bot, allowed)),
         asyncio.create_task(digest_loop(bot, allowed)),
+        asyncio.create_task(followup_loop(bot, allowed)),
         asyncio.create_task(luna_watch.watch_loop()),
     ]
     log.info("бот запущен, чатов в allowlist: %d", len(allowed))
