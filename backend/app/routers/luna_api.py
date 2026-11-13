@@ -51,6 +51,11 @@ class QuizResult(BaseModel):
 
 
 def _person_or_404(db: Session, name: str) -> Person:
+    """A person by id (what Luna sends since 2026-11-13, stable across renames) or by name."""
+    if name.isdigit():
+        by_id = db.get(Person, int(name))
+        if by_id is not None:
+            return by_id
     # SQLite compares only ASCII case-insensitively, and family names are Cyrillic.
     wanted = name.casefold()
     for person in db.scalars(select(Person)):

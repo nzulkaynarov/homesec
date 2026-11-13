@@ -283,3 +283,10 @@ def test_luna_cannot_take_over_a_linked_parent(db, client):
     same = client.put(f"/api/luna/v1/people/{parent.id}/telegram", json={"telegram_id": 111},
                       headers=AUTH)
     assert same.status_code == 200  # repeating the existing link stays harmless
+
+
+def test_a_person_is_found_by_id_after_a_rename(db, client, kid):
+    kid.name = "Михаил"
+    db.commit()
+    response = client.get(f"/api/luna/v1/people/{kid.id}/restriction", headers=AUTH)
+    assert response.status_code == 200
