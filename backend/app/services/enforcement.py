@@ -407,8 +407,16 @@ def discover_devices(db: Session, api, answering: set[str] | None = None) -> lis
     return devices
 
 
-def _desired_state(db: Session, devices: list[Device]) -> dict:
-    now = datetime.now()
+def _desired_state(
+    db: Session,
+    devices: list[Device],
+    now: datetime | None = None,
+    self_ips: set[str] | None = None,
+) -> dict:
+    """What the router and AdGuard should hold for these devices at `now`: it only reads the
+    database and computes, so a test can ask about Sunday 21:31 without touching a clock or
+    the network. reconcile() passes the real time and the Pi's own addresses."""
+    now = now or datetime.now()
     rules = list(db.scalars(select(Rule)))
     policies = {p.group: p for p in db.scalars(select(GroupPolicy))}
 
@@ -437,7 +445,7 @@ def _desired_state(db: Session, devices: list[Device]) -> dict:
     ag_client_ips: set[str] = set()
 
     quota_spent = quota.exhausted(db, devices, now)  # {device_id: категории}
-    self_ips = get_self_ips()
+    self_ips = get_self_ips() if self_ips is None else self_ips
     for dev in devices:
         if not dev.ip or dev.ip in self_ips or dev.kind == "infra":
             continue  # the network's own equipment is never a client, whatever its flags say
@@ -504,7 +512,8 @@ def reconcile(db: Session) -> dict:
     # малинки от попадания в списки блокировки — лучше НЕ трогать роутер вовсе,
     # чем рискнуть оставить весь дом без DNS. Штатно набор непустой (в нём
     # статический якорь HS_SELF_IPS), так что это страховка на крайний случай.
-    if not get_self_ips():
+    self_ips = get_self_ips()
+    if not self_ips:
         msg = ("не удалось определить собственный IP малинки — reconcile "
                "пропущен, состояние роутера не тронуто (проверьте HS_SELF_IPS)")
         log.error(msg)
@@ -522,7 +531,7 @@ def reconcile(db: Session) -> dict:
                 for mac in mikrotik.prune_pinned_leases(api, set(known_macs(db))):
                     log_event(db, "lease_pruned", f"Снят закреплённый адрес удалённого {mac}")
             mark_seen(db, devices, mikrotik.get_online_ips(api))
-            desired = _desired_state(db, devices)
+            desired = _desired_state(db, devices, datetime.now(), self_ips)
             quota_blocked = desired["quota_blocked"]
             for list_name, ips in desired["lists"].items():
                 added, _removed = mikrotik.address_list_sync(api, list_name, ips)

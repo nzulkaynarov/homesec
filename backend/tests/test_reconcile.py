@@ -107,7 +107,7 @@ def _router_up(monkeypatch, *, queues_error=None, desired_error=None):
     monkeypatch.setattr(enforcement, "follow_arp", lambda db, devices, arp: devices)
     monkeypatch.setattr(enforcement, "mark_seen", lambda db, devices, online: None)
 
-    def desired(db, devices):
+    def desired(db, devices, now=None, self_ips=None):
         if desired_error:
             raise desired_error
         return {"lists": {"hs-blocked": set()}, "queues": {}, "ag_clients": [],

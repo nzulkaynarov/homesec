@@ -183,3 +183,25 @@ def test_discover_devices_inherits_twin_properties(db, monkeypatch):
 
     ev = db.query(EventLog).filter(EventLog.kind == "device_maybe_same").one()
     assert "iPhone-Misha" in ev.message
+
+
+def test_desired_state_is_computed_for_a_given_moment(db):
+    """The schedule is checked against the time passed in, not the Pi's clock."""
+    kid = Person(name="Kid", role="kid")
+    db.add(kid)
+    db.commit()
+    phone = Device(mac="AA:00:00:00:00:21", ip="192.168.88.21", name="phone", person_id=kid.id)
+    db.add(phone)
+    # school nights: Sunday to Thursday (0 = Monday)
+    db.add(Rule(name="bedtime", target_type="person", target=str(kid.id), days="6,0,1,2,3",
+                start_time="21:30", end_time="07:00"))
+    db.commit()
+
+    def blocked(moment: datetime) -> bool:
+        state = _desired_state(db, [phone], moment, self_ips={"192.168.88.2"})
+        return phone.ip in state["lists"]["hs-blocked"]
+
+    assert blocked(datetime(2026, 11, 15, 21, 31))  # Sunday evening
+    assert blocked(datetime(2026, 11, 16, 6, 59))  # Monday before wake-up
+    assert not blocked(datetime(2026, 11, 16, 7, 0))
+    assert not blocked(datetime(2026, 11, 20, 22, 0))  # Friday night is not a school night
