@@ -18,7 +18,38 @@ source /etc/default/homesec-deploy   # DEPLOY_USER, APP_DIR, BRANCH
 STATE_DIR=/var/lib/homesec
 DEPLOYED_FILE="$STATE_DIR/deployed_sha"
 
+REJECTED_FILE="$STATE_DIR/rejected_sha"
+HEALTH_URL=http://127.0.0.1:8000/api/luna/v1/health
+
 run() { sudo -u "$DEPLOY_USER" "$@"; }
+
+# Сообщение родителям через бота HomeSec. Токен читается из .env и не попадает
+# ни в аргументы процессов, ни в журнал.
+notify() {
+  local env_file="$APP_DIR/backend/.env" token ids id
+  token=$(sed -n 's/^HS_TELEGRAM_BOT_TOKEN=//p' "$env_file" 2>/dev/null | tail -1)
+  ids=$(sed -n 's/^HS_TELEGRAM_CHAT_IDS=//p' "$env_file" 2>/dev/null | tail -1)
+  [ -n "$token" ] && [ -n "$ids" ] || return 0
+  for id in ${ids//,/ }; do
+    printf 'url = "https://api.telegram.org/bot%s/sendMessage"\n' "$token" \
+      | curl -s -m 10 -o /dev/null -K - --data-urlencode "chat_id=$id" --data-urlencode "text=$1" || true
+  done
+}
+
+# Новая версия здорова, если панель отвечает в течение полутора минут, а бот
+# после этого полминуты работает без перезапусков.
+healthy() {
+  local i restarts
+  for i in $(seq 1 30); do
+    curl -fs -m 3 -o /dev/null "$HEALTH_URL" && break
+    [ "$i" = 30 ] && return 1
+    sleep 3
+  done
+  restarts=$(systemctl show -p NRestarts --value homesec-bot)
+  sleep 30
+  systemctl is-active --quiet homesec homesec-bot \
+    && [ "$(systemctl show -p NRestarts --value homesec-bot)" = "$restarts" ]
+}
 
 # Юниты синхронизируются ДО раннего выхода «изменений нет»: иначе новый или
 # изменённый юнит из свежего коммита никогда не установится — деплой, привёзший
@@ -63,22 +94,29 @@ if [ "$deployed_sha" = "$remote_sha" ]; then
   exit 0
 fi
 
-# Опциональный гейт на зелёный CI: если коммит свежий, проверяем GitHub Actions
-# перед установкой. Если CI ещё бежит (in_progress/queued) — подождём следующий тик.
-# Если CI упал (failure) — не деплоим сломанный коммит на роутер/Pi.
+if [ "$remote_sha" = "$(cat "$REJECTED_FILE" 2>/dev/null || true)" ]; then
+  exit 0   # этот коммит уже откатывали; ждём следующий
+fi
+
+# Гейт на зелёный CI. Ставим только коммит, у которого все проверки GitHub
+# завершились успешно. Нет ответа, лимит запросов, проверки ещё идут — ждём
+# следующего тика. Раньше здесь сравнивались строки без пробела после
+# двоеточия, а GitHub отвечает с пробелом, поэтому гейт не срабатывал никогда.
 if [ "${CHECK_CI:-1}" = "1" ]; then
   ci_api="https://api.github.com/repos/nzulkaynarov/homesec/commits/$remote_sha/check-runs"
-  ci_json=$(curl -s -m 5 -H "Accept: application/vnd.github+json" "$ci_api" 2>/dev/null || true)
-  if [ -n "$ci_json" ] && [[ "$ci_json" == *"\"check_runs\""* ]]; then
-    if [[ "$ci_json" == *"\"status\":\"in_progress\""* ]] || [[ "$ci_json" == *"\"status\":\"queued\""* ]]; then
-      echo "$(date -Is) homesec update: CI для $remote_sha ещё выполняется, ждём завершения..."
-      exit 0
-    fi
-    if [[ "$ci_json" == *"\"conclusion\":\"failure\""* ]]; then
-      echo "$(date -Is) homesec update: ОШИБКА — CI для $remote_sha упал (failure). Деплой отклонён!" >&2
-      exit 0
-    fi
-  fi
+  verdict=$(curl -s -m 10 -H "Accept: application/vnd.github+json" "$ci_api" 2>/dev/null \
+    | python3 -I "$APP_DIR/deploy/ci_verdict.py" || echo wait)
+  case "$verdict" in
+    green) ;;
+    red)
+      if [ "$(cat "$STATE_DIR/ci_red_sha" 2>/dev/null || true)" != "$remote_sha" ]; then
+        echo "$(date -Is) homesec update: CI для $remote_sha упал, коммит не ставим" >&2
+        mkdir -p "$STATE_DIR" && echo "$remote_sha" > "$STATE_DIR/ci_red_sha"
+        notify "⚠️ HomeSec: новая версия не прошла проверки, на Pi осталась прежняя."
+      fi
+      exit 0 ;;
+    *) exit 0 ;;
+  esac
 fi
 
 echo "$(date -Is) homesec update: ${deployed_sha:-нет метки} -> $remote_sha"
@@ -115,6 +153,19 @@ fi
 
 systemctl restart homesec
 systemctl restart homesec-bot
+
+if ! healthy; then
+  echo "$(date -Is) homesec update: $remote_sha не поднялся, откат на ${deployed_sha:-?}" >&2
+  mkdir -p "$STATE_DIR" && echo "$remote_sha" > "$REJECTED_FILE"
+  if [ -n "$deployed_sha" ]; then
+    run git -C "$APP_DIR" reset --hard "$deployed_sha"
+    sync_units
+    systemctl restart homesec
+    systemctl restart homesec-bot
+  fi
+  notify "⚠️ HomeSec: новая версия не запустилась на Pi, вернул прежнюю. Правила работают по-старому."
+  exit 1
+fi
 
 # Метка успеха — последней строкой. Всё, что выше, при сбое ретраится.
 mkdir -p "$STATE_DIR"
