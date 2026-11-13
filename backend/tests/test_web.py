@@ -170,3 +170,32 @@ def test_quick_action_redirect_rejects_external():
     assert _safe_redirect("/devices") == "/devices"
     assert _safe_redirect("//evil.com") == "/"
     assert _safe_redirect("https://evil.com") == "/"
+
+
+def test_deleting_a_person_in_the_panel_removes_their_rules():
+    from app.db import session as new_session
+    from app.models import Person, Rule
+
+    db = new_session()
+    try:
+        kid = Person(name="Удаляемый", role="kid", bot_role="kid")
+        db.add(kid)
+        db.commit()
+        db.add(Rule(name="Отбой", target_type="person", target=str(kid.id), days="0,1,2,3,4,5,6",
+                    start_time="22:00", end_time="07:00", enabled=True))
+        db.commit()
+        kid_id = kid.id
+    finally:
+        db.close()
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "testpass"},
+                    follow_redirects=False)
+        client.post(f"/people/{kid_id}/delete", follow_redirects=False)
+    db = new_session()
+    try:
+        assert db.get(Person, kid_id) is None
+        # a new person may get the same id from SQLite and must not inherit the bedtime
+        left = db.query(Rule).filter(Rule.target_type == "person", Rule.target == str(kid_id))
+        assert left.count() == 0
+    finally:
+        db.close()

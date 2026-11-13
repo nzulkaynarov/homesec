@@ -8,7 +8,6 @@
   <select name="role">
     <option value="kid">Дети</option>
     <option value="adult">Взрослые</option>
-    <option value="guest">Гости</option>
   </select>
   <button>Добавить</button>
 </form>
@@ -23,7 +22,6 @@
         <select name="role" onchange="this.form.submit()">
           <option value="kid" {{ 'selected' if p.role == 'kid' }}>Дети</option>
           <option value="adult" {{ 'selected' if p.role == 'adult' }}>Взрослые</option>
-          <option value="guest" {{ 'selected' if p.role == 'guest' }}>Гости</option>
         </select>
       </form>
     </td>

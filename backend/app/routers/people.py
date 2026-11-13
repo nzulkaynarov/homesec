@@ -4,7 +4,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..db import get_db
-from ..models import GROUPS, Person
+from ..models import Person
+from ..services import house_rules
 from ..templates_env import templates
 
 router = APIRouter()
@@ -17,30 +18,31 @@ async def people_page(request: Request, db: Session = Depends(get_db)):
     return templates.TemplateResponse(request, "people.html", ctx)
 
 
+# The panel's forms call the same service as the bot, so validation, roles and cleanup agree.
+
+
 @router.post("/people/add")
 async def add_person(name: str = Form(...), role: str = Form("kid"), db: Session = Depends(get_db)):
-    name = name.strip()
-    if name and role in GROUPS and not db.scalar(select(Person).where(Person.name == name)):
-        db.add(Person(name=name, role=role))
-        db.commit()
+    try:
+        house_rules.add_person(db, name, role)
+    except house_rules.RuleError:
+        pass  # an empty or taken name, or an unknown role: the list shows nothing new
     return RedirectResponse("/people", status_code=302)
 
 
 @router.post("/people/{person_id}/update")
 async def update_person(person_id: int, role: str = Form(...), db: Session = Depends(get_db)):
-    person = db.get(Person, person_id)
-    if person and role in GROUPS:
-        person.role = role
-        db.commit()
+    try:
+        house_rules.set_role(db, person_id, role)
+    except (house_rules.RuleError, LookupError):
+        pass
     return RedirectResponse("/people", status_code=302)
 
 
 @router.post("/people/{person_id}/delete")
 async def delete_person(person_id: int, db: Session = Depends(get_db)):
-    person = db.get(Person, person_id)
-    if person:
-        for dev in person.devices:
-            dev.person_id = None
-        db.delete(person)
-        db.commit()
+    try:
+        house_rules.delete_person(db, person_id)  # with the person's rules, limits and pauses
+    except (house_rules.RuleError, LookupError):
+        pass
     return RedirectResponse("/people", status_code=302)
