@@ -1,5 +1,4 @@
 import logging
-from datetime import datetime
 
 from fastapi import APIRouter, Depends, Request
 from fastapi.concurrency import run_in_threadpool
@@ -8,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Device, EventLog, Person, active_pauses
-from ..services import adguard, mikrotik, quota
+from ..services import adguard, mikrotik, pause_state, quota
 from ..templates_env import templates
 
 log = logging.getLogger("homesec.dashboard")
@@ -17,27 +16,6 @@ router = APIRouter()
 # Порядок секций консоли: дети — сверху (главные для родителя), потом взрослые,
 # гости и устройства без владельца.
 _ROLE_ORDER = {"kid": 0, "adult": 1, "guest": 2}
-
-
-def _pause_map(db: Session, devices: list[Device]) -> dict[int, dict[str, datetime]]:
-    """{device_id: {"device": до…, "group": до…}} — источник паузы важен:
-    кнопка «Снять паузу» на карточке устройства снимает только личную паузу,
-    групповую снимают отдельной кнопкой в шапке секции. Раньше источники были
-    слиты, и родитель жал кнопку, которая для групповой паузы ничего не
-    делала — страница просто перезагружалась без изменений."""
-    out: dict[int, dict[str, datetime]] = {}
-    for p in active_pauses(db):
-        for d in devices:
-            if p.target_type == "device" and p.target == str(d.id):
-                source = "device"
-            elif p.target_type == "group" and p.target == d.group:
-                source = "group"
-            else:
-                continue
-            current = out.setdefault(d.id, {})
-            if source not in current or p.until > current[source]:
-                current[source] = p.until
-    return out
 
 
 def _group_paused(db: Session) -> set[str]:
@@ -49,20 +27,22 @@ def _console(db: Session, devices: list[Device], online_ips: set[str]) -> list[d
     владельца. Каждое устройство — с онлайн-статусом, паузой и полосами
     экранного времени (квоты)."""
     progress = quota.progress(db, devices)
-    pauses = _pause_map(db, devices)
+    pauses = pause_state.device_pauses(db, devices)
     people = list(db.scalars(select(Person)))
     people.sort(key=lambda p: (_ROLE_ORDER.get(p.role, 9), p.name.lower()))
 
     def card_for(dev: Device) -> dict:
-        sources = pauses.get(dev.id, {})
-        personal = sources.get("device")
-        group_until = sources.get("group")
+        pause = pauses.get(dev.id)
+        held = pause.held_until if pause else None
+        sources = pause.sources if pause and held else frozenset()
         return {
             "dev": dev,
             "online": dev.ip in online_ips,
-            "paused_until": max(filter(None, (personal, group_until)), default=None),
-            # Пауза пришла только от группы — личной кнопкой её не снять.
-            "group_pause_only": group_until is not None and personal is None,
+            "paused_until": held,
+            # The device's own button lifts only its own pause; a child's pause has its
+            # own button, a group's is lifted in the section header.
+            "person_pause": "person" in sources and "device" not in sources,
+            "group_pause_only": sources == {"group"},
             "quota": progress.get(dev.id, []),
         }
 

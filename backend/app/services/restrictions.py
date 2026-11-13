@@ -8,8 +8,8 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..config import settings
-from ..models import Device, Rule, active_pauses
-from . import quota, unlock
+from ..models import Device, Rule
+from . import pause_state, quota
 from .enforcement import rule_is_active
 
 
@@ -40,18 +40,9 @@ def restriction_for_ip(db: Session, ip: str) -> dict | None:
     if dev.blocked_manual:
         return {"kind": "manual", **base}
 
-    my_pauses = [
-        p for p in active_pauses(db, now)
-        if (p.target_type == "device" and p.target == str(dev.id))
-        or (
-            dev.person_id is not None
-            and p.target_type == "person"
-            and p.target == str(dev.person_id)
-        )
-        or (p.target_type == "group" and p.target == dev.group)
-    ]
-    if my_pauses and (dev.person_id is None or unlock.open_until(db, dev.person_id, now) is None):
-        return {"kind": "pause", "until": max(p.until for p in my_pauses), **base}
+    paused = pause_state.held_until(db, dev, now)
+    if paused is not None:
+        return {"kind": "pause", "until": paused, **base}
 
     if any(r["category"] == "internet" and r["used"] >= r["limit"] for r in quota_rows):
         return {"kind": "quota", **base}

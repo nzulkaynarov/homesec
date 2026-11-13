@@ -38,7 +38,7 @@ from ..models import (
     kv_set,
     log_event,
 )
-from ..services import adguard, enforcement, house_rules, mikrotik
+from ..services import adguard, enforcement, house_rules, mikrotik, pause_state, pauses
 from ..services import family as family_svc
 from ..services import quota as quota_svc
 from ..services.device_links import move_device_rows
@@ -226,11 +226,8 @@ def _guard_self(dev: Device) -> None:
         )
 
 
-def _device_row(d: Device, pauses: list[Pause]) -> dict:
-    paused = [p for p in pauses
-              if (p.target_type == "device" and p.target == str(d.id))
-              or (p.target_type == "group" and p.target == d.group)]
-    until = max(p.until for p in paused).isoformat(timespec="minutes") if paused else None
+def _device_row(d: Device, pause: pause_state.DevicePause | None) -> dict:
+    held = pause.held_until if pause else None
     owner = d.person.name if d.person else None
     if d.kind == "shared":
         owner = "📺 Общие (ТВ/Колонки)"
@@ -249,7 +246,13 @@ def _device_row(d: Device, pauses: list[Pause]) -> dict:
         "owner": owner,
         "blocked_manual": d.blocked_manual,
         "speed_limit": d.speed_limit or None,
-        "paused_until": until,
+        "paused_until": held.isoformat(timespec="minutes") if held else None,
+        # Where the pause comes from (device, person, group): resume_internet on the
+        # device lifts only its own; a person's or a group's needs that target.
+        "paused_by": sorted(pause.sources) if pause else [],
+        "open_until": (
+            pause.open_until.isoformat(timespec="minutes") if pause and pause.open_until else None
+        ),
     }
 
 
@@ -270,8 +273,9 @@ def list_devices(db: Session) -> list[dict]:
             online = mikrotik.get_online_ips(api)
     except mikrotik.MikrotikError:
         router_ok = False  # пометка в ответе: online=null у всех устройств
-    pauses = active_pauses(db)
-    rows = [_device_row(d, pauses) for d in db.scalars(select(Device))]
+    devices = list(db.scalars(select(Device)))
+    pauses = pause_state.device_pauses(db, devices)
+    rows = [_device_row(d, pauses.get(d.id)) for d in devices]
     for r in rows:
         r["online"] = (bool(r["ip"]) and r["ip"] in online) if router_ok else None
     return rows
@@ -433,16 +437,19 @@ def minutes_until(clock: str, now: datetime) -> int:
 @tool(mutating=True)
 def pause_internet(
     db: Session,
-    target: Annotated[str, "группа (kid/guest/unknown) или устройство: id, имя или MAC"],
+    target: Annotated[
+        str, "группа (kid/guest/unknown), имя ребёнка или устройство: id, имя или MAC"
+    ],
     minutes: Annotated[int, "длительность паузы в минутах (1–1440); 0, если задано until"] = 0,
     reason: Annotated[str, "короткая причина, попадает в журнал"] = "",
     until: Annotated[
         str, "до какого времени ЧЧ:ММ, например 09:00; ближайшее такое время, минуты не считай"
     ] = "",
 ) -> str:
-    """Временно выключает интернет группе или устройству («пауза до …»).
-    Если человек назвал время окончания, передай until, а не minutes.
-    Снимается автоматически по истечении времени или через resume_internet."""
+    """Временно выключает интернет группе, ребёнку (всем его устройствам) или
+    устройству («пауза до …»). Если человек назвал время окончания, передай
+    until, а не minutes. Снимается автоматически по истечении времени или через
+    resume_internet."""
     now = datetime.now()
     if until.strip():
         until_at = next_clock(until, now)
@@ -459,10 +466,18 @@ def pause_internet(
         db.add(Pause(target_type="group", target=t, until=until_at, reason=reason))
         db.commit()
         label = GROUP_LABELS[t]
+    elif (person := _find_person(db, t)) is not None:
+        if person.role == "adult":
+            raise ToolError("Взрослых ставить на паузу нельзя")
+        try:
+            pauses.pause(db, pauses.Target("person", person.id), until_at, now)
+        except pauses.PauseError as exc:
+            raise ToolError(str(exc)) from exc
+        label = f"{person.name} (все устройства)"
     else:
         dev = find_device(db, t)
         if dev is None:
-            raise ToolError(f"Не нашёл устройство «{target}» — уточните имя или id")
+            raise ToolError(f"Не нашёл ребёнка или устройство «{target}» — уточните имя или id")
         _guard_self(dev)
         db.add(Pause(target_type="device", target=str(dev.id), until=until_at, reason=reason))
         db.commit()
@@ -505,28 +520,63 @@ def set_bedtime(
 @tool(mutating=True)
 def resume_internet(
     db: Session,
-    target: Annotated[str, "группа (kid/guest/unknown) или устройство: id, имя или MAC"],
+    target: Annotated[
+        str, "группа (kid/guest/unknown), имя ребёнка или устройство: id, имя или MAC"
+    ],
 ) -> str:
-    """Досрочно снимает активные паузы с группы или устройства."""
+    """Досрочно снимает паузы. kid — все паузы детей (группы, каждого ребёнка и
+    их устройств); имя ребёнка — его паузы и паузы его устройств; устройство —
+    паузу самого устройства (если устройство держит пауза ребёнка или группы,
+    ответ скажет, что снять)."""
     t = target.strip()
+    if t == "kid":
+        if not house_rules.resume_kids(db):
+            raise ToolError("Активных пауз у детей нет")
+        return "Паузы детей сняты"
     if t in GROUPS:
-        key = ("group", t)
-        label = GROUP_LABELS[t]
-    else:
-        dev = find_device(db, t)
-        if dev is None:
-            raise ToolError(f"Не нашёл устройство «{target}» — уточните имя или id")
-        key = ("device", str(dev.id))
-        label = f"{dev.name} ({dev.ip or dev.mac})"
-    removed = 0
-    for p in active_pauses(db):
-        if (p.target_type, p.target) == key:
-            db.delete(p)
-            removed += 1
-    db.commit()
+        removed = _delete_pauses(db, "group", t)
+        if not removed:
+            raise ToolError(f"Активных пауз для «{GROUP_LABELS[t]}» нет")
+        return f"Пауза снята: {GROUP_LABELS[t]}"
+    if (person := _find_person(db, t)) is not None:
+        own = pauses.Target("person", person.id)
+        if not pauses.own_pauses(db, own):
+            raise ToolError(f"У «{person.name}» своей паузы нет")
+        return pauses.resume(db, own)
+    dev = find_device(db, t)
+    if dev is None:
+        raise ToolError(f"Не нашёл ребёнка или устройство «{target}» — уточните имя или id")
+    label = f"{dev.name} ({dev.ip or dev.mac})"
+    removed = _delete_pauses(db, "device", str(dev.id))
+    still = pause_state.device_pauses(db, [dev]).get(dev.id)
+    if still is not None and still.holds:
+        holder = (
+            dev.person.name
+            if "person" in still.sources and dev.person
+            else GROUP_LABELS.get(dev.group, dev.group)
+        )
+        note = f"«{label}» всё ещё на паузе до {still.held_until:%H:%M}: её поставили на «{holder}»"
+        if not removed:
+            raise ToolError(note + ". Сними паузу с этой цели.")
+        return f"Пауза устройства снята, но {note}"
     if not removed:
         raise ToolError(f"Активных пауз для «{label}» нет")
     return f"Пауза снята: {label}"
+
+
+def _find_person(db: Session, name: str) -> Person | None:
+    key = name.strip().casefold()
+    if not key:
+        return None
+    return next((p for p in db.scalars(select(Person)) if p.name.casefold() == key), None)
+
+
+def _delete_pauses(db: Session, target_type: str, target: str) -> int:
+    rows = [p for p in active_pauses(db) if (p.target_type, p.target) == (target_type, target)]
+    for row in rows:
+        db.delete(row)
+    db.commit()
+    return len(rows)
 
 
 @tool()

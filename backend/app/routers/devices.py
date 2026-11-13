@@ -15,10 +15,9 @@ from ..models import (
     Pause,
     Person,
     QuotaBonus,
-    active_pauses,
     log_event,
 )
-from ..services import device_owners, mikrotik, quota
+from ..services import device_owners, mikrotik, pause_state, pauses, quota
 from ..services.enforcement import reconcile
 from ..services.quota import QUOTA_CATEGORIES
 from ..templates_env import templates
@@ -76,14 +75,11 @@ async def devices_page(request: Request, db: Session = Depends(get_db)):
     devices = list(db.scalars(select(Device).order_by(Device.first_seen.desc())))
     people = list(db.scalars(select(Person).order_by(Person.name)))
     online_ips = await run_in_threadpool(_online_ips)
-    pause_until: dict[int, datetime] = {}
-    for p in active_pauses(db):
-        for d in devices:
-            hit = (p.target_type == "device" and p.target == str(d.id)) or (
-                p.target_type == "group" and p.target == d.group
-            )
-            if hit and (d.id not in pause_until or p.until > pause_until[d.id]):
-                pause_until[d.id] = p.until
+    pause_until = {
+        device_id: state.held_until
+        for device_id, state in pause_state.device_pauses(db, devices).items()
+        if state.held_until is not None
+    }
     return templates.TemplateResponse(request, "devices.html", {
         "active": "devices",
         "devices": devices,
@@ -227,6 +223,20 @@ async def bonus_device(
                           comment="бонус с дашборда"))
         db.commit()
         log_event(db, "bonus", f"Бонус +{minutes} мин ({category}): {dev.name}")
+    tasks.add_task(_reconcile_bg)
+    return RedirectResponse(_safe_redirect(redirect_to), status_code=302)
+
+
+@router.post("/people/{person_id}/unpause")
+async def unpause_person(
+    person_id: int,
+    tasks: BackgroundTasks,
+    redirect_to: str = Form("/"),
+    db: Session = Depends(get_db),
+):
+    """Lift a child's pause and the pauses on their devices, as the bot's button does."""
+    if db.get(Person, person_id) is not None:
+        pauses.resume(db, pauses.Target("person", person_id))
     tasks.add_task(_reconcile_bg)
     return RedirectResponse(_safe_redirect(redirect_to), status_code=302)
 

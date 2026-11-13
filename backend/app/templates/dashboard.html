@@ -35,7 +35,13 @@
 {% macro dev_actions(card) %}
   {% set d = card.dev %}
   <div class="qa">
-    {% if card.group_pause_only and not d.blocked_manual %}
+    {% if card.person_pause and not d.blocked_manual %}
+      {# The pause is on the child, so it is lifted for all their devices at once. #}
+      <form method="post" action="/people/{{ d.person_id }}/unpause" class="inline">
+        <input type="hidden" name="redirect_to" value="/">
+        <button class="good">▶ Снять паузу ребёнка</button>
+      </form>
+    {% elif card.group_pause_only and not d.blocked_manual %}
       {# Паузу поставили всей группе — снимать её кнопкой одного устройства
          нельзя, иначе родитель жмёт и ничего не происходит. #}
       <span class="hint">⏸ пауза всей группы — снимается кнопкой выше</span>

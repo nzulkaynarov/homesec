@@ -13,7 +13,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Device, Pause, Person, kv_set, log_event
-from . import house_rules, unlock
+from . import house_rules, pause_state, unlock
 
 MAX_PAUSE = timedelta(hours=24)
 PRESET_MINUTES = (15, 30, 60, 120, 180)
@@ -180,30 +180,31 @@ def pause(db: Session, target: Target, until: datetime, now: datetime | None = N
     return f"⏸ {name}: без интернета до {until:%H:%M}"
 
 
+def own_pauses(db: Session, target: Target) -> list[Pause]:
+    """The pauses that resume() lifts for a person or a device: a person's own and the ones
+    on their devices; a device's own. A group pause stays; it belongs to the whole group."""
+    if target.kind == "person":
+        _person(db, target.id)
+        device_ids = {str(d.id) for d in kid_devices(db, target.id)}
+        return [
+            row
+            for row in db.scalars(select(Pause))
+            if (row.target_type == "person" and row.target == str(target.id))
+            or (row.target_type == "device" and row.target in device_ids)
+        ]
+    _device(db, target.id)
+    query = select(Pause).where(Pause.target_type == "device", Pause.target == str(target.id))
+    return list(db.scalars(query))
+
+
 def resume(db: Session, target: Target) -> str:
     """Lift the pauses set on the target itself; a bedtime or a limit keeps working."""
     if target.kind == "kids":
         removed = house_rules.resume_kids(db)
         kv_set(db, "reconcile_asap", "1")
         return "▶️ Дети снова в интернете" if removed else "У детей паузы не было"
-    if target.kind == "person":
-        name = _person(db, target.id).name
-        rows = [
-            row
-            for row in db.scalars(select(Pause))
-            if (row.target_type == "person" and row.target == str(target.id))
-            or (
-                row.target_type == "device"
-                and row.target in {str(d.id) for d in kid_devices(db, target.id)}
-            )
-        ]
-    else:
-        name = _device(db, target.id).name
-        rows = list(
-            db.scalars(
-                select(Pause).where(Pause.target_type == "device", Pause.target == str(target.id))
-            )
-        )
+    name = label(db, target)
+    rows = own_pauses(db, target)
     for row in rows:
         db.delete(row)
     if not rows:
@@ -223,19 +224,7 @@ def paused_until(db: Session, target: Target, now: datetime | None = None) -> da
         return min(end for end in ends if end is not None)
     if target.kind == "person":
         return house_rules.paused_until(db, target.id, now)
-    device = _device(db, target.id)
-    rows = [
-        row
-        for row in db.scalars(select(Pause).where(Pause.until > now))
-        if (row.target_type == "device" and row.target == str(device.id))
-        or (
-            device.person_id is not None
-            and row.target_type == "person"
-            and row.target == str(device.person_id)
-        )
-        or (row.target_type == "group" and row.target == device.group)
-    ]
-    return max((row.until for row in rows), default=None)
+    return pause_state.held_until(db, _device(db, target.id), now)
 
 
 def active(db: Session, now: datetime | None = None) -> list[tuple[str, datetime]]:
