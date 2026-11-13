@@ -105,6 +105,11 @@ def test_unknown_person_or_no_device(db, client):
 
 
 def test_correct_quiz_awards_once(db, client, kid):
+    from app.models import Quota as _Quota
+
+    db.add(_Quota(name="Игры", target_type="person", target=str(kid.id), category="games",
+                  minutes_per_day=60, days="0,1,2,3,4,5,6", enabled=True))
+    db.commit()
     assert client.get("/api/luna/v1/people/Миша/quiz", headers=AUTH).json() == {"available": True}
     won = client.post("/api/luna/v1/people/Миша/quiz-result", json={"correct": True}, headers=AUTH)
     assert won.json() == {"awarded_minutes": 15}

@@ -160,6 +160,11 @@ def test_quiz_lifecycle(db):
     p = Person(name="Миша", role="kid")
     db.add(p)
     db.commit()
+    from app.models import Quota as _Quota
+
+    db.add(_Quota(name="Игры", target_type="person", target=str(p.id), category="games",
+                  minutes_per_day=60, days="0,1,2,3,4,5,6", enabled=True))
+    db.commit()
 
     q = family_svc.get_random_quiz_question()
     assert "question" in q and "options" in q and "correct" in q

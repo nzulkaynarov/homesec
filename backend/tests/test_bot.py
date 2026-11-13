@@ -526,6 +526,11 @@ def test_bonus_direct_approval(db):
     kid = Person(name="Коля", role="kid", telegram_id=9999, bot_role="kid")
     db.add(kid)
     db.commit()
+    from app.models import Quota as _Quota
+
+    db.add(_Quota(name="Игры", target_type="person", target=str(kid.id), category="games",
+                  minutes_per_day=60, days="0,1,2,3,4,5,6", enabled=True))
+    db.commit()
 
     kb = bonus_request_direct_keyboard(kid.id)
     callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
@@ -549,10 +554,10 @@ def test_bonus_direct_approval(db):
 
     qb = db.scalar(select(QuotaBonus).where(QuotaBonus.target == str(kid.id)))
     assert qb is not None
-    assert qb.minutes == 30
+    assert (qb.minutes, qb.category) == (30, "games")  # the limit that exists, not "internet"
 
     cb.bot.send_message.assert_called_once()
-    assert "30 минут" in cb.bot.send_message.call_args[0][1]
+    assert "+30 мин к лимитам: игры" in cb.bot.send_message.call_args[0][1]
 
 
 def test_kid_explore_keyboard_and_callback():
@@ -599,6 +604,11 @@ def test_quiz_flow_and_parent_notification(db, monkeypatch):
 
     kid = Person(name="Артём", role="kid", telegram_id=5555, bot_role="kid")
     db.add(kid)
+    db.commit()
+    from app.models import Quota as _Quota
+
+    db.add(_Quota(name="Игры", target_type="person", target=str(kid.id), category="games",
+                  minutes_per_day=60, days="0,1,2,3,4,5,6", enabled=True))
     db.commit()
 
     q_data = {

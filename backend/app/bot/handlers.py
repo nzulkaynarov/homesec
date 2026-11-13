@@ -30,7 +30,7 @@ from ..ai import orchestrator, tools
 from ..config import settings
 from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get, log_event
 from ..services import family as family_svc
-from ..services import house_rules
+from ..services import house_rules, time_grants
 from . import device_menu, pause_menu, rules_menu, texts, triage
 from .access import AccessMiddleware
 from .device_menu import BTN_DEVICES
@@ -391,31 +391,26 @@ def _quiz_answer_sync(user_id: int, person_id: int, chosen_opt: int) -> dict[str
         s.close()
 
 
-def _resolve_bonus_direct_sync(person_id: int, choice: str) -> tuple[str, int, str]:
-    from ..models import QuotaBonus
-
+def _resolve_bonus_direct_sync(person_id: int, choice: str) -> tuple[str, str | None, str]:
+    """(text for the parent, text for the child or None, child's name). One answer for every
+    "yes": time_grants acts on what really holds the child back."""
     s = dbmod.session()
     try:
         person = s.get(Person, person_id)
         if person is None:
-            return "Пользователь не найден.", 0, ""
+            return "Пользователь не найден.", None, ""
         if choice == "deny":
-            return f"Отказано в добавлении времени для {person.name}.", 0, person.name
-        minutes = 720 if choice == "day" else int(choice)
-        date = datetime.now().strftime("%Y-%m-%d")
-        s.add(
-            QuotaBonus(
-                target_type="person",
-                target=str(person.id),
-                date=date,
-                category="internet",
-                minutes=minutes,
-                comment="Одобрено родителем в Telegram",
+            kid = (
+                "Родители пока не могут добавить время. "
+                "Можно позаниматься или сыграть в викторину! 🎒"
             )
-        )
-        s.commit()
-        label = "до конца дня" if choice == "day" else f"+{minutes} мин"
-        return f"✅ Одобрено {label} интернета для {person.name}!", minutes, person.name
+            return f"Отказано в добавлении времени для {person.name}.", kid, person.name
+        minutes = None if choice == "day" else int(choice)
+        try:
+            done = time_grants.grant(s, person_id, minutes, "Одобрено родителем в Telegram")
+        except time_grants.GrantError as exc:
+            return f"⚠️ {exc}", None, person.name
+        return f"✅ {person.name}: {done}.", f"🎉 Родители ответили: {done}.", person.name
     finally:
         s.close()
 
@@ -1506,7 +1501,7 @@ async def cb_access_request(cb: CallbackQuery) -> None:
 async def cb_bonus_direct(cb: CallbackQuery) -> None:
     parts = (cb.data or "").split(":")
     person_id, choice = int(parts[1]), parts[2]
-    msg, minutes, _person_name = await asyncio.to_thread(
+    msg, kid_msg, _person_name = await asyncio.to_thread(
         _resolve_bonus_direct_sync, person_id, choice
     )
     await cb.answer()
@@ -1525,15 +1520,7 @@ async def cb_bonus_direct(cb: CallbackQuery) -> None:
     finally:
         s.close()
 
-    if kid_tg and cb.bot:
-        if choice == "deny":
-            kid_msg = (
-                "Родители пока не могут добавить время. "
-                "Попробуйте позаниматься уроками или викториной! 🎒"
-            )
-        else:
-            label = "до конца дня" if choice == "day" else f"+{minutes} минут"
-            kid_msg = f"🎉 Родители одобрили добавление времени: {label}! Приятного пользования."
+    if kid_tg and cb.bot and kid_msg:
         try:
             await cb.bot.send_message(kid_tg, kid_msg)
         except Exception:

@@ -17,7 +17,6 @@ from ..models import (
     FamilyNote,
     Pause,
     Person,
-    QuotaBonus,
     kv_get,
     kv_set,
     log_event,
@@ -445,21 +444,12 @@ def award_quiz_bonus(
     key = f"quiz_bonus_{date}_{person.id}"
     kv_set(db, key, "1")
 
-    # Добавляем QuotaBonus
-    db.add(
-        QuotaBonus(
-            target_type="person",
-            target=str(person.id),
-            date=date,
-            category="internet",
-            minutes=minutes,
-            comment=f"Победа в викторине ({topic})",
-        )
-    )
-    db.commit()
-    msg = (
-        f"🏆 {person.name} успешно ответил на вопрос викторины ({topic}) "
-        f"и получил +{minutes} мин интернета!"
-    )
+    from .time_grants import GrantError, grant  # time_grants imports house_rules, which imports us
+
+    try:
+        done = grant(db, person.id, minutes, f"Победа в викторине ({topic})", now)
+    except GrantError as exc:
+        done = str(exc)
+    msg = f"🏆 {person.name} правильно ответил(а) на вопрос викторины ({topic}): {done}"
     log_event(db, "quiz_win", msg)
     return msg
