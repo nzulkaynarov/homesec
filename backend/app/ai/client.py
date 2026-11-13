@@ -6,6 +6,7 @@
 Без ключа (HS_ANTHROPIC_API_KEY пуст) ИИ-фичи молчат: is_configured() = False,
 вызов ask() кидает AiError — вызывающие обязаны деградировать вежливо."""
 
+import base64
 import json
 import logging
 from collections.abc import Iterator
@@ -14,6 +15,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import datetime
 
+import httpx
 from sqlalchemy.orm import Session
 
 from ..config import settings
@@ -93,6 +95,48 @@ def estimate_usd(
         + cache_write_tokens * CACHE_WRITE_MULTIPLIER
     ) * prices[0]
     return (input_cost + output_tokens * prices[1]) / 1_000_000
+
+
+STT_TIMEOUT_SECONDS = 35.0
+STT_INSTRUCTION = (
+    "Transcribe this audio recording accurately in its spoken language. "
+    "Return ONLY the verbatim transcribed text without any timestamps, explanation, or quotes."
+)
+
+
+async def transcribe(audio: bytes, audio_format: str, caller: Caller, language: str = "ru") -> str:
+    """Speech to text through the LunaGPT gateway with HomeSec's own key and budget."""
+    if not is_configured():
+        raise AiError("Распознавание голоса не настроено: нужен шлюз LunaGPT (HS_AI_BASE_URL).")
+    payload = {
+        "model": settings.ai_model_stt,
+        "messages": [{
+            "role": "user",
+            "content": [
+                {"type": "input_audio",
+                 "input_audio": {"data": base64.b64encode(audio).decode(), "format": audio_format}},
+                {"type": "text", "text": f"{STT_INSTRUCTION} The spoken language is {language}."},
+            ],
+        }],
+        "temperature": 0.0,
+        # A text-only fallback model would invent words instead of hearing them.
+        "disable_fallbacks": True,
+        "metadata": {
+            "user_id": caller.user,
+            "session_id": caller.session,
+            "tags": ["client:homesec", "feature:stt", f"role:{caller.role}"],
+        },
+    }
+    headers = {
+        **attribution_headers(caller),
+        "Authorization": f"Bearer {settings.anthropic_api_key}",
+    }
+    url = f"{settings.ai_base_url.rstrip('/')}/v1/chat/completions"
+    async with httpx.AsyncClient(timeout=STT_TIMEOUT_SECONDS) as client:
+        response = await client.post(url, json=payload, headers=headers)
+        response.raise_for_status()
+        content = response.json()["choices"][0]["message"]["content"]
+    return str(content or "").strip()
 
 
 def is_configured() -> bool:

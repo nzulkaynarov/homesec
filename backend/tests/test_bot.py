@@ -272,20 +272,20 @@ def test_describe_pending_resolves_device(db):
     assert "192.168.88.45" in desc
 
 
-def test_handle_voice_missing_stt_url(monkeypatch):
+def test_handle_voice_without_gateway(monkeypatch):
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
 
     from app.bot.handlers import handle_voice
     from app.config import settings
 
-    monkeypatch.setattr(settings, "stt_url", "")
+    monkeypatch.setattr(settings, "ai_base_url", "")
     msg = MagicMock()
     msg.voice = MagicMock()
     msg.answer = AsyncMock()
     asyncio.run(handle_voice(msg))
     msg.answer.assert_called_once()
-    assert "HS_STT_URL" in msg.answer.call_args[0][0]
+    assert "HS_AI_BASE_URL" in msg.answer.call_args[0][0]
 
 
 def test_handle_voice_transcription_success(monkeypatch):
@@ -296,7 +296,8 @@ def test_handle_voice_transcription_success(monkeypatch):
     from app.bot import handlers
     from app.config import settings
 
-    monkeypatch.setattr(settings, "stt_url", "http://lunagpt:8010/v1/audio/transcriptions")
+    monkeypatch.setattr(settings, "ai_base_url", "http://lunagpt:4000")
+    monkeypatch.setattr(settings, "anthropic_api_key", "test-key")
 
     mock_bot = MagicMock()
     mock_file = MagicMock()
@@ -318,9 +319,13 @@ def test_handle_voice_transcription_success(monkeypatch):
     mock_resp = MagicMock()
     mock_resp.status_code = 200
     mock_resp.raise_for_status = MagicMock()
-    mock_resp.json.return_value = {"text": "выключи интернет детям"}
+    mock_resp.json.return_value = {
+        "choices": [{"message": {"content": "выключи интернет детям"}}]
+    }
+    sent = {}
 
-    async def mock_post(*args, **kwargs):
+    async def mock_post(self, url, **kwargs):
+        sent.update(url=url, **kwargs)
         return mock_resp
 
     monkeypatch.setattr("httpx.AsyncClient.post", mock_post)
@@ -336,6 +341,10 @@ def test_handle_voice_transcription_success(monkeypatch):
 
     assert "выключи интернет детям" in processed_prompts
     assert msg.answer.called
+    # Straight to the gateway with HomeSec's own key, never to LunaGPT core.
+    assert sent["url"] == "http://lunagpt:4000/v1/chat/completions"
+    assert sent["json"]["disable_fallbacks"] is True
+    assert sent["headers"]["Authorization"] == "Bearer test-key"
 
 
 def test_format_quota_and_keyboard():

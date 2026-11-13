@@ -1,4 +1,3 @@
-from pydantic import model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 
@@ -37,7 +36,7 @@ class Settings(BaseSettings):
     # ИИ-слой (Claude API или шлюз LunaGPT); пустой ключ = ИИ-фичи выключены, остальное работает
     anthropic_api_key: str = ""
     ai_base_url: str = ""  # шлюз LunaGPT/LiteLLM, напр. "http://192.168.88.241:4000"
-    stt_url: str = ""  # эндпоинт распознавания речи, напр. "http://192.168.88.241:8010/v1/audio/transcriptions"
+    ai_model_stt: str = "luna-fast"  # распознавание голоса через шлюз (модель с аудиовходом)
     ai_model: str = "claude-haiku-4-5"  # рассуждения: NL-команды, дайджест
     ai_model_fast: str = "claude-haiku-4-5"  # рутина: оформление алертов
     ai_model_tutor: str = "claude-haiku-4-5"  # kid tutor
@@ -46,13 +45,6 @@ class Settings(BaseSettings):
     ai_kid_daily_usd: float = 0.30  # per-child daily AI spend limit; 0 disables it
     ai_max_voice_seconds: int = 120
     ai_daily_token_budget: int = 300_000  # суммарно (вход+выход) в день; 0 = без лимита
-
-    @model_validator(mode="after")
-    def _apply_lunagpt_defaults(self) -> "Settings":
-        if self.ai_base_url and "192.168.88.241" in self.ai_base_url:
-            if not self.stt_url:
-                self.stt_url = "http://192.168.88.241:8010/v1/audio/transcriptions"
-        return self
 
     # Luna AI Assistant on the GPU host: API token and its bot token for outage notices
     luna_api_token: str = ""

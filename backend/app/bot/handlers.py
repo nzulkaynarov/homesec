@@ -11,7 +11,6 @@ from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from typing import Any
 
-import httpx
 from aiogram import F, Router
 from aiogram.filters import Command, CommandObject
 from aiogram.types import (
@@ -1650,9 +1649,9 @@ def _record_voice_spend_sync(caller: ai_client.Caller, seconds: int) -> None:
 async def handle_voice(message: Message) -> None:
     """Голосовое сообщение от пользователя: скачивает ogg аудиофайл,
     транскрибирует через LunaGPT STT и передаёт в ИИ-оркестратор."""
-    if not settings.stt_url:
+    if not ai_client.is_configured() or not settings.ai_base_url:
         await message.answer(
-            "Голосовое управление не настроено: укажите HS_STT_URL в .env (шлюз LunaGPT)."
+            "Голосовое управление не настроено: нужен шлюз LunaGPT (HS_AI_BASE_URL)."
         )
         return
 
@@ -1681,17 +1680,7 @@ async def handle_voice(message: Message) -> None:
             return
         voice_bytes = voice_buf.getvalue() if hasattr(voice_buf, "getvalue") else voice_buf.read()
 
-        async with httpx.AsyncClient(timeout=35.0) as client:
-            files = {
-                "file": ("voice.oga", voice_bytes, message.voice.mime_type or "audio/ogg")
-            }
-            data = {"language": "ru"}
-            headers = ai_client.attribution_headers(caller)
-            if settings.anthropic_api_key:
-                headers["Authorization"] = f"Bearer {settings.anthropic_api_key}"
-            resp = await client.post(settings.stt_url, files=files, data=data, headers=headers)
-            resp.raise_for_status()
-            transcribed_text = resp.json().get("text", "").strip()
+        transcribed_text = await ai_client.transcribe(voice_bytes, "ogg", caller)
     except Exception as exc:
         log.exception("ошибка транскрипции голосового сообщения")
         await message.answer(f"Не удалось распознать голос: {exc}")
