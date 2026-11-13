@@ -269,3 +269,17 @@ def test_window_never_opens_bedtime(db, client, kid):
     db.commit()
     house_rules.open_through_pause(db, kid.id, 30)
     assert "192.168.88.50" in _blocked(db)
+
+
+def test_luna_cannot_take_over_a_linked_parent(db, client):
+    parent = Person(name="Папа", role="adult", telegram_id=111, bot_role="admin")
+    db.add(parent)
+    db.commit()
+    taken = client.put(f"/api/luna/v1/people/{parent.id}/telegram", json={"telegram_id": 666},
+                       headers=AUTH)
+    assert taken.status_code == 409
+    db.refresh(parent)
+    assert parent.telegram_id == 111
+    same = client.put(f"/api/luna/v1/people/{parent.id}/telegram", json={"telegram_id": 111},
+                      headers=AUTH)
+    assert same.status_code == 200  # repeating the existing link stays harmless

@@ -19,6 +19,13 @@ STATE_DIR=/var/lib/homesec
 DEPLOYED_FILE="$STATE_DIR/deployed_sha"
 
 REJECTED_FILE="$STATE_DIR/rejected_sha"
+SELF=/usr/local/sbin/homesec-update
+CI_VERDICT_TARGET=/usr/local/lib/homesec/ci_verdict.py
+CI_VERDICT=$CI_VERDICT_TARGET
+[ -f "$CI_VERDICT" ] || CI_VERDICT="$APP_DIR/deploy/ci_verdict.py"   # first run after the switch
+# Keys a commit may set in .env. Owner ids, keys and addresses are the Pi owner's alone.
+CONF_ALLOWED='^HS_AI_MODEL[A-Z_]*$|^HS_AI_KID_DAILY_USD$|^HS_AI_DAILY_TOKEN_BUDGET$|^HS_AI_MAX_VOICE_SECONDS$'
+
 HEALTH_URL=http://127.0.0.1:8000/api/luna/v1/health
 
 run() { sudo -u "$DEPLOY_USER" "$@"; }
@@ -51,11 +58,10 @@ healthy() {
     && [ "$(systemctl show -p NRestarts --value homesec-bot)" = "$restarts" ]
 }
 
-# Юниты синхронизируются ДО раннего выхода «изменений нет»: иначе новый или
-# изменённый юнит из свежего коммита никогда не установится — деплой, привёзший
-# его, исполняет ещё старый update.sh (bash держит прежний inode), а все
-# следующие тики выходят раньше. Ловили вживую с homesec-bot.
-# Пишем только при реальном отличии, чтобы не дёргать daemon-reload каждую минуту.
+# Юниты ставятся только из проверенного коммита, сразу после reset --hard на
+# него: рабочая копия принадлежит пользователю панели, и до проверки root не
+# копирует из неё ничего. Пишем только при реальном отличии, чтобы не дёргать
+# daemon-reload каждую минуту.
 sync_units() {
   local changed=0 name rendered installed
   for name in homesec.service homesec-bot.service; do
@@ -88,8 +94,6 @@ run git -C "$APP_DIR" fetch --quiet origin "$BRANCH"
 remote_sha=$(run git -C "$APP_DIR" rev-parse "origin/$BRANCH")
 deployed_sha=$(cat "$DEPLOYED_FILE" 2>/dev/null || true)
 
-sync_units
-
 if [ "$deployed_sha" = "$remote_sha" ]; then
   exit 0
 fi
@@ -105,7 +109,7 @@ fi
 if [ "${CHECK_CI:-1}" = "1" ]; then
   ci_api="https://api.github.com/repos/nzulkaynarov/homesec/commits/$remote_sha/check-runs"
   verdict=$(curl -s -m 10 -H "Accept: application/vnd.github+json" "$ci_api" 2>/dev/null \
-    | python3 -I "$APP_DIR/deploy/ci_verdict.py" || echo wait)
+    | python3 -I "$CI_VERDICT" || echo wait)
   case "$verdict" in
     green) ;;
     red)
@@ -141,6 +145,10 @@ if [ -f "$APP_DIR/backend/conf.d/homesec.env" ]; then
     [[ "$key" =~ ^[[:space:]]*# ]] && continue
     [[ -z "${key// /}" ]] && continue
     key="${key// /}"
+    if ! [[ "$key" =~ $CONF_ALLOWED ]]; then
+      echo "$(date -Is) homesec update: ключ $key из репозитория пропущен, его меняют только в .env на Pi"
+      continue
+    fi
     if [ -n "$key" ] && [ -n "$val" ]; then
       if grep -q "^${key}=" "$env_file" 2>/dev/null; then
         sed -i "s|^${key}=.*|${key}=${val}|" "$env_file"
@@ -166,6 +174,10 @@ if ! healthy; then
   notify "⚠️ HomeSec: новая версия не запустилась на Pi, вернул прежнюю. Правила работают по-старому."
   exit 1
 fi
+
+# Проверенная версия скрипта и проверки CI становится той, что root запускает дальше.
+install -m 0755 -o root -g root "$APP_DIR/deploy/update.sh" "$SELF"
+install -D -m 0644 -o root -g root "$APP_DIR/deploy/ci_verdict.py" "$CI_VERDICT_TARGET"
 
 # Метка успеха — последней строкой. Всё, что выше, при сбое ретраится.
 mkdir -p "$STATE_DIR"

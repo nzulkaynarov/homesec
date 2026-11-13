@@ -109,6 +109,10 @@ def link_telegram(
     )
     if other is not None:
         raise HTTPException(status_code=409, detail="Telegram account is linked to another person")
+    if person.telegram_id is not None and person.telegram_id != body.telegram_id:
+        # Relinking someone already linked would let the Luna token take over a parent's admin
+        # rights; that change belongs to the owner in the HomeSec bot.
+        raise HTTPException(status_code=409, detail="Person is linked to another Telegram account")
     person.telegram_id = body.telegram_id
     person.bot_role = BOT_ROLE_BY_PERSON_ROLE.get(person.role, "guest")
     db.commit()

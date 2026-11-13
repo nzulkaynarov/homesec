@@ -5,7 +5,9 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 class Settings(BaseSettings):
     model_config = SettingsConfigDict(
         env_prefix="HS_",
-        env_file=(".env", "conf.d/homesec.env"),
+        # Only the Pi's own .env: a tracked file in this public repo must never override owner ids,
+        # keys or addresses. update.sh copies the few safe keys from conf.d/homesec.env into .env.
+        env_file=".env",
         extra="ignore",
     )
 

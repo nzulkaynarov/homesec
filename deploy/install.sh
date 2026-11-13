@@ -40,6 +40,8 @@ DEPLOY_USER=$DEPLOY_USER
 APP_DIR=$APP_DIR
 BRANCH=$BRANCH
 EOF
+install -m 0755 -o root -g root "$APP_DIR/deploy/update.sh" /usr/local/sbin/homesec-update
+install -D -m 0644 -o root -g root "$APP_DIR/deploy/ci_verdict.py" /usr/local/lib/homesec/ci_verdict.py
 cp "$APP_DIR/deploy/homesec-update.service" /etc/systemd/system/homesec-update.service
 cp "$APP_DIR/deploy/homesec-update.timer" /etc/systemd/system/homesec-update.timer
 
