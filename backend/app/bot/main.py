@@ -39,36 +39,46 @@ def _parent_ids() -> set[int]:
         s.close()
 
 
-async def _broadcast(bot: Bot, chat_ids: set[int], text: str, keyboard=None) -> None:
-    """Send to the configured chats and to every parent linked in the bot since."""
+async def _broadcast(bot: Bot, chat_ids: set[int], text: str, keyboard=None) -> int:
+    """Send to the configured chats and to every parent linked in the bot since; returns how many
+    chats got the whole message."""
     parts = texts.split_message(text)
+    delivered = 0
     for chat_id in chat_ids | await asyncio.to_thread(_parent_ids):
         try:
             for part in parts[:-1]:
                 await bot.send_message(chat_id, part)
             await bot.send_message(chat_id, parts[-1], reply_markup=keyboard)
+            delivered += 1
         except Exception:
             log.exception("не удалось отправить сообщение в чат %s", chat_id)
+    return delivered
 
 
-def _collect_notifications() -> list[tuple[str, dict, str, int | None, list, int | None]]:
-    """(kind, устройство, текст события, id оригинала, люди, id заявки) по событию."""
+PendingNotice = tuple[str, dict, str, int | None, list, int | None, int]
+
+
+def _collect_notifications() -> tuple[int, list[PendingNotice]]:
+    """(latest journal id, [(kind, устройство, текст события, id оригинала, люди, id заявки,
+    id события)]). The cursor does not move here: only after delivery."""
     s = dbmod.session()
     try:
-        items = notify.collect_notifications(s)
+        latest = notify.latest_event_id(s)
+        items = notify.collect_notifications(s, advance=False, until=latest)
         if not items:
-            return []
+            return latest, []
         from ..models import Person
 
         people = [(p.id, p.name, p.role) for p in s.query(Person).order_by(Person.name)]
-        return [
+        return latest, [
             (n.kind,
              {"id": n.device.id, "name": n.device.name, "mac": n.device.mac,
               "ip": n.device.ip, "random_mac": n.device.mac_is_random},
              n.message,
              n.extra_device.id if n.extra_device else None,
              people,
-             n.request_id)
+             n.request_id,
+             n.event_id)
             for n in items
         ]
     finally:
@@ -88,9 +98,9 @@ def _request_category(request_id: int) -> str:
 async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
     while True:
         try:
-            for kind, dev, message, extra_id, people, request_id in await asyncio.to_thread(
-                _collect_notifications
-            ):
+            latest, items = await asyncio.to_thread(_collect_notifications)
+            done_until = latest
+            for kind, dev, message, extra_id, people, request_id, event_id in items:
                 if kind == "device_maybe_same" and extra_id is not None:
                     text = f"🔁 {message}"
                     kb = handlers.merge_keyboard(dev["id"], extra_id)
@@ -110,10 +120,22 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
                 else:
                     text = texts.format_new_device(dev)
                     kb = handlers.new_device_keyboard(dev["id"], people)
-                await _broadcast(bot, chat_ids, text, kb)
+                if not await _broadcast(bot, chat_ids, text, kb):
+                    # Nobody got it (no internet, Telegram down): keep it for the next round.
+                    done_until = event_id - 1
+                    break
+            await asyncio.to_thread(_mark_sent, done_until)
         except Exception:
             log.exception("notify_loop")
         await asyncio.sleep(NOTIFY_INTERVAL)
+
+
+def _mark_sent(event_id: int) -> None:
+    s = dbmod.session()
+    try:
+        notify.mark_sent(s, event_id)
+    finally:
+        s.close()
 
 
 async def health_loop(bot: Bot, chat_ids: set[int]) -> None:

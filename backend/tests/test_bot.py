@@ -652,3 +652,39 @@ def test_quiz_flow_and_parent_notification(db, monkeypatch):
     assert "Артём выиграл в викторине" in parent_alert
     assert "Космос" in parent_alert
     assert "Сколько спутников у Марса?" in parent_alert
+
+
+def test_a_notice_nobody_received_is_sent_again(db, monkeypatch):
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.bot import main as bot_main
+    from app.bot import notify
+    from app.models import Device, log_event
+
+    assert collect_notifications(db) == []  # cursor starts at the end of the journal
+    dev = Device(mac="AA:BB:CC:DD:EE:01", ip="192.168.88.77", name="Новый телефон")
+    db.add(dev)
+    db.commit()
+    log_event(db, "device_new", "Новое устройство AA:BB:CC:DD:EE:01")
+    monkeypatch.setattr(bot_main, "_parent_ids", lambda: set())
+    monkeypatch.setattr(bot_main, "NOTIFY_INTERVAL", 0)
+
+    async def one_round(send):
+        bot = MagicMock(send_message=send)
+
+        async def stop(_seconds):
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(bot_main.asyncio, "sleep", stop)
+        try:
+            await bot_main.notify_loop(bot, {1})
+        except asyncio.CancelledError:
+            pass
+
+    asyncio.run(one_round(AsyncMock(side_effect=RuntimeError("no internet"))))
+    assert len(notify.collect_notifications(db, advance=False)) == 1  # still waiting
+    delivered = AsyncMock()
+    asyncio.run(one_round(delivered))
+    delivered.assert_awaited()
+    assert notify.collect_notifications(db, advance=False) == []

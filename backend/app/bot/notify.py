@@ -28,11 +28,25 @@ class Notification:
     message: str  # исходный текст события
     extra_device: Device | None = None  # для maybe_same: устройство-оригинал
     request_id: int | None = None  # для bonus_request: id заявки на бонус
+    event_id: int = 0  # the journal row, so the cursor moves only past what was delivered
 
 
-def collect_notifications(db: Session) -> list[Notification]:
-    """Уведомления из ещё не обработанных событий. Сдвигает курсор."""
-    max_id = db.scalar(select(func.max(EventLog.id))) or 0
+def latest_event_id(db: Session) -> int:
+    return db.scalar(select(func.max(EventLog.id))) or 0
+
+
+def mark_sent(db: Session, event_id: int) -> None:
+    """Move the cursor past events whose notifications reached the parents."""
+    if event_id > int(kv_get(db, CURSOR_KEY, "0") or 0):
+        kv_set(db, CURSOR_KEY, str(event_id))
+
+
+def collect_notifications(
+    db: Session, advance: bool = True, until: int | None = None
+) -> list[Notification]:
+    """Уведомления из ещё не обработанных событий. With advance the cursor moves at once;
+    the bot passes advance=False and calls mark_sent after delivery, so nothing is lost."""
+    max_id = until if until is not None else latest_event_id(db)
     raw = kv_get(db, CURSOR_KEY, "")
     if raw == "":
         # первый запуск: историю не рассылаем
@@ -41,7 +55,7 @@ def collect_notifications(db: Session) -> list[Notification]:
     last = int(raw)
     events = db.scalars(
         select(EventLog)
-        .where(EventLog.id > last, EventLog.kind.in_(NOTIFY_KINDS))
+        .where(EventLog.id > last, EventLog.id <= max_id, EventLog.kind.in_(NOTIFY_KINDS))
         .order_by(EventLog.id)
     )
     out = []
@@ -77,7 +91,7 @@ def collect_notifications(db: Session) -> list[Notification]:
             if extra is None:
                 continue  # оригинал уже объединили/удалили
         out.append(Notification(kind=e.kind, device=dev, message=e.message,
-                                extra_device=extra, request_id=req_id))
-    if max_id > last:
+                                extra_device=extra, request_id=req_id, event_id=e.id))
+    if advance and max_id > last:
         kv_set(db, CURSOR_KEY, str(max_id))
     return out
