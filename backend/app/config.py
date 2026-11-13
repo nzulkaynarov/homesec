@@ -37,9 +37,9 @@ class Settings(BaseSettings):
     anthropic_api_key: str = ""
     ai_base_url: str = ""  # шлюз LunaGPT/LiteLLM, напр. "http://192.168.88.241:4000"
     ai_model_stt: str = "luna-fast"  # распознавание голоса через шлюз (модель с аудиовходом)
-    ai_model: str = "claude-haiku-4-5"  # рассуждения: NL-команды, дайджест
-    ai_model_fast: str = "claude-haiku-4-5"  # рутина: оформление алертов
-    ai_model_tutor: str = "claude-haiku-4-5"  # kid tutor
+    ai_model: str = "luna-fast"  # рассуждения: NL-команды, дайджест (Gemini Flash Lite)
+    ai_model_fast: str = "luna-fast"  # рутина: оформление алертов
+    ai_model_tutor: str = "luna-fast"  # kid tutor
     ai_model_local: str = ""  # own model tried first; empty disables the local rung
     ai_model_support: str = "claude-sonnet-4-6"  # paid support when cheaper rungs fail
     ai_kid_daily_usd: float = 0.30  # per-child daily AI spend limit; 0 disables it

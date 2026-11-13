@@ -29,7 +29,13 @@ LEDGER_KEY_PREFIX = (
 )
 
 # USD per 1M tokens as (input, output). Keys match settings model names by substring.
-MODEL_PRICES = {"opus": (5.0, 25.0), "sonnet": (3.0, 15.0), "haiku": (0.30, 2.50)}
+# Matched as a substring of the gateway model name; luna-fast is Gemini Flash Lite.
+MODEL_PRICES = {
+    "luna-fast": (0.30, 2.50),
+    "opus": (5.0, 25.0),
+    "sonnet": (3.0, 15.0),
+    "haiku": (0.30, 2.50),
+}
 LOCAL_MODEL_TIMEOUT_SECONDS = 60.0
 CACHE_READ_MULTIPLIER = 0.1
 CACHE_WRITE_MULTIPLIER = 1.25

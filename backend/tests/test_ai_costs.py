@@ -97,3 +97,10 @@ def test_safety_keywords_flag_messages(text):
 
 def test_ordinary_homework_is_not_flagged():
     assert not family.needs_adult_attention("помоги решить задачу про поезда")
+
+
+def test_the_default_fast_model_is_priced_so_the_kid_budget_counts():
+    from app.config import Settings
+
+    fast = Settings(_env_file=None).ai_model_fast
+    assert client.estimate_usd(fast, 1_000_000, 1_000_000) == pytest.approx(2.80)
