@@ -106,7 +106,7 @@ def test_notification_cursor(db):
 def test_quota_block_notification_with_bonus_button(db):
     """Блокировка по квоте не молчит: событие с MAC доходит до бота,
     кнопка «+30 мин» ведёт в тот же callback, что и /bonus."""
-    from app.bot.handlers import bonus_keyboard
+    from app.bot.alerts import bonus_keyboard
 
     dev = Device(mac="AA:00:00:00:00:09", ip="192.168.88.79", name="Планшет")
     db.add(dev)
@@ -126,7 +126,7 @@ def test_quota_block_notification_with_bonus_button(db):
 
 
 def test_new_device_keyboard():
-    from app.bot.handlers import new_device_keyboard
+    from app.bot.alerts import new_device_keyboard
 
     kb = new_device_keyboard(5, [(1, "Миша", "kid"), (2, "Папа", "adult")])
     flat = [b for row in kb.inline_keyboard for b in row]
@@ -210,7 +210,7 @@ def test_bonus_request_ignores_req_number_from_child_text(db):
 
 
 def test_bonus_request_approve_deny_idempotent(db):
-    from app.bot.handlers import _resolve_bonus_request, bonus_request_keyboard
+    from app.bot.alerts import _resolve_bonus_request, bonus_request_keyboard
     from app.models import BonusRequest, Person, Quota, QuotaBonus
 
     for m in (BonusRequest, QuotaBonus, Quota, Person):
@@ -349,7 +349,7 @@ def test_handle_voice_transcription_success(monkeypatch):
 
 def test_format_quota_and_keyboard():
     from app.bot import texts
-    from app.bot.handlers import quota_buttons_keyboard
+    from app.bot.reports import quota_buttons_keyboard
 
     items = [{
         "device": "Планшет",
@@ -420,7 +420,7 @@ def test_access_request_flow(db):
     from aiogram.types import Message
     from sqlalchemy import select
 
-    from app.bot.handlers import access_request_keyboard, cb_access_request
+    from app.bot.onboarding import access_request_keyboard, cb_access_request
     from app.models import Person
 
     kb = access_request_keyboard(123456)
@@ -459,7 +459,7 @@ def test_new_device_kind_assignment(db):
 
     from aiogram.types import Message
 
-    from app.bot.handlers import cb_new_device, new_device_keyboard
+    from app.bot.alerts import cb_new_device, new_device_keyboard
     from app.models import Device
 
     dev = Device(mac="AA:33:00:00:00:01", ip="192.168.88.80", name="Samsung TV")

@@ -8,7 +8,7 @@ import pytest
 from aiogram.types import Message
 
 from app.ai import tools
-from app.bot import access, device_menu, handlers, rules_menu
+from app.bot import access, device_menu, handlers, onboarding, rules_menu
 from app.db import Base, engine, session
 from app.models import Device, EventLog, KVState, Pause, Person, Quota, Rule
 from app.services import enforcement, family, house_rules
@@ -180,7 +180,7 @@ def test_second_parent_gets_notifications_once_linked(db, monkeypatch):
     db.add(mom)
     db.commit()
     assert family.parent_chat_ids(db) == {111}
-    _, role = handlers._link_telegram_sync(222, mom.id)
+    _, role = onboarding._link_telegram_sync(222, mom.id)
     assert role == "admin"
     db.expire_all()
     assert family.parent_chat_ids(db) == {111, 222}
@@ -188,7 +188,7 @@ def test_second_parent_gets_notifications_once_linked(db, monkeypatch):
 
 
 def test_access_request_offers_people_without_telegram():
-    kb = handlers.access_request_keyboard(555, [(3, "Камила")])
+    kb = onboarding.access_request_keyboard(555, [(3, "Камила")])
     callbacks = [b.callback_data for row in kb.inline_keyboard for b in row]
     assert callbacks[0] == "acc:555:link:3" and "acc:555:admin" in callbacks
 

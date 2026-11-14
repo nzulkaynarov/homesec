@@ -19,7 +19,7 @@ from ..db import Base, engine
 from ..migrations import ensure_schema
 from ..services import family as family_svc
 from ..services import followups
-from . import handlers, luna_watch, notify, texts
+from . import alerts, handlers, luna_watch, notify, texts
 from .health import default_monitor
 
 log = logging.getLogger("homesec.bot")
@@ -103,23 +103,23 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
             for kind, dev, message, extra_id, people, request_id, event_id in items:
                 if kind == "device_maybe_same" and extra_id is not None:
                     text = f"🔁 {message}"
-                    kb = handlers.merge_keyboard(dev["id"], extra_id)
+                    kb = alerts.merge_keyboard(dev["id"], extra_id)
                 elif kind == "register_request":
                     text = texts.format_registration(message)
-                    kb = handlers.new_device_keyboard(dev["id"], people)
+                    kb = alerts.new_device_keyboard(dev["id"], people)
                 elif kind == "quota_block":
                     text = f"⏳ {message}\nМожно добавить время кнопкой:"
-                    kb = handlers.bonus_keyboard(dev["id"])
+                    kb = alerts.bonus_keyboard(dev["id"])
                 elif kind == "quota_warn":
                     text = f"⚠️ {message}\nМожно добавить время заранее:"
-                    kb = handlers.bonus_keyboard(dev["id"])
+                    kb = alerts.bonus_keyboard(dev["id"])
                 elif kind == "bonus_request" and request_id is not None:
                     text = f"🙏 {message}"
                     category = await asyncio.to_thread(_request_category, request_id)
-                    kb = handlers.bonus_request_keyboard(request_id, category)
+                    kb = alerts.bonus_request_keyboard(request_id, category)
                 else:
                     text = texts.format_new_device(dev)
-                    kb = handlers.new_device_keyboard(dev["id"], people)
+                    kb = alerts.new_device_keyboard(dev["id"], people)
                 if not await _broadcast(bot, chat_ids, text, kb):
                     # Nobody got it (no internet, Telegram down): keep it for the next round.
                     done_until = event_id - 1
@@ -187,7 +187,7 @@ async def followup_loop(bot: Bot, chat_ids: set[int]) -> None:
         try:
             reminders, weekly = await asyncio.to_thread(_followups)
             for request_id, category, text in reminders:
-                keyboard = handlers.bonus_request_keyboard(request_id, category)
+                keyboard = alerts.bonus_request_keyboard(request_id, category)
                 await _broadcast(bot, chat_ids, text, keyboard)
             if weekly:
                 await _broadcast(bot, chat_ids, weekly)

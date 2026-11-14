@@ -6,7 +6,7 @@ from unittest.mock import patch
 import pytest
 from fastapi.testclient import TestClient
 
-from app.bot import handlers, luna_watch
+from app.bot import alerts, luna_watch
 from app.config import settings
 from app.db import Base, engine, session
 from app.main import app
@@ -241,10 +241,10 @@ def test_pause_request_opens_a_window_and_the_pause_returns(db, client, kid):
     created = client.post("/api/luna/v1/people/Миша/time-requests", json={}, headers=AUTH)
     request_id = created.json()["id"]
     assert db.get(BonusRequest, request_id).category == "pause"
-    buttons = handlers.bonus_request_keyboard(request_id, "pause").inline_keyboard
+    buttons = alerts.bonus_request_keyboard(request_id, "pause").inline_keyboard
     assert buttons[1][0].text == "▶️ До конца паузы"
 
-    result = handlers._resolve_bonus_request(request_id, "30")
+    result = alerts._resolve_bonus_request(request_id, "30")
     assert "Интернет открыт до" in result
     assert "192.168.88.50" not in _blocked(db)
     status = client.get(f"/api/luna/v1/time-requests/{request_id}", headers=AUTH).json()

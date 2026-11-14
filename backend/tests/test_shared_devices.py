@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from app.bot import access, handlers
+from app.bot import access, handlers, shared_menu
 from app.config import settings
 from app.db import Base, engine, session
 from app.main import app
@@ -133,7 +133,7 @@ def test_only_adults_control_shared_devices(role):
 def test_buttons_set_state_and_edit_the_same_message(db, tv):
     callback = MagicMock(data=f"shs:{tv.id}:off", answer=AsyncMock())
     callback.message = MagicMock(spec=handlers.Message, edit_text=AsyncMock())
-    asyncio.run(handlers.cb_shared_state(callback))
+    asyncio.run(shared_menu.cb_shared_state(callback))
     db.refresh(tv)
     assert tv.blocked_manual is True
     callback.answer.assert_awaited_once()
@@ -141,7 +141,7 @@ def test_buttons_set_state_and_edit_the_same_message(db, tv):
 
 
 def test_callback_data_fits_telegram_limit():
-    markup = handlers._shared_actions_markup(10**9)
+    markup = shared_menu._shared_actions_markup(10**9)
     for row in markup.inline_keyboard:
         for button in row:
             assert len(button.callback_data.encode()) <= 64

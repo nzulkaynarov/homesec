@@ -3,11 +3,13 @@ the AI rate limit and the short AI chat memory."""
 
 import time
 from collections import defaultdict, deque
+from typing import Any
 
 from aiogram.types import KeyboardButton, Message, ReplyKeyboardMarkup
 
 from .. import db as dbmod
 from ..ai import client as ai_client
+from ..ai import tools
 from ..models import Person
 from ..services import family as family_svc
 from . import texts
@@ -98,3 +100,11 @@ async def send_long(message: Message, text: str) -> None:
     for part in texts.split_message(text):
         await message.answer(part)
 
+
+def run_tool_sync(name: str, args: dict, source: str = "bot") -> Any:
+    """Инструмент в отдельной сессии; для вызова через asyncio.to_thread."""
+    s = dbmod.session()
+    try:
+        return tools.run_tool(s, name, args, source=source)
+    finally:
+        s.close()
