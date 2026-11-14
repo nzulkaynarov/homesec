@@ -6,8 +6,6 @@
 import asyncio
 import json
 import logging
-import time
-from collections import defaultdict, deque
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -17,9 +15,7 @@ from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
-    KeyboardButton,
     Message,
-    ReplyKeyboardMarkup,
 )
 from sqlalchemy import select
 
@@ -27,13 +23,11 @@ from .. import db as dbmod
 from ..ai import client as ai_client
 from ..ai import orchestrator, tools
 from ..config import settings
-from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get, log_event
+from ..models import GROUP_LABELS, GROUPS, Device, Person, kv_get
 from ..services import family as family_svc
-from ..services import house_rules, time_grants
-from . import device_menu, pause_menu, rules_menu, texts, triage
+from ..services import house_rules
+from . import common, device_menu, kid_menu, pause_menu, rules_menu, texts, triage
 from .access import AccessMiddleware
-from .device_menu import BTN_DEVICES
-from .rules_menu import BTN_RULES
 
 log = logging.getLogger("homesec.bot")
 router = Router()
@@ -41,8 +35,6 @@ router = Router()
 # Мутации, предложенные ИИ и ждущие кнопку, лежат в таблице pending_actions
 # (tools.save_pending/pop_pending) — кнопки переживают рестарты и деплой.
 
-# Короткая память диалога с ИИ на чат (только текстовые реплики, без tool call'ов)
-CHAT_HISTORY: dict[int, deque] = defaultdict(lambda: deque(maxlen=6))
 
 
 def run_tool_sync(name: str, args: dict, source: str = "bot") -> Any:
@@ -95,45 +87,6 @@ async def _do_tool(message: Message, name: str, args: dict) -> None:
 
 # ---------- клавиатуры по ролям и семейные элементы ----------
 
-def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
-    """Нижнее меню Telegram-кнопок в зависимости от роли в семье."""
-    if role in ("owner", "admin"):
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="🏠 Кто дома"), KeyboardButton(text="⏳ Квоты")],
-                [KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="📺 Общие устройства")],
-                [KeyboardButton(text=BTN_DEVICES), KeyboardButton(text=BTN_RULES)],
-                [KeyboardButton(text="📝 Заметки"), KeyboardButton(text="❓ Помощь")],
-            ],
-            resize_keyboard=True,
-        )
-    if role == "kid":
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [
-                    KeyboardButton(text="⏳ Моё время"),
-                    KeyboardButton(text="🙏 Попросить время"),
-                ],
-                [
-                    KeyboardButton(text="🧠 Заработать +15м"),
-                    KeyboardButton(text="🚀 Чем заняться?"),
-                ],
-                [
-                    KeyboardButton(text="✅ Сделал дело"),
-                    KeyboardButton(text="❓ Помощь"),
-                ],
-            ],
-            resize_keyboard=True,
-        )
-    if role == "guest":
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="📶 Wi-Fi"), KeyboardButton(text="❓ Помощь")],
-            ],
-            resize_keyboard=True,
-        )
-    return None
-
 
 def access_request_keyboard(
     requester_id: int, unlinked: list[tuple[int, str]] | None = None
@@ -158,61 +111,7 @@ def access_request_keyboard(
     ])
 
 
-def kid_explore_keyboard() -> InlineKeyboardMarkup:
-    """Интерактивные сценарии для ребёнка в 1 клик."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="🎲 Текстовый квест (RPG)", callback_data="kexp:quest"),
-            InlineKeyboardButton(text="💻 Идея мини-игры", callback_data="kexp:game"),
-        ],
-        [
-            InlineKeyboardButton(text="🇬🇧 Английский челлендж", callback_data="kexp:english"),
-            InlineKeyboardButton(text="🤯 Факт дня", callback_data="kexp:fact"),
-        ],
-    ])
-
-
-def quiz_keyboard(person_id: int, options: list[str]) -> InlineKeyboardMarkup:
-    """Кнопки вариантов ответов для викторины ребёнка."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=opt, callback_data=f"qz:{person_id}:{idx}")]
-        for idx, opt in enumerate(options)
-    ])
-
-
-def bonus_request_direct_keyboard(person_id: int) -> InlineKeyboardMarkup:
-    """Кнопки родителям при прямом запросе времени ребёнком через Telegram."""
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [
-            InlineKeyboardButton(text="➕ 15 мин", callback_data=f"bdir:{person_id}:15"),
-            InlineKeyboardButton(text="➕ 30 мин", callback_data=f"bdir:{person_id}:30"),
-        ],
-        [
-            InlineKeyboardButton(text="➕ 1 час", callback_data=f"bdir:{person_id}:60"),
-            InlineKeyboardButton(text="🌞 До конца дня", callback_data=f"bdir:{person_id}:day"),
-        ],
-        [
-            InlineKeyboardButton(text="🚫 Отказать", callback_data=f"bdir:{person_id}:deny"),
-        ],
-    ])
-
-
 # ---------- синхронные вспомогательные функции ----------
-
-def _parent_ids_sync() -> set[int]:
-    s = dbmod.session()
-    try:
-        return family_svc.parent_chat_ids(s)
-    finally:
-        s.close()
-
-
-def _get_user_role_sync(telegram_id: int) -> tuple[str, Person | None]:
-    s = dbmod.session()
-    try:
-        return family_svc.get_user_role(s, telegram_id)
-    finally:
-        s.close()
 
 
 def _unlinked_people_sync() -> list[tuple[int, str]]:
@@ -309,147 +208,6 @@ def _get_notes_sync() -> str:
         s.close()
 
 
-def _quiz_prepare_sync(user_id: int) -> tuple[bool, str, dict | None, int | None]:
-    s = dbmod.session()
-    try:
-        role, person = family_svc.get_user_role(s, user_id)
-        if person is None:
-            return (
-                False,
-                "Вы не зарегистрированы в списке семьи. Обратитесь к родителям!",
-                None,
-                None,
-            )
-        if not family_svc.can_take_quiz_today(s, person.id):
-            return (
-                False,
-                "Сегодня вы уже получали бонус за викторину! Приходите завтра 🧠",
-                None,
-                None,
-            )
-        active = family_svc.get_active_quiz(s, person.id)
-        if active is not None:
-            return True, "", active, person.id
-        with ai_client.attribute(_caller(person, user_id, "quiz", role)):
-            q = family_svc.generate_dynamic_quiz_question(s, person.id)
-        family_svc.store_active_quiz(s, person.id, q)
-        return True, "", q, person.id
-    finally:
-        s.close()
-
-
-def _quiz_answer_sync(user_id: int, person_id: int, chosen_opt: int) -> dict[str, Any]:
-    s = dbmod.session()
-    try:
-        _, person = family_svc.get_user_role(s, user_id)
-        if person is None or person.id != person_id:
-            return {"status": "error", "message": "Только автор вопроса может отвечать."}
-
-        active = family_svc.get_active_quiz(s, person_id)
-        if active is None:
-            return {"status": "expired", "message": "Вопрос устарел или уже отвечен."}
-        family_svc.clear_active_quiz(s, person_id)
-
-        correct_idx = active.get("correct", 0)
-        options = active.get("options", [])
-        correct_text = options[correct_idx] if 0 <= correct_idx < len(options) else ""
-        topic = active.get("topic", "Эрудиция")
-        q_text = active.get("question", "")
-
-        if chosen_opt != correct_idx:
-            family_svc.mark_quiz_attempted(s, person.id)
-            return {
-                "status": "wrong",
-                "message": (
-                    f"❌ Не совсем так!\n"
-                    f"Правильный ответ: *{texts.escape_markdown(str(correct_text))}*.\n\n"
-                    f"Не расстраивайся, завтра будет новый вопрос и шанс заработать минуты! 🧠"
-                ),
-            }
-
-        if not family_svc.can_take_quiz_today(s, person.id):
-            return {
-                "status": "already_taken",
-                "message": "Сегодня вы уже получали бонус за викторину.",
-            }
-
-        bonus_msg = family_svc.award_quiz_bonus(s, person, minutes=15, topic=topic)
-        return {
-            "status": "correct",
-            "message": (
-                "🎉 *Абсолютно верно!* Ты большой молодец.\n\n"
-                "Тебе начислено *+15 минут* интернета, "
-                "а родителям отправлена весточка о твоём успехе! 🏆"
-            ),
-            "person_name": person.name,
-            "question": q_text,
-            "topic": topic,
-            "bonus_msg": bonus_msg,
-        }
-    finally:
-        s.close()
-
-
-def _resolve_bonus_direct_sync(person_id: int, choice: str) -> tuple[str, str | None, str]:
-    """(text for the parent, text for the child or None, child's name). One answer for every
-    "yes": time_grants acts on what really holds the child back."""
-    s = dbmod.session()
-    try:
-        person = s.get(Person, person_id)
-        if person is None:
-            return "Пользователь не найден.", None, ""
-        if choice == "deny":
-            kid = (
-                "Родители пока не могут добавить время. "
-                "Можно позаниматься или сыграть в викторину! 🎒"
-            )
-            return f"Отказано в добавлении времени для {person.name}.", kid, person.name
-        minutes = None if choice == "day" else int(choice)
-        try:
-            done = time_grants.grant(s, person_id, minutes, "Одобрено родителем в Telegram")
-        except time_grants.GrantError as exc:
-            return f"⚠️ {exc}", None, person.name
-        return f"✅ {person.name}: {done}.", f"🎉 Родители ответили: {done}.", person.name
-    finally:
-        s.close()
-
-
-def _tutor_ask_sync(chat_id: int, user_text: str) -> str:
-    s = dbmod.session()
-    try:
-        messages = list(CHAT_HISTORY[chat_id]) + [{"role": "user", "content": user_text}]
-        resp = ai_client.ask_with_fallback(
-            s,
-            ai_client.model_ladder(settings.ai_model_tutor, settings.ai_model_support),
-            messages=messages,
-            system=(
-                "Ты — умный, добрый и вдохновляющий семейный ИИ-помощник LunaGPT для детей. "
-                "Ты общаешься с ребёнком дружелюбно, с поддержкой и юмором на русском языке.\n\n"
-                "ТВОИ ПРАВИЛА:\n"
-                "1. ШКОЛА И УРОКИ: Помогай полноценно и объясняй простыми словами.\n"
-                "2. ТВОРЧЕСТВО, СКАЗКИ И КВЕСТЫ: Если ребёнок просит сочинить сказку, "
-                "историю, сыграть в текстовую игру или придумать героя — "
-                "включай творчество на полную мощность! Пиши увлекательно, живо и ярко.\n"
-                "3. ПРОГРАММИРОВАНИЕ (Scratch, Python, Minecraft, Roblox): Помогай с кодом, "
-                "объясняй логику и алгоритмы просто и понятно, вдохновляй делать свои проекты.\n"
-                "4. НАУКА И МИР: Отвечай на вопросы («почему небо синее», «как летит ракета») "
-                "наглядно и интересно, развивая любознательность.\n"
-                "5. БЕЗОПАСНОСТЬ: Дружелюбный детский тон, без взрослого контента и негатива. "
-                "Не давай опасных инструкций. Если ребёнку плохо, страшно или его обижают, "
-                "поддержи и посоветуй сразу поговорить с родителями или взрослым. "
-                "У тебя НЕТ инструментов управления роутером и блокировками домашней сети."
-            ),
-            max_tokens=1500,
-        )
-        content_text = ""
-        for block in resp.content:
-            if getattr(block, "type", "") == "text":
-                content_text += block.text
-        return content_text or "Я здесь! Задай мне любой вопрос или выбери занятие в меню."
-    finally:
-        s.close()
-
-
 async def _notify_owner_about_access_request(message: Message) -> None:
     if not message.bot:
         return
@@ -476,85 +234,6 @@ async def _notify_owner_about_access_request(message: Message) -> None:
             log.exception("не удалось отправить запрос доступа владельцу %s", owner_id)
 
 
-def _can_take_quiz_sync(person_id: int) -> bool:
-    s = dbmod.session()
-    try:
-        return family_svc.can_take_quiz_today(s, person_id)
-    finally:
-        s.close()
-
-
-async def _forward_time_request_to_parents(
-    message: Message, person_id: int, person_name: str, reason: str
-) -> None:
-    if not message.bot:
-        return
-    text = (
-        f"🔔 *Запрос дополнительного времени!*\n\n"
-        f"🎒 Ребёнок: *{texts.escape_markdown(person_name)}*\n"
-        f"💬 Причина: {texts.escape_markdown(reason)}\n\n"
-        f"Сколько добавить?"
-    )
-    kb = bonus_request_direct_keyboard(person_id)
-    for parent_id in await asyncio.to_thread(_parent_ids_sync):
-        try:
-            await message.bot.send_message(
-                parent_id, text, parse_mode="Markdown", reply_markup=kb
-            )
-        except Exception:
-            log.exception("не удалось отправить запрос родителю %s", parent_id)
-    text = "✅ Запрос отправлен родителям! Я пришлю ответ, как только они нажмут кнопку."
-    if await asyncio.to_thread(_can_take_quiz_sync, person_id):
-        text += "\n\nПока ждёшь, можно заработать +15 минут в викторине: /quiz"
-    await message.answer(text, reply_markup=keyboard_for_role("kid"))
-
-
-def _log_kid_safety_sync(name: str) -> None:
-    s = dbmod.session()
-    try:
-        log_event(s, "kid_safety", f"{name}: обращение требует внимания родителей")
-    finally:
-        s.close()
-
-
-async def _alert_parents_about_kid(message: Message, person: Person | None, text: str) -> None:
-    name = person.name if person is not None else f"id {message.chat.id}"
-    await asyncio.to_thread(_log_kid_safety_sync, name)
-    if not message.bot:
-        return
-    for parent_id in await asyncio.to_thread(_parent_ids_sync):
-        try:
-            await message.bot.send_message(
-                parent_id, f"🚨 {name} написал(а) ассистенту, стоит поговорить:\n\n{text[:1000]}"
-            )
-        except Exception:
-            log.exception("не удалось предупредить родителя %s", parent_id)
-
-
-async def _handle_kid_tutor(message: Message, user_text: str) -> None:
-    if not ai_client.is_configured():
-        await message.answer("ИИ-помощник сейчас не подключён. Спроси у родителей!")
-        return
-    role, person = await asyncio.to_thread(_get_user_role_sync, message.chat.id)
-    if family_svc.needs_adult_attention(user_text):
-        await _alert_parents_about_kid(message, person, user_text)
-        await message.answer(family_svc.SAFETY_REPLY)
-        return
-    try:
-        with ai_client.attribute(_caller(person, message.chat.id, "tutor", role)):
-            reply = await asyncio.to_thread(_tutor_ask_sync, message.chat.id, user_text)
-    except ai_client.AiError as e:
-        await message.answer(str(e))
-        return
-    except Exception:
-        log.exception("ошибка репетитора")
-        await message.answer("Что-то пошло не так, попробуй задать вопрос ещё раз!")
-        return
-    CHAT_HISTORY[message.chat.id].append({"role": "user", "content": user_text})
-    CHAT_HISTORY[message.chat.id].append({"role": "assistant", "content": reply})
-    await send_long(message, reply)
-
-
 _access = AccessMiddleware(_notify_owner_about_access_request, texts.START_UNAUTHORIZED)
 router.message.outer_middleware(_access)
 router.callback_query.outer_middleware(_access)
@@ -562,31 +241,7 @@ triage.register(router)
 device_menu.register(router)
 pause_menu.register(router)
 rules_menu.register(router)
-
-
-AI_RATE_LIMIT = 8  # requests per window for one person
-AI_RATE_WINDOW_SECONDS = 60
-_ai_request_times: dict[int, deque] = defaultdict(lambda: deque(maxlen=AI_RATE_LIMIT))
-
-
-def _allow_ai_request(user_id: int) -> bool:
-    """Sliding-window limit that keeps one person from flooding paid model calls."""
-    now = time.monotonic()
-    times = _ai_request_times[user_id]
-    if len(times) == AI_RATE_LIMIT and now - times[0] < AI_RATE_WINDOW_SECONDS:
-        return False
-    times.append(now)
-    return True
-
-
-def _caller(person: Person | None, telegram_id: int, feature: str, role: str) -> ai_client.Caller:
-    user = f"person:{person.id}" if person is not None else f"tg:{telegram_id}"
-    return ai_client.Caller(user=user, session=f"tg:{telegram_id}", feature=feature, role=role)
-
-
-async def send_long(message: Message, text: str) -> None:
-    for part in texts.split_message(text):
-        await message.answer(part)
+kid_menu.register(router)
 
 
 # ---------- выбор устройства кнопками ----------
@@ -680,8 +335,8 @@ async def cb_pick(cb: CallbackQuery) -> None:
 @router.message(Command("start"))
 async def cmd_start(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
-    kb = keyboard_for_role(role)
+    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
+    kb = common.keyboard_for_role(role)
     if role == "unauthorized":
         await message.answer(texts.START_UNAUTHORIZED)
         await _notify_owner_about_access_request(message)
@@ -696,11 +351,11 @@ async def cmd_start(message: Message) -> None:
 @router.message(F.text == "❓ Помощь")
 async def cmd_help(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
     if role == "kid":
-        await message.answer(texts.START_KID, reply_markup=keyboard_for_role("kid"))
+        await message.answer(texts.START_KID, reply_markup=common.keyboard_for_role("kid"))
         return
-    await message.answer(texts.HELP, reply_markup=keyboard_for_role(role))
+    await message.answer(texts.HELP, reply_markup=common.keyboard_for_role(role))
 
 
 @router.message(Command("status"))
@@ -833,7 +488,7 @@ async def cb_shared_state(cb: CallbackQuery) -> None:
 @router.message(Command("movie"))
 async def cmd_movie(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
     if role == "kid":
         await message.answer("Эта команда доступна только родителям 🍿")
         return
@@ -862,143 +517,6 @@ async def cmd_notes(message: Message) -> None:
     await message.answer(text, parse_mode="Markdown")
 
 
-@router.message(Command("quiz"))
-@router.message(F.text == "🧠 Заработать +15м")
-async def cmd_quiz(message: Message) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    ok, err_msg, q, person_id = await asyncio.to_thread(_quiz_prepare_sync, user_id)
-    if not ok or q is None or person_id is None:
-        await message.answer(err_msg)
-        return
-    topic = q.get("topic", "Эрудиция")
-    text = (
-        f"🧠 *Вопрос викторины на +15 минут ({topic}):*\n\n"
-        f"{texts.escape_markdown(q['question'])}\n\n"
-        f"Выберите правильный ответ:"
-    )
-    kb = quiz_keyboard(person_id, q["options"])
-    await message.answer(text, reply_markup=kb, parse_mode="Markdown")
-
-
-@router.message(Command("explore"))
-@router.message(F.text == "🚀 Чем заняться?")
-async def cmd_kid_explore(message: Message) -> None:
-    await message.answer(
-        "🚀 *Выбирай, чем займёмся сегодня:*\n\n"
-        "🎲 *Текстовый квест* — интерактивное приключение, где ты выбираешь сюжет!\n"
-        "💻 *Идея мини-игры* — задумка для твоей игры на Scratch или Python.\n"
-        "🇬🇧 *Английский челлендж* — сленг и фразы из любимых игр.\n"
-        "🤯 *Факт дня* — удивительный научный факт, чтобы удивить родителей!",
-        reply_markup=kid_explore_keyboard(),
-        parse_mode="Markdown",
-    )
-
-
-@router.callback_query(F.data.startswith("kexp:"))
-async def cb_kid_explore(cb: CallbackQuery) -> None:
-    action = (cb.data or "").split(":")[1]
-    prompts = {
-        "quest": (
-            "Начни для меня увлекательный интерактивный текстовый мини-квест в жанре "
-            "космического или фэнтези-приключения! Напиши краткую завязку (3-4 предложения) "
-            "и предложи 3 пронумерованных варианта действия (1, 2, 3), "
-            "чтобы я выбрал, что делать дальше."
-        ),
-        "game": (
-            "Предложи интересную и простую идею для создания собственной мини-игры "
-            "на Scratch или Python. Кратко объясни механику, фишку игры "
-            "и первые 3 шага, с чего начать программировать!"
-        ),
-        "english": (
-            "Устрой для меня веселый мини-челлендж по английскому языку на тему игр и приключений: "
-            "1 классное слово или фраза, пример в диалоге и короткий вопрос с вариантами для меня!"
-        ),
-        "fact": (
-            "Расскажи один поразительный, неожиданный и научно доказанный факт о космосе, "
-            "природе или технологиях, которым я сегодня смогу удивить родителей за ужином!"
-        ),
-    }
-    user_prompt = prompts.get(action, "Расскажи что-нибудь интересное!")
-    await cb.answer()
-    if isinstance(cb.message, Message):
-        title = user_prompt.split("!")[0]
-        await cb.message.answer(
-            f"🚀 *Запускаю:* _{title}…_", parse_mode="Markdown"
-        )
-        await _handle_kid_tutor(cb.message, user_prompt)
-
-
-@router.message(Command("ask"))
-@router.message(F.text == "🙏 Попросить время")
-async def cmd_ask_time(message: Message, command: CommandObject | None = None) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    s = dbmod.session()
-    try:
-        _, person = family_svc.get_user_role(s, user_id)
-    finally:
-        s.close()
-    if person is None:
-        await message.answer("Сначала необходимо привязать ваш аккаунт к ребёнку.")
-        return
-    reason = (command.args or "").strip() if (command and command.args) else ""
-    if not reason:
-        await message.answer(
-            "Напишите сообщение с причиной (или отправьте голосовое):\n"
-            "Например: «Пожалуйста, добавьте 30 минут доделать проект по географии»"
-        )
-        return
-    await _forward_time_request_to_parents(message, person.id, person.name, reason)
-
-
-@router.message(F.text == "✅ Сделал дело")
-async def btn_task_done(message: Message) -> None:
-    await message.answer(
-        "Молодец! 📸 Пришли фото того, что сделал, и подпиши его: "
-        "например, «убрал комнату». Родители посмотрят и начислят минуты."
-    )
-
-
-@router.message(F.photo)
-async def handle_task_photo(message: Message) -> None:
-    """A child's proof of a finished task goes to parents, who award minutes with one tap."""
-    user_id = message.from_user.id if message.from_user else 0
-    role, person = await asyncio.to_thread(_get_user_role_sync, user_id)
-    if role != "kid" or person is None or message.bot is None or not message.photo:
-        await message.answer("Фото принимаются только как отчёт ребёнка о сделанном деле.")
-        return
-    if not _allow_ai_request(user_id):
-        await message.answer("Слишком много сообщений подряд. Подождите минуту 🙂")
-        return
-    task = (message.caption or "без описания")[:500]
-    caption = f"✅ {person.name} сделал(а) дело: {task}\n\nСколько минут начислить?"
-    delivered = False
-    for parent_id in await asyncio.to_thread(_parent_ids_sync):
-        try:
-            await message.bot.send_photo(
-                parent_id,
-                photo=message.photo[-1].file_id,
-                caption=caption,
-                reply_markup=bonus_request_direct_keyboard(person.id),
-            )
-            delivered = True
-        except Exception:
-            log.exception("не удалось отправить отчёт родителю %s", parent_id)
-    await message.answer(
-        "Отправил родителям! Сообщу, когда они решат 🙌"
-        if delivered
-        else "Не получилось отправить родителям, попробуй ещё раз позже."
-    )
-
-
-@router.message(F.text == "🎓 Помощь с уроками")
-async def btn_homework_help(message: Message) -> None:
-    await message.answer(
-        "Привет! Я готов помочь тебе разобраться с уроками 🎒\n\n"
-        "Напиши мне вопрос или условие задачи (или пришли голосовое сообщение).\n"
-        "Я объясню сложные правила и подскажу ход решения!"
-    )
-
-
 @router.message(F.text == "⏳ Моё время")
 @router.message(F.text == "⏳ Квоты")
 async def btn_quota(message: Message) -> None:
@@ -1023,11 +541,11 @@ def _digest_sync() -> str:
 @router.message(Command("digest"))
 async def cmd_digest(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
     if role == "kid":
         await message.answer("Эта функция доступна только родителям 🛡")
         return
-    await send_long(message, await asyncio.to_thread(_digest_sync))
+    await common.send_long(message, await asyncio.to_thread(_digest_sync))
 
 
 async def _device_command(message: Message, command: CommandObject, tool_name: str) -> None:
@@ -1045,7 +563,7 @@ async def _device_command(message: Message, command: CommandObject, tool_name: s
 @router.message(Command("block"))
 async def cmd_block(message: Message, command: CommandObject) -> None:
     user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
     if role == "kid":
         await message.answer("Эта функция доступна только родителям 🛡")
         return
@@ -1055,7 +573,7 @@ async def cmd_block(message: Message, command: CommandObject) -> None:
 @router.message(Command("unblock"))
 async def cmd_unblock(message: Message, command: CommandObject) -> None:
     user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
     if role == "kid":
         await message.answer("Эта функция доступна только родителям 🛡")
         return
@@ -1073,7 +591,7 @@ def _resume_all_sync() -> int:
 @router.message(Command("pause"))
 async def cmd_pause(message: Message, command: CommandObject) -> None:
     user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
     if role == "kid":
         await message.answer("Эта функция доступна только родителям 🛡")
         return
@@ -1102,7 +620,7 @@ async def cmd_pause(message: Message, command: CommandObject) -> None:
 @router.message(Command("resume"))
 async def cmd_resume(message: Message, command: CommandObject) -> None:
     user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
     if role == "kid":
         await message.answer("Эта функция доступна только родителям 🛡")
         return
@@ -1115,7 +633,7 @@ async def cmd_bonus(message: Message, command: CommandObject) -> None:
     from ..services.quota import QUOTA_CATEGORIES
 
     user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
     if role == "kid":
         await message.answer("Эта функция доступна только родителям 🛡")
         return
@@ -1241,7 +759,7 @@ def _spend_by_person_sync() -> tuple[list[tuple[str, float, int, dict]], float]:
 @router.message(Command("usage"))
 async def cmd_usage(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(_get_user_role_sync, user_id)
+    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
     if role == "kid":
         await message.answer("Эта функция доступна только родителям 🛡")
         return
@@ -1488,7 +1006,7 @@ async def cb_access_request(cb: CallbackQuery) -> None:
             await cb.bot.send_message(
                 requester_id,
                 f"🎉 Доступ подтверждён! Ваша роль: {role_label}.\n\n{start_text}",
-                reply_markup=keyboard_for_role(role),
+                reply_markup=common.keyboard_for_role(role),
             )
         except Exception:
             log.exception(
@@ -1496,74 +1014,12 @@ async def cb_access_request(cb: CallbackQuery) -> None:
             )
 
 
-@router.callback_query(F.data.startswith("bdir:"))
-async def cb_bonus_direct(cb: CallbackQuery) -> None:
-    parts = (cb.data or "").split(":")
-    person_id, choice = int(parts[1]), parts[2]
-    msg, kid_msg, _person_name = await asyncio.to_thread(
-        _resolve_bonus_direct_sync, person_id, choice
-    )
-    await cb.answer()
-    if isinstance(cb.message, Message):
-        if cb.message.photo:
-            await cb.message.edit_caption(
-                caption=f"{cb.message.caption}\n\n➡ {msg}", reply_markup=None
-            )
-        else:
-            await cb.message.edit_text(f"{cb.message.text}\n\n➡ {msg}", reply_markup=None)
-
-    s = dbmod.session()
-    try:
-        p = s.get(Person, person_id)
-        kid_tg = p.telegram_id if p else None
-    finally:
-        s.close()
-
-    if kid_tg and cb.bot and kid_msg:
-        try:
-            await cb.bot.send_message(kid_tg, kid_msg)
-        except Exception:
-            log.exception("не удалось уведомить ребёнка %s", kid_tg)
-
-
-@router.callback_query(F.data.startswith("qz:"))
-async def cb_quiz(cb: CallbackQuery) -> None:
-    parts = (cb.data or "").split(":")
-    person_id, opt_idx = int(parts[1]), int(parts[2])
-    user_id = cb.from_user.id if cb.from_user else 0
-    res = await asyncio.to_thread(_quiz_answer_sync, user_id, person_id, opt_idx)
-    await cb.answer()
-    if isinstance(cb.message, Message):
-        await cb.message.edit_text(
-            f"{texts.escape_markdown(cb.message.text or '')}\n\n➡ {res['message']}",
-            reply_markup=None,
-            parse_mode="Markdown",
-        )
-
-    # При верном ответе — шлём гордое уведомление родителям с темой вопроса
-    if res.get("status") == "correct" and cb.bot:
-        parent_text = (
-            f"🏆 *{res['person_name']} выиграл в викторине!*\n\n"
-            f"Тема: *{res['topic']}*\n"
-            f"Вопрос: _{res['question']}_\n\n"
-            f"Ребёнок дал верный ответ и получил бонус *+15 минут* интернета."
-        )
-        for parent_id in await asyncio.to_thread(_parent_ids_sync):
-            try:
-                await cb.bot.send_message(parent_id, parent_text, parse_mode="Markdown")
-            except Exception:
-                log.exception(
-                    "не удалось отправить родителю %s уведомление о победе в викторине",
-                    parent_id,
-                )
-
-
 # ---------- свободный текст -> ИИ-оркестратор ----------
 
 def _orchestrate(chat_id: int, text: str) -> orchestrator.Answer:
     s = dbmod.session()
     try:
-        return orchestrator.handle(s, text, history=list(CHAT_HISTORY[chat_id]))
+        return orchestrator.handle(s, text, history=list(common.CHAT_HISTORY[chat_id]))
     finally:
         s.close()
 
@@ -1578,7 +1034,7 @@ def confirm_keyboard(pending_id: int) -> InlineKeyboardMarkup:
 async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
     """Обрабатывает текстовый ввод (набранный или распознанный из аудио) через ИИ."""
     user_id = message.from_user.id if message.from_user else 0
-    role, person = await asyncio.to_thread(_get_user_role_sync, user_id)
+    role, person = await asyncio.to_thread(common.get_user_role_sync, user_id)
     if role == "unauthorized":
         await message.answer(texts.START_UNAUTHORIZED)
         await _notify_owner_about_access_request(message)
@@ -1588,24 +1044,12 @@ async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
         await message.answer("Гостям доступны только Wi-Fi и справка.")
         return
 
-    if not _allow_ai_request(user_id):
+    if not common.allow_ai_request(user_id):
         await message.answer("Слишком много сообщений подряд. Подождите минуту 🙂")
         return
 
     if role == "kid":
-        lower = user_text.lower()
-        time_keywords = ("время", "времени", "добавь", "разблокируй", "интернет", "продли", "минут")
-        is_asking_time = any(k in lower for k in time_keywords) and (
-            "дай" in lower or "добавь" in lower or "пожалуйста" in lower
-            or "прошу" in lower or "еще" in lower or "ещё" in lower
-        )
-        if is_asking_time:
-            if person:
-                await _forward_time_request_to_parents(
-                    message, person.id, person.name, user_text
-                )
-                return
-        await _handle_kid_tutor(message, user_text)
+        await kid_menu.handle_text(message, person, user_text)
         return
 
     if not ai_client.is_configured():
@@ -1615,7 +1059,7 @@ async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
         )
         return
     try:
-        with ai_client.attribute(_caller(person, user_id, "orchestrator", role)):
+        with ai_client.attribute(common.caller(person, user_id, "orchestrator", role)):
             answer = await asyncio.to_thread(_orchestrate, message.chat.id, user_text)
     except ai_client.AiError as e:
         await message.answer(str(e))
@@ -1625,9 +1069,9 @@ async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
         await message.answer("ИИ споткнулся, подробности в журнале бота. Команды /help работают.")
         return
 
-    CHAT_HISTORY[message.chat.id].append({"role": "user", "content": user_text})
-    CHAT_HISTORY[message.chat.id].append({"role": "assistant", "content": answer.text})
-    await send_long(message, answer.text)
+    common.CHAT_HISTORY[message.chat.id].append({"role": "user", "content": user_text})
+    common.CHAT_HISTORY[message.chat.id].append({"role": "assistant", "content": answer.text})
+    await common.send_long(message, answer.text)
     for action in answer.pending:
         pending_id = await asyncio.to_thread(_save_pending, action)
         await message.answer(
@@ -1664,8 +1108,8 @@ async def handle_voice(message: Message) -> None:
         return
 
     user_id = message.from_user.id if message.from_user else 0
-    role, person = await asyncio.to_thread(_get_user_role_sync, user_id)
-    caller = _caller(person, user_id, "stt", role)
+    role, person = await asyncio.to_thread(common.get_user_role_sync, user_id)
+    caller = common.caller(person, user_id, "stt", role)
 
     try:
         await message.bot.send_chat_action(message.chat.id, "typing")

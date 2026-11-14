@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from app.bot import handlers
+from app.bot import common, kid_menu
 from app.bot.access import check_message
 from app.config import settings
 
@@ -24,15 +24,15 @@ def _photo_message(user_id=7):
 def kid(monkeypatch):
     person = MagicMock(id=3)
     person.name = "Миша"
-    monkeypatch.setattr(handlers, "_get_user_role_sync", lambda user_id: ("kid", person))
+    monkeypatch.setattr(common, "get_user_role_sync", lambda user_id: ("kid", person))
     monkeypatch.setattr(settings, "telegram_chat_ids", "111")
-    handlers._ai_request_times.clear()
+    common.ai_request_times.clear()
     return person
 
 
 def test_photo_goes_to_parents_with_award_buttons(kid):
     message = _photo_message()
-    asyncio.run(handlers.handle_task_photo(message))
+    asyncio.run(kid_menu.handle_task_photo(message))
     kwargs = message.bot.send_photo.await_args.kwargs
     assert message.bot.send_photo.await_args.args == (111,)
     assert kwargs["photo"] == "large"
@@ -41,9 +41,9 @@ def test_photo_goes_to_parents_with_award_buttons(kid):
 
 
 def test_adult_photo_is_not_forwarded(monkeypatch):
-    monkeypatch.setattr(handlers, "_get_user_role_sync", lambda user_id: ("owner", None))
+    monkeypatch.setattr(common, "get_user_role_sync", lambda user_id: ("owner", None))
     message = _photo_message()
-    asyncio.run(handlers.handle_task_photo(message))
+    asyncio.run(kid_menu.handle_task_photo(message))
     message.bot.send_photo.assert_not_awaited()
 
 
@@ -55,9 +55,9 @@ def test_kid_may_send_photo_and_guest_may_not():
 @pytest.mark.parametrize(("available", "offered"), [(True, True), (False, False)])
 def test_quiz_is_offered_only_with_a_time_request(monkeypatch, available, offered):
     monkeypatch.setattr(settings, "telegram_chat_ids", "111")
-    monkeypatch.setattr(handlers, "_can_take_quiz_sync", lambda person_id: available)
+    monkeypatch.setattr(kid_menu, "_can_take_quiz_sync", lambda person_id: available)
     message = MagicMock()
     message.answer = AsyncMock()
     message.bot.send_message = AsyncMock()
-    asyncio.run(handlers._forward_time_request_to_parents(message, 3, "Миша", "хочу доиграть"))
+    asyncio.run(kid_menu._forward_time_request_to_parents(message, 3, "Миша", "хочу доиграть"))
     assert ("/quiz" in message.answer.await_args.args[0]) is offered

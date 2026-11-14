@@ -388,7 +388,7 @@ def test_format_usage():
 
 
 def test_keyboards_for_roles():
-    from app.bot.handlers import keyboard_for_role
+    from app.bot.common import keyboard_for_role
 
     kb_owner = keyboard_for_role("owner")
     assert kb_owner is not None
@@ -529,7 +529,7 @@ def test_bonus_direct_approval(db):
     from aiogram.types import Message
     from sqlalchemy import select
 
-    from app.bot.handlers import bonus_request_direct_keyboard, cb_bonus_direct
+    from app.bot.kid_menu import bonus_request_direct_keyboard, cb_bonus_direct
     from app.models import Person, QuotaBonus
 
     kid = Person(name="Коля", role="kid", telegram_id=9999, bot_role="kid")
@@ -575,7 +575,7 @@ def test_kid_explore_keyboard_and_callback():
 
     from aiogram.types import Message
 
-    from app.bot.handlers import cb_kid_explore, kid_explore_keyboard
+    from app.bot.kid_menu import cb_kid_explore, kid_explore_keyboard
 
     kb = kid_explore_keyboard()
     callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
@@ -591,7 +591,7 @@ def test_kid_explore_keyboard_and_callback():
     msg.answer = AsyncMock()
     cb.message = msg
 
-    with patch("app.bot.handlers._handle_kid_tutor", new=AsyncMock()) as mock_tutor:
+    with patch("app.bot.kid_menu._handle_kid_tutor", new=AsyncMock()) as mock_tutor:
         asyncio.run(cb_kid_explore(cb))
         mock_tutor.assert_called_once()
         assert "мини-квест" in mock_tutor.call_args[0][1]
@@ -604,7 +604,7 @@ def test_quiz_flow_and_parent_notification(db, monkeypatch):
     from aiogram.types import Message
     from sqlalchemy import select
 
-    from app.bot.handlers import cb_quiz, quiz_keyboard
+    from app.bot.kid_menu import cb_quiz, quiz_keyboard
     from app.config import settings
     from app.models import Person, QuotaBonus
     from app.services import family as family_svc
