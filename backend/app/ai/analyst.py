@@ -134,7 +134,7 @@ def _fallback_digest(data: dict) -> str:
     for msg in data["blocks"][-5:]:
         lines.append(f"⛔ {msg}")
     for name, requests in data.get("kid_ai_requests", {}).items():
-        lines.append(f"🎓 {name}: запросов к репетитору и викторине {requests}")
+        lines.append(f"🎓 {name}: запросов к ИИ {requests}")
     lines += _must_see_lines(data)
     if len(lines) == 1:
         lines.append("Спокойный день: событий не было.")

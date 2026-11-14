@@ -21,8 +21,8 @@ log = logging.getLogger("homesec.bot.access")
 
 ADULT_ROLES = ("owner", "admin")
 
-KID_COMMANDS = {"start", "help", "quota", "ask", "quiz", "explore"}
-KID_CALLBACKS = {"kexp", "qz"}
+KID_COMMANDS = {"start", "help", "quota", "ask"}
+KID_CALLBACKS: set[str] = set()  # a child has no inline buttons of its own
 OWNER_CALLBACKS = {"acc"}  # granting roles is reserved for the owner
 GUEST_COMMANDS = {"start", "help"}
 GUEST_BUTTONS = {"📶 Wi-Fi", "❓ Помощь"}

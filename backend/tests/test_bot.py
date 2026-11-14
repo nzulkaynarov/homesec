@@ -402,8 +402,8 @@ def test_keyboards_for_roles():
     kid_buttons = [btn.text for row in kb_kid.keyboard for btn in row]
     assert "⏳ Моё время" in kid_buttons
     assert "🙏 Попросить время" in kid_buttons
-    assert "🧠 Заработать +15м" in kid_buttons
-    assert "🚀 Чем заняться?" in kid_buttons
+    assert "✅ Сделал дело" in kid_buttons
+    assert "🧠 Заработать +15м" not in kid_buttons and "🚀 Чем заняться?" not in kid_buttons
 
     kb_guest = keyboard_for_role("guest")
     assert kb_guest is not None
@@ -567,100 +567,6 @@ def test_bonus_direct_approval(db):
 
     cb.bot.send_message.assert_called_once()
     assert "+30 мин к лимитам: игры" in cb.bot.send_message.call_args[0][1]
-
-
-def test_kid_explore_keyboard_and_callback():
-    import asyncio
-    from unittest.mock import AsyncMock, MagicMock, patch
-
-    from aiogram.types import Message
-
-    from app.bot.kid_menu import cb_kid_explore, kid_explore_keyboard
-
-    kb = kid_explore_keyboard()
-    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-    assert "kexp:quest" in callbacks
-    assert "kexp:game" in callbacks
-    assert "kexp:english" in callbacks
-    assert "kexp:fact" in callbacks
-
-    cb = MagicMock()
-    cb.data = "kexp:quest"
-    cb.answer = AsyncMock()
-    msg = MagicMock(spec=Message)
-    msg.answer = AsyncMock()
-    cb.message = msg
-
-    with patch("app.bot.kid_menu._handle_kid_tutor", new=AsyncMock()) as mock_tutor:
-        asyncio.run(cb_kid_explore(cb))
-        mock_tutor.assert_called_once()
-        assert "мини-квест" in mock_tutor.call_args[0][1]
-
-
-def test_quiz_flow_and_parent_notification(db, monkeypatch):
-    import asyncio
-    from unittest.mock import AsyncMock, MagicMock
-
-    from aiogram.types import Message
-    from sqlalchemy import select
-
-    from app.bot.kid_menu import cb_quiz, quiz_keyboard
-    from app.config import settings
-    from app.models import Person, QuotaBonus
-    from app.services import family as family_svc
-
-    monkeypatch.setattr(settings, "telegram_chat_ids", "777001")
-
-    kid = Person(name="Артём", role="kid", telegram_id=5555, bot_role="kid")
-    db.add(kid)
-    db.commit()
-    from app.models import Quota as _Quota
-
-    db.add(_Quota(name="Игры", target_type="person", target=str(kid.id), category="games",
-                  minutes_per_day=60, days="0,1,2,3,4,5,6", enabled=True))
-    db.commit()
-
-    q_data = {
-        "id": -1,
-        "question": "Сколько спутников у Марса?",
-        "options": ["1", "2", "3", "4"],
-        "correct": 1,
-        "topic": "Космос",
-    }
-    family_svc.store_active_quiz(db, kid.id, q_data)
-
-    kb = quiz_keyboard(kid.id, q_data["options"])
-    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-    assert f"qz:{kid.id}:0" in callbacks
-    assert f"qz:{kid.id}:1" in callbacks
-
-    # Проверяем верный ответ
-    cb = MagicMock()
-    cb.data = f"qz:{kid.id}:1"
-    cb.from_user.id = 5555
-    cb.answer = AsyncMock()
-    msg = MagicMock(spec=Message)
-    msg.text = "Вопрос викторины"
-    msg.edit_text = AsyncMock()
-    cb.message = msg
-    cb.bot = MagicMock()
-    cb.bot.send_message = AsyncMock()
-
-    asyncio.run(cb_quiz(cb))
-
-    qb = db.scalar(select(QuotaBonus).where(QuotaBonus.target == str(kid.id)))
-    assert qb is not None
-    assert qb.minutes == 15
-    assert "Космос" in qb.comment
-
-    msg.edit_text.assert_called_once()
-    assert "Абсолютно верно" in msg.edit_text.call_args[0][0]
-
-    cb.bot.send_message.assert_called_once()
-    parent_alert = cb.bot.send_message.call_args[0][1]
-    assert "Артём выиграл в викторине" in parent_alert
-    assert "Космос" in parent_alert
-    assert "Сколько спутников у Марса?" in parent_alert
 
 
 def test_a_notice_nobody_received_is_sent_again(db, monkeypatch):

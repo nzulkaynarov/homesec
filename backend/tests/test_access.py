@@ -51,17 +51,24 @@ def test_kid_denied_parent_items(text):
 
 @pytest.mark.parametrize(
     "text",
-    ["/quiz", "/quota", "/ask", "/explore@homesec_bot", "помоги с уроками", "🙏 Попросить время"],
+    ["/start", "/quota", "/ask", "/help@homesec_bot", "помоги с уроками", "🙏 Попросить время"],
 )
 def test_kid_allowed_items(text):
     assert access.check_message("kid", text).allowed
 
 
-def test_kid_voice_allowed_and_only_kid_buttons():
+@pytest.mark.parametrize("text", ["/quiz", "/explore"])
+def test_tutor_and_quiz_commands_left_for_luna(text):
+    assert not access.check_message("kid", text).allowed
+
+
+@pytest.mark.parametrize("data", ["qz:1:0", "kexp:quest", "act:1:yes", "bdir:1:15"])
+def test_kid_presses_no_inline_buttons(data):
+    assert not access.check_callback("kid", data).allowed
+
+
+def test_kid_voice_allowed():
     assert access.check_message("kid", None, is_voice=True).allowed
-    assert access.check_callback("kid", "qz:1:0").allowed
-    assert access.check_callback("kid", "kexp:quest").allowed
-    assert not access.check_callback("kid", "act:1:yes").allowed
 
 
 def test_only_owner_grants_roles():

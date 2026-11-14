@@ -1,9 +1,8 @@
 """Семейные функции: роли пользователей Telegram, радар присутствия «Кто дома»,
-управление общими медиа-устройствами (ТВ/колонки), семейная память и викторины для детей.
+управление общими медиа-устройствами (ТВ/колонки), семейная память и учёт викторины Luna.
 """
 
 import logging
-import random
 import re
 from datetime import datetime, timedelta
 from typing import Any
@@ -32,60 +31,6 @@ ROLE_LABELS = {
     "guest": "Гость",
     "unauthorized": "Не авторизован",
 }
-
-# 10 вопросов для детской викторины (математика, логика, природа, языки)
-QUIZ_QUESTIONS = [
-    {
-        "q": "Сколько будет 7 × 8?",
-        "options": ["54", "56", "58", "64"],
-        "correct": 1,
-    },
-    {
-        "q": "Какая планета Солнечной системы самая большая?",
-        "options": ["Марс", "Сатурн", "Юпитер", "Венера"],
-        "correct": 2,
-    },
-    {
-        "q": "Какое животное считается самым быстрым на суше?",
-        "options": ["Гепард", "Лев", "Антилопа", "Сокол"],
-        "correct": 0,
-    },
-    {
-        "q": "Сколько сантиметров в 2.5 метрах?",
-        "options": ["25", "205", "250", "2500"],
-        "correct": 2,
-    },
-    {
-        "q": "Как по-английски сказать «яблоко»?",
-        "options": ["Orange", "Banana", "Apple", "Grape"],
-        "correct": 2,
-    },
-    {
-        "q": "Сколько сторон у шестиугольника?",
-        "options": ["5", "6", "7", "8"],
-        "correct": 1,
-    },
-    {
-        "q": "Какое самое глубокое озеро в мире?",
-        "options": ["Байкал", "Каспийское море", "Виктория", "Мичиган"],
-        "correct": 0,
-    },
-    {
-        "q": "Сколько минут в 3 часах?",
-        "options": ["120", "150", "180", "200"],
-        "correct": 2,
-    },
-    {
-        "q": "Столица Франции — это...",
-        "options": ["Рим", "Берлин", "Мадрид", "Париж"],
-        "correct": 3,
-    },
-    {
-        "q": "Что тяжелее: 1 кг железа или 1 кг ваты?",
-        "options": ["Железо", "Вата", "Одинаково", "Зависит от погоды"],
-        "correct": 2,
-    },
-]
 
 
 def parent_chat_ids(db: Session) -> set[int]:
@@ -300,102 +245,6 @@ def format_family_notes(notes: list[FamilyNote]) -> str:
         auth = f" ({n.author})" if n.author else ""
         lines.append(f"{i}. {n.content}{auth} — _{dt}_")
     return "\n".join(lines)
-
-
-def get_random_quiz_question() -> dict[str, Any]:
-    """Возвращает случайный вопрос для викторины из встроенного пула."""
-    idx = random.randint(0, len(QUIZ_QUESTIONS) - 1)
-    q = QUIZ_QUESTIONS[idx]
-    return {
-        "id": idx,
-        "question": q["q"],
-        "options": q["options"],
-        "correct": q["correct"],
-        "topic": "Эрудиция",
-    }
-
-
-def generate_dynamic_quiz_question(db: Session, person_id: int) -> dict[str, Any]:
-    """Генерирует уникальный познавательный вопрос викторины через LunaGPT
-    или использует fallback-пул при отсутствии ИИ."""
-    import json
-
-    from ..ai import client as ai_client
-
-    if ai_client.is_configured():
-        try:
-            prompt = (
-                "Сгенерируй один интересный, познавательный вопрос викторины для школьника "
-                "(математика, логика, природа, космос, история или наука). "
-                "Верни ответ СТРОГО в виде валидного JSON без разметки markdown:\n"
-                '{"q": "Текст вопроса?", '
-                '"options": ["Вариант 1", "Вариант 2", "Вариант 3", "Вариант 4"], '
-                '"correct": 0, "topic": "Космос"}\n'
-                "options: список из ровно 4 вариантов ответа. "
-                "correct: целое число от 0 до 3 (индекс правильного ответа). "
-                "topic: короткая тема вопроса (1-2 слова)."
-            )
-            resp = ai_client.ask_with_fallback(
-                db,
-                ai_client.model_ladder(settings.ai_model_fast, settings.ai_model_support),
-                messages=[{"role": "user", "content": prompt}],
-                system=(
-                    "Ты — генератор вопросов для детской познавательной викторины. "
-                    "Отвечай строго валидным JSON без лишних слов."
-                ),
-                max_tokens=400,
-            )
-            raw = "".join(b.text for b in resp.content if b.type == "text").strip()
-            if raw.startswith("```"):
-                raw = raw.strip("`")
-                if raw.startswith("json\n"):
-                    raw = raw[5:]
-                elif raw.startswith("json"):
-                    raw = raw[4:]
-                raw = raw.strip()
-            data = json.loads(raw)
-            if (
-                isinstance(data, dict)
-                and "q" in data
-                and "options" in data
-                and len(data["options"]) == 4
-                and isinstance(data.get("correct"), int)
-                and 0 <= data["correct"] <= 3
-            ):
-                return {
-                    "id": -1,
-                    "question": data["q"],
-                    "options": data["options"],
-                    "correct": data["correct"],
-                    "topic": data.get("topic", "Эрудиция"),
-                }
-        except Exception as e:
-            log.warning("генерация викторины через ИИ не удалась (%s), берём из пула", e)
-
-    return get_random_quiz_question()
-
-
-def store_active_quiz(db: Session, person_id: int, quiz_data: dict[str, Any]) -> None:
-    """Сохраняет текущий активный вопрос викторины в kv_state."""
-    import json
-    kv_set(db, f"quiz_active_{person_id}", json.dumps(quiz_data, ensure_ascii=False))
-
-
-def get_active_quiz(db: Session, person_id: int) -> dict[str, Any] | None:
-    """Получает сохранённый вопрос активной викторины."""
-    import json
-    raw = kv_get(db, f"quiz_active_{person_id}", "")
-    if not raw:
-        return None
-    try:
-        return json.loads(raw)
-    except Exception:
-        return None
-
-
-def clear_active_quiz(db: Session, person_id: int) -> None:
-    """Очищает активный вопрос викторины."""
-    kv_set(db, f"quiz_active_{person_id}", "")
 
 
 def can_take_quiz_today(db: Session, person_id: int, now: datetime | None = None) -> bool:

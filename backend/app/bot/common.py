@@ -40,10 +40,6 @@ def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
                     KeyboardButton(text="🙏 Попросить время"),
                 ],
                 [
-                    KeyboardButton(text="🧠 Заработать +15м"),
-                    KeyboardButton(text="🚀 Чем заняться?"),
-                ],
-                [
                     KeyboardButton(text="✅ Сделал дело"),
                     KeyboardButton(text="❓ Помощь"),
                 ],

@@ -60,4 +60,36 @@ def test_quiz_is_offered_only_with_a_time_request(monkeypatch, available, offere
     message.answer = AsyncMock()
     message.bot.send_message = AsyncMock()
     asyncio.run(kid_menu._forward_time_request_to_parents(message, 3, "Миша", "хочу доиграть"))
-    assert ("/quiz" in message.answer.await_args.args[0]) is offered
+    assert ("викторине у Luna" in message.answer.await_args.args[0]) is offered
+
+
+def _text_message():
+    message = MagicMock()
+    message.chat.id = 7
+    message.answer = AsyncMock()
+    message.bot.send_message = AsyncMock()
+    return message
+
+
+def test_kid_chat_points_to_luna_without_calling_the_ai(kid, monkeypatch):
+    monkeypatch.setattr(kid_menu, "_alert_parents_about_kid", AsyncMock())
+    message = _text_message()
+    asyncio.run(kid_menu.handle_text(message, kid, "помоги решить задачу по математике"))
+    assert message.answer.await_args.args[0] == kid_menu.ELSEWHERE
+    kid_menu._alert_parents_about_kid.assert_not_awaited()
+
+
+def test_worrying_kid_message_still_reaches_parents(kid, monkeypatch):
+    alert = AsyncMock()
+    monkeypatch.setattr(kid_menu, "_alert_parents_about_kid", alert)
+    message = _text_message()
+    asyncio.run(kid_menu.handle_text(message, kid, "меня травят в школе"))
+    alert.assert_awaited_once()
+    assert "расскажи" in message.answer.await_args.args[0]
+
+
+def test_kid_plea_for_time_goes_to_parents(kid, monkeypatch):
+    forward = AsyncMock()
+    monkeypatch.setattr(kid_menu, "_forward_time_request_to_parents", forward)
+    asyncio.run(kid_menu.handle_text(_text_message(), kid, "дай ещё времени пожалуйста"))
+    forward.assert_awaited_once()

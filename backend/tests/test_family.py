@@ -166,11 +166,6 @@ def test_quiz_lifecycle(db):
                   minutes_per_day=60, days="0,1,2,3,4,5,6", enabled=True))
     db.commit()
 
-    q = family_svc.get_random_quiz_question()
-    assert "question" in q and "options" in q and "correct" in q
-    assert len(q["options"]) >= 2
-    assert 0 <= q["correct"] < len(q["options"])
-
     assert family_svc.can_take_quiz_today(db, p.id) is True
 
     msg = family_svc.award_quiz_bonus(db, p, minutes=15)
@@ -183,24 +178,6 @@ def test_quiz_lifecycle(db):
     assert len(bonuses) == 1
     assert bonuses[0].minutes == 15
     assert "Победа в викторине" in bonuses[0].comment
-
-
-def test_dynamic_quiz_and_active_store(db):
-    p = Person(name="Соня", role="kid")
-    db.add(p)
-    db.commit()
-
-    q = family_svc.generate_dynamic_quiz_question(db, p.id)
-    assert "question" in q and "options" in q and "correct" in q
-    assert len(q["options"]) == 4
-
-    family_svc.store_active_quiz(db, p.id, q)
-    active = family_svc.get_active_quiz(db, p.id)
-    assert active is not None
-    assert active["question"] == q["question"]
-
-    family_svc.clear_active_quiz(db, p.id)
-    assert family_svc.get_active_quiz(db, p.id) is None
 
 
 def test_presence_says_so_when_the_router_is_silent(db):
