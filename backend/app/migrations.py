@@ -97,6 +97,8 @@ MIGRATIONS: list[tuple[int, list[str]]] = [
         "DELETE FROM people WHERE role = 'guest' AND telegram_id IS NULL "
         "AND name IN ('Известные', 'Неизвестные')",
     ]),
+    # Devices the parents asked to hear about when they drop off the network.
+    (8, ["ALTER TABLE devices ADD COLUMN watched BOOLEAN NOT NULL DEFAULT 0"]),
 ]
 
 

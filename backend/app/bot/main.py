@@ -18,7 +18,7 @@ from ..config import settings
 from ..db import Base, engine
 from ..migrations import ensure_schema
 from ..services import family as family_svc
-from ..services import followups
+from ..services import followups, uptime
 from . import alerts, handlers, luna_watch, notify, texts
 from .health import default_monitor
 
@@ -29,6 +29,7 @@ HEALTH_INTERVAL = 60  # health-проверки, сек
 WATCHDOG_INTERVAL = 15 * 60  # эвристики аномалий, сек
 DIGEST_HOUR = 21  # ежедневный дайджест в 21:00 локального времени
 FOLLOWUP_INTERVAL = 5 * 60  # напоминания о заявках и недельная сводка, сек
+UPTIME_INTERVAL = 60  # watched devices dropping off the network, seconds
 
 
 def _parent_ids() -> set[int]:
@@ -196,6 +197,35 @@ async def followup_loop(bot: Bot, chat_ids: set[int]) -> None:
         await asyncio.sleep(FOLLOWUP_INTERVAL)
 
 
+def _uptime_changes() -> list[uptime.Change]:
+    s = dbmod.session()
+    try:
+        return uptime.changes(s)
+    finally:
+        s.close()
+
+
+def _uptime_record(change: uptime.Change) -> None:
+    s = dbmod.session()
+    try:
+        uptime.record(s, change)
+    finally:
+        s.close()
+
+
+async def uptime_loop(bot: Bot, chat_ids: set[int]) -> None:
+    """Network equipment and marked devices: a message when one goes silent and when it is
+    back. Remembered only once delivered, so an outage of Telegram does not swallow it."""
+    while True:
+        try:
+            for change in await asyncio.to_thread(_uptime_changes):
+                if await _broadcast(bot, chat_ids, change.text):
+                    await asyncio.to_thread(_uptime_record, change)
+        except Exception:
+            log.exception("uptime_loop")
+        await asyncio.sleep(UPTIME_INTERVAL)
+
+
 def _build_digest() -> str:
     s = dbmod.session()
     try:
@@ -250,6 +280,7 @@ async def main() -> None:
         asyncio.create_task(watchdog_loop(bot, allowed)),
         asyncio.create_task(digest_loop(bot, allowed)),
         asyncio.create_task(followup_loop(bot, allowed)),
+        asyncio.create_task(uptime_loop(bot, allowed)),
         asyncio.create_task(luna_watch.watch_loop()),
     ]
     log.info("бот запущен, чатов в allowlist: %d", len(allowed))

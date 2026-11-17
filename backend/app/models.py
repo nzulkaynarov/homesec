@@ -72,6 +72,8 @@ class Device(Base):
     last_seen: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
     # A shared device counts as an adult's until this moment, then returns to kid mode.
     adult_until: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
+    # Parents hear when it drops off the network; network equipment is always watched.
+    watched: Mapped[bool] = mapped_column(Boolean, default=False, server_default="0")
 
     person: Mapped[Person | None] = relationship(back_populates="devices")
 

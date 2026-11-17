@@ -11,7 +11,7 @@ from sqlalchemy import select
 from .. import db as dbmod
 from ..ai.tools import ToolError
 from ..models import DEVICE_KIND_LABELS, Device, Person
-from ..services import device_owners, device_triage, pauses
+from ..services import device_owners, device_triage, pauses, uptime
 from ..services.pauses import Target
 from . import access
 from .triage import vendor_of
@@ -132,6 +132,7 @@ def _device_view(db: Any, device_id: int) -> dict[str, Any] | None:
         "online": device_owners.is_online(device),
         "seen": device_owners.seen_text(device),
         "blocked": device.blocked_manual,
+        "watched": uptime.is_watched(device),
         "speed": device.speed_limit,
         "pausable": pauses.pausable(device),
         "paused_until": (
@@ -177,6 +178,10 @@ def _card_actions(view: dict[str, Any], device_id: int, section: str, page: int)
         rows.append([_button("⏸ Отключить на время", f"pzt:d{device_id}")])
     if view["kind"] != "infra":
         rows.append([_button("🐢 Скорость", f"dmv:{here}")])
+        if view["watched"]:
+            rows.append([_button("🔕 Не следить за связью", "dmw:" + at.format(0))])
+        else:
+            rows.append([_button("🔔 Следить за связью", "dmw:" + at.format(1))])
     return rows
 
 
@@ -196,6 +201,8 @@ async def _device(device_id: int, section: str, page: int, notice: str = "") -> 
         lines.append(f"⏸ Без интернета до {view['paused_until']:%H:%M}")
     if view["speed"]:
         lines.append(f"🐢 Скорость: {view['speed']}")
+    if view["watched"] and not view["is_pi"]:
+        lines.append("🔔 Сообщу, если пропадёт из сети")
     if not view["random"]:
         vendor = await vendor_of(view["mac"])
         if vendor:
@@ -379,6 +386,14 @@ async def _block(device_id: int, on: bool, section: str, page: int) -> Card:
     return await _device(device_id, section, page, f"✅ {result}")
 
 
+async def _watch(device_id: int, on: bool, section: str, page: int) -> Card:
+    try:
+        result = await _call(uptime.set_watched, device_id, on)
+    except LookupError:
+        return await _section(section, page, GONE)
+    return await _device(device_id, section, page, f"✅ {result}")
+
+
 async def _speed_pick(device_id: int, section: str, page: int) -> Card:
     view = await _call(_device_view, device_id)
     if view is None:
@@ -525,6 +540,11 @@ async def cb_block(cb: CallbackQuery) -> None:
     await _show(cb, await _block(int(device_id), on == "1", section, int(page)))
 
 
+async def cb_watch(cb: CallbackQuery) -> None:
+    device_id, on, section, page = _parts(cb)
+    await _show(cb, await _watch(int(device_id), on == "1", section, int(page)))
+
+
 async def cb_delete_confirm(cb: CallbackQuery) -> None:
     device_id, section, page = _parts(cb)
     await _show(cb, await _delete_confirm(int(device_id), section, int(page)))
@@ -570,6 +590,7 @@ def register(router: Router) -> None:
     router.callback_query.register(cb_merge_confirm, F.data.startswith("dmg:"))
     router.callback_query.register(cb_merge, F.data.startswith("dmgy:"))
     router.callback_query.register(cb_block, F.data.startswith("dmb:"))
+    router.callback_query.register(cb_watch, F.data.startswith("dmw:"))
     router.callback_query.register(cb_delete_confirm, F.data.startswith("dmx:"))
     router.callback_query.register(cb_delete, F.data.startswith("dmxy:"))
     router.callback_query.register(cb_speed_pick, F.data.startswith("dmv:"))
