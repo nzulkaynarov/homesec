@@ -198,3 +198,28 @@ def test_heartbeat_is_not_sent_while_rules_are_stale(db, monkeypatch):
     monkeypatch.setattr(scheduler.httpx, "get", lambda *a, **kw: calls.append(a))
     scheduler._heartbeat()
     assert calls == []
+
+
+def test_block_event_names_the_device(db, monkeypatch):
+    """The daily digest showed six bare IPs at bedtime; parents need to see whose device it was."""
+    _router_up(monkeypatch)
+    tablet = Device(mac="AA:BB:CC:00:00:01", name="Планшет", ip="192.168.88.240")
+    db.add(tablet)
+    db.commit()
+    monkeypatch.setattr(enforcement, "discover_devices", lambda db, api, macs: [tablet])
+    monkeypatch.setattr(enforcement.mikrotik, "kill_connections", lambda api, ip: None)
+    def sync(api, name, ips):  # .99 has no device in the database
+        return (sorted(ips | {"192.168.88.99"}), []) if name == "hs-blocked" else ([], [])
+
+    monkeypatch.setattr(enforcement.mikrotik, "address_list_sync", sync)
+    monkeypatch.setattr(
+        enforcement, "_desired_state",
+        lambda db, devices, now=None, self_ips=None: {
+            "lists": {"hs-blocked": {"192.168.88.240"}}, "queues": {}, "ag_clients": [],
+            "quota_blocked": {}})
+
+    enforcement.reconcile(db)
+
+    messages = sorted(e.message for e in db.query(EventLog) if e.kind == "block")
+    assert messages == ["Заблокирован доступ: 192.168.88.99",
+                        "Заблокирован доступ: «Планшет» (192.168.88.240)"]

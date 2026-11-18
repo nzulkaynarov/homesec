@@ -311,6 +311,11 @@ def test_digest_data_and_fallback_include_screen_time(db, kid_device, monkeypatc
     # вчерашние минуты в «сегодня» не попадают
     db.add(QuotaUsage(device_id=kid_device.id, date="2020-01-01", category="games",
                       minutes=999))
+    # оборудование сети — не экранное время: точка доступа сама проверяет связь
+    ap = Device(mac="AA:BB:CC:00:00:FA", name="ArcherC6", ip="192.168.88.250", kind="infra")
+    db.add(ap)
+    db.flush()
+    db.add(QuotaUsage(device_id=ap.id, date=today, category="internet", minutes=1224))
     db.commit()
 
     data = analyst.collect_digest_data(db)

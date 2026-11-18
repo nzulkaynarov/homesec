@@ -52,7 +52,9 @@ def collect_digest_data(db: Session) -> dict:
 
     # Экранное время за день (заявлено в ТЗ фазы 2): активные минуты из
     # QuotaUsage за сегодня, {устройство: {категория: минуты}}
-    names = {d.id: d.name for d in devices}
+    # Equipment is not screen time: the Archer C6 alone resolves wikipedia.org and amazon.com every
+    # 20 seconds to test its uplink, which read as 1224 minutes "in the internet" on 2026-11-18.
+    names = {d.id: d.name for d in devices if d.kind != "infra"}
     screen_time: dict[str, dict[str, int]] = {}
     today = datetime.now().strftime("%Y-%m-%d")
     for r in db.scalars(select(QuotaUsage).where(QuotaUsage.date == today)):

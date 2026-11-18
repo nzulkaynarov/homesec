@@ -8,7 +8,7 @@ import pytest
 
 from app.config import settings
 from app.db import Base, engine, session
-from app.models import Device, FamilyNote, Person, QuotaBonus, kv_get
+from app.models import Device, FamilyNote, Person, QuotaBonus, Rule, kv_get
 from app.services import family as family_svc
 
 
@@ -16,7 +16,8 @@ from app.services import family as family_svc
 def db():
     Base.metadata.create_all(engine)
     s = session()
-    for model in (FamilyNote, QuotaBonus, Device, Person):
+    # Rule too: a bedtime rule left by another test failed the quiz after 21:00 (night mode).
+    for model in (FamilyNote, QuotaBonus, Device, Person, Rule):
         s.query(model).delete()
     s.commit()
     yield s

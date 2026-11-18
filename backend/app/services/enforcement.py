@@ -507,6 +507,7 @@ def reconcile(db: Session) -> dict:
     сводку; ошибки интеграций пишет в журнал, но не роняет планировщик."""
     summary: dict = {"ok": True, "errors": [], "newly_blocked": []}
     quota_blocked: dict[str, Device] = {}
+    names: dict[str, str] = {}  # ip -> device name, so a block event says whose internet went off
 
     # Fail-closed: если не знаем собственный IP, снимается единственная защита
     # малинки от попадания в списки блокировки — лучше НЕ трогать роутер вовсе,
@@ -531,6 +532,7 @@ def reconcile(db: Session) -> dict:
                 for mac in mikrotik.prune_pinned_leases(api, set(known_macs(db))):
                     log_event(db, "lease_pruned", f"Снят закреплённый адрес удалённого {mac}")
             mark_seen(db, devices, mikrotik.get_online_ips(api))
+            names = {dev.ip: dev.name for dev in devices if dev.ip}
             desired = _desired_state(db, devices, datetime.now(), self_ips)
             quota_blocked = desired["quota_blocked"]
             for list_name, ips in desired["lists"].items():
@@ -572,5 +574,6 @@ def reconcile(db: Session) -> dict:
                       f"Квота на интернет исчерпана: {dev.name} ({dev.mac}, {ip}) — "
                       "доступ выключен до полуночи.")
         else:
-            log_event(db, "block", f"Заблокирован доступ: {ip}")
+            who = f"«{names[ip]}» ({ip})" if ip in names else ip
+            log_event(db, "block", f"Заблокирован доступ: {who}")
     return summary
