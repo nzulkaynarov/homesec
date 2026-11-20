@@ -16,6 +16,8 @@ from . import texts
 from .device_menu import BTN_DEVICES
 from .rules_menu import BTN_RULES
 
+BTN_SERVER = "🖥 Сервер"  # owner only; handled in server_menu
+
 # Короткая память диалога с ИИ на чат (только текстовые реплики, без tool call'ов)
 CHAT_HISTORY: dict[int, deque] = defaultdict(lambda: deque(maxlen=6))
 
@@ -23,15 +25,15 @@ CHAT_HISTORY: dict[int, deque] = defaultdict(lambda: deque(maxlen=6))
 def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
     """Нижнее меню Telegram-кнопок в зависимости от роли в семье."""
     if role in ("owner", "admin"):
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="🏠 Кто дома"), KeyboardButton(text="⏳ Квоты")],
-                [KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="📺 Общие устройства")],
-                [KeyboardButton(text=BTN_DEVICES), KeyboardButton(text=BTN_RULES)],
-                [KeyboardButton(text="📝 Заметки"), KeyboardButton(text="❓ Помощь")],
-            ],
-            resize_keyboard=True,
-        )
+        rows = [
+            [KeyboardButton(text="🏠 Кто дома"), KeyboardButton(text="⏳ Квоты")],
+            [KeyboardButton(text="⏸ Пауза"), KeyboardButton(text="📺 Общие устройства")],
+            [KeyboardButton(text=BTN_DEVICES), KeyboardButton(text=BTN_RULES)],
+            [KeyboardButton(text="📝 Заметки"), KeyboardButton(text="❓ Помощь")],
+        ]
+        if role == "owner":
+            rows.append([KeyboardButton(text=BTN_SERVER)])
+        return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
     if role == "kid":
         return ReplyKeyboardMarkup(
             keyboard=[

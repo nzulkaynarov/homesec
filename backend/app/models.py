@@ -282,6 +282,18 @@ def kv_set(db, key: str, value: str) -> None:
     db.commit()
 
 
+class HostSample(Base):
+    """One minute of a machine's health: the PC reports through the Luna API, the Pi samples
+    itself. JSON, because the readings grow without schema changes; kept a week."""
+
+    __tablename__ = "host_samples"
+
+    id: Mapped[int] = mapped_column(primary_key=True)
+    host: Mapped[str] = mapped_column(String(16), index=True)  # pc | pi
+    received: Mapped[datetime] = mapped_column(DateTime, default=datetime.now, index=True)
+    data: Mapped[str] = mapped_column(Text, default="{}")
+
+
 class FamilyNote(Base):
     """Семейная память и заметки (размеры одежды, коды домофона, списки)."""
 

@@ -27,6 +27,7 @@ OWNER_CALLBACKS = {"acc"}  # granting roles is reserved for the owner
 GUEST_COMMANDS = {"start", "help"}
 GUEST_BUTTONS = {"📶 Wi-Fi", "❓ Помощь"}
 ADULT_BUTTONS = {
+    "🖥 Сервер",
     "🏠 Кто дома",
     "⏳ Квоты",
     "⏸ Пауза",

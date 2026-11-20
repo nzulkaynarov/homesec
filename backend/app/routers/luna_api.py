@@ -16,7 +16,7 @@ from ..ai import tools
 from ..config import settings
 from ..db import get_db
 from ..models import BonusRequest, Device, Person, kv_set
-from ..services import bonus, family, house_rules
+from ..services import bonus, family, hosts, house_rules
 
 router = APIRouter(prefix="/api/luna/v1", tags=["luna"])
 
@@ -79,6 +79,44 @@ def heartbeat(body: Heartbeat, db: Session = Depends(get_db)) -> dict[str, str]:
     """Luna proves it is alive and shares who must be told if it stops."""
     kv_set(db, HEARTBEAT_KEY, datetime.now().isoformat())
     kv_set(db, MEMBERS_KEY, json.dumps(body.member_chat_ids))
+    return {"status": "ok"}
+
+
+class HostBoot(BaseModel):
+    id: str = Field(max_length=64)
+    started: datetime | None = None
+    previous_clean: bool | None = None  # None: the monitor does not know how the last boot ended
+    previous_last: datetime | None = None
+
+
+class HostReport(BaseModel):
+    """A minute of the PC's health from its monitor. Unknown fields are ignored, so the PC
+    can report more before the Pi learns to read it."""
+
+    boot: HostBoot
+    stopping: bool = False
+    cpu_busy_pct: float | None = None
+    cpu_max_c: float | None = None
+    gpu_c: float | None = None
+    gpu_busy_pct: float | None = None
+    nvme_c: float | None = None
+    board_c: float | None = None
+    load1: float | None = None
+    mem_avail_mb: int | None = None
+    swap_used_mb: int | None = None
+    top_process: str | None = Field(default=None, max_length=80)
+    disks: dict[str, float] = Field(default_factory=dict, max_length=8)
+    services_down: list[str] = Field(default_factory=list, max_length=20)
+    backup_age_h: dict[str, float | None] = Field(default_factory=dict, max_length=8)
+    kernel_errors: int | None = None
+    kernel_error_last: str | None = Field(default=None, max_length=200)
+    tailscale_days: float | None = None
+
+
+@router.post("/host", dependencies=[Depends(require_token)])
+def host_report(body: HostReport, db: Session = Depends(get_db)) -> dict[str, str]:
+    """The PC's monitor reports once a minute; the bot judges the samples and keeps a week."""
+    hosts.record(db, hosts.PC, body.model_dump(mode="json", exclude_none=True))
     return {"status": "ok"}
 
 

@@ -32,6 +32,7 @@ from . import (
     pause_menu,
     reports,
     rules_menu,
+    server_menu,
     shared_menu,
     texts,
     triage,
@@ -134,6 +135,7 @@ shared_menu.register(router)
 alerts.register(router)
 onboarding.register(router)
 reports.register(router)
+server_menu.register(router)
 
 
 # ---------- выбор устройства кнопками ----------

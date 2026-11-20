@@ -19,7 +19,7 @@ from ..db import Base, engine
 from ..migrations import ensure_schema
 from ..services import family as family_svc
 from ..services import followups, uptime
-from . import alerts, handlers, luna_watch, notify, texts
+from . import alerts, handlers, luna_watch, notify, server_menu, texts
 from .health import default_monitor
 
 log = logging.getLogger("homesec.bot")
@@ -282,6 +282,7 @@ async def main() -> None:
         asyncio.create_task(followup_loop(bot, allowed)),
         asyncio.create_task(uptime_loop(bot, allowed)),
         asyncio.create_task(luna_watch.watch_loop()),
+        asyncio.create_task(server_menu.watch_loop(bot, allowed)),
     ]
     log.info("бот запущен, чатов в allowlist: %d", len(allowed))
     try:
