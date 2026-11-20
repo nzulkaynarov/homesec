@@ -110,6 +110,8 @@ class HostReport(BaseModel):
     backup_age_h: dict[str, float | None] = Field(default_factory=dict, max_length=8)
     kernel_errors: int | None = None
     kernel_error_last: str | None = Field(default=None, max_length=200)
+    oom_kills: int | None = None
+    oom_last: str | None = Field(default=None, max_length=80)
     tailscale_days: float | None = None
 
 

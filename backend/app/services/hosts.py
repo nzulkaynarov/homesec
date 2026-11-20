@@ -9,7 +9,7 @@ import json
 import shutil
 import subprocess
 from collections.abc import Iterable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -28,6 +28,7 @@ ALERT_KEY = "host_alert:"  # + problem key; "1" while the owner has been told
 SILENT_KEY = "host_silent:pc"  # the last PC sample's time, once its silence was announced
 BOOT_KEY = "host_boot:pc"  # the PC boot already seen
 KERNEL_KEY = "host_kernel:pc"  # "<boot id>:<count>" of kernel hardware errors already told
+OOM_KEY = "host_oom:pc"  # "<boot id>:<count>" of processes killed for lack of memory already told
 
 # Thresholds. A run of this many bad minutes raises an alert; temperatures and memory spike
 # under normal work, so they need several, a full disk or an old backup does not.
@@ -43,7 +44,7 @@ RUNS = {
     "pc:cpu": 5,
     "pc:nvme": 3,
     "pc:disk": 2,
-    "pc:memory": 5,
+    "pc:memory": 2,  # two minutes in a row under 2 GB: the out-of-memory killer is close
     "pc:service": 3,
     "pc:backup": 1,
     "pc:tailscale": 1,
@@ -361,6 +362,7 @@ def _pc_changes(db: Session, now: datetime) -> list[Change]:
         out.append(Change(SILENT_KEY, "", f"✅ ПК снова на связи{span}."))
     out += _boot_change(db, data, now)
     out += _kernel_change(db, data)
+    out += _oom_change(db, data)
     return out
 
 
@@ -395,19 +397,49 @@ def _boot_change(db: Session, data: dict[str, Any], now: datetime) -> list[Chang
     return [Change(BOOT_KEY, boot_id, text)]
 
 
-def _kernel_change(db: Session, data: dict[str, Any]) -> list[Change]:
-    count = data.get("kernel_errors")
+def _counted_change(
+    db: Session, data: dict[str, Any], key: str, field: str
+) -> tuple[Change | None, int]:
+    """A since-boot counter told once per increase: (silent bookkeeping or None, new events)."""
+    count = data.get(field)
     boot_id = str((data.get("boot") or {}).get("id") or "")
     if not isinstance(count, int) or not boot_id:
-        return []
-    known_boot, _, known_count = kv_get(db, KERNEL_KEY, "").partition(":")
+        return None, 0
+    known_boot, _, known_count = kv_get(db, key, "").partition(":")
     told = int(known_count) if known_boot == boot_id and known_count.isdigit() else 0
-    if count <= told:
-        return [] if known_boot == boot_id else [Change(KERNEL_KEY, f"{boot_id}:{count}", "")]
-    text = f"🧯 В журнале ядра ПК новые аппаратные ошибки: {count - told}."
-    if data.get("kernel_error_last"):
-        text += f"\nПоследняя: {data['kernel_error_last']}"
-    return [Change(KERNEL_KEY, f"{boot_id}:{count}", text)]
+    value = f"{boot_id}:{count}"
+    if count > told:
+        return Change(key, value, ""), count - told
+    # a new boot, or a counter that shrank because the monitor changed what it counts
+    same = known_boot == boot_id and count == told
+    return (None if same else Change(key, value, "")), 0
+
+
+def _kernel_change(db: Session, data: dict[str, Any]) -> list[Change]:
+    change, new = _counted_change(db, data, KERNEL_KEY, "kernel_errors")
+    if change is None:
+        return []
+    if new:
+        text = f"🧯 В журнале ядра ПК новые аппаратные ошибки: {new}."
+        if data.get("kernel_error_last"):
+            text += f"\nПоследняя: {data['kernel_error_last']}"
+        change = replace(change, text=text)
+    return [change]
+
+
+def _oom_change(db: Session, data: dict[str, Any]) -> list[Change]:
+    change, new = _counted_change(db, data, OOM_KEY, "oom_kills")
+    if change is None:
+        return []
+    if new:
+        victim = data.get("oom_last") or "процесс"
+        text = (
+            f"🧠 На ПК кончилась память, и система остановила {victim}"
+            + (f" (всего остановлено: {new})." if new > 1 else ".")
+            + " Остальное работает; если повторяется, виновника стоит ограничить."
+        )
+        change = replace(change, text=text)
+    return [change]
 
 
 # ---------------------------------------------------------------- one pass
@@ -507,6 +539,9 @@ def _pc_block(db: Session, now: datetime) -> list[str]:
             if errors == 0
             else f"Аппаратные ошибки ядра: ⚠️ {errors} с загрузки"
         )
+    kills = data.get("oom_kills")
+    if isinstance(kills, int) and kills:
+        lines.append(f"Остановлено из-за нехватки памяти: ⚠️ {kills} с загрузки")
     return lines
 
 

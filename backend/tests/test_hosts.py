@@ -136,6 +136,29 @@ def test_new_kernel_errors_are_told_once(db):
     assert _apply(db) == []
 
 
+def test_an_oom_kill_is_told_as_memory_not_hardware(db):
+    _pc(db, 1, kernel_errors=1, oom_kills=0)
+    _apply(db, NOW - timedelta(minutes=1))
+    # the monitor stopped counting OOM as hardware: the kernel counter drops to 0, silently
+    _pc(db, 0, kernel_errors=0, oom_kills=1, oom_last="pytest 4.9 GB")
+    told = _apply(db)
+    assert len(told) == 1 and "кончилась память" in told[0] and "pytest 4.9 GB" in told[0]
+    assert "аппаратные" not in told[0]
+    # a real hardware error after that is still told
+    _pc(db, 0, kernel_errors=1, oom_kills=1, kernel_error_last="mce: [Hardware Error]")
+    told = _apply(db)
+    assert len(told) == 1 and "аппаратные ошибки: 1" in told[0]
+    assert "нехватки памяти: ⚠️ 1" in hosts.status_text(db, NOW)
+
+
+def test_low_memory_is_told_after_two_minutes(db):
+    _pc(db, 1, mem_avail_mb=1500, top_process="pytest 99%")
+    assert _apply(db, NOW - timedelta(minutes=1)) == []
+    _pc(db, 0, mem_avail_mb=1100, top_process="pytest 99%")
+    told = _apply(db)
+    assert len(told) == 1 and "почти кончилась память" in told[0]
+
+
 def test_pi_power_dip_and_full_card(db):
     for minute in (1, 0):
         sample = {"cpu_c": 60, "undervoltage_since_boot": True, "disks": {"/": 9.5}}
