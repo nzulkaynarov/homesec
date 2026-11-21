@@ -69,6 +69,9 @@
      обновится сама.</div>
   {% elif pending %}
   <div class="status wait">⏳ Заявка уже отправлена, ждём ответа родителей.</div>
+  {% elif last_request and last_request.status == 'approved' and not last_request.minutes %}
+  <div class="status ok">👍 Родители разрешили. Сейчас ограничений нет — если что-то
+     не открывается, подойди к ним.</div>
   {% elif last_request and last_request.status == 'approved' %}
   <div class="status ok">🎉 Родители добавили +{{ last_request.minutes }} мин. Приятного времени!</div>
   {% elif last_request and last_request.status == 'denied' %}

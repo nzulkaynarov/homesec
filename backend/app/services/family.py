@@ -241,7 +241,7 @@ def award_quiz_bonus(
     from .time_grants import GrantError, grant  # time_grants imports house_rules, which imports us
 
     try:
-        done = grant(db, person.id, minutes, f"Победа в викторине ({topic})", now)
+        done = grant(db, person.id, minutes, f"Победа в викторине ({topic})", now).text
     except GrantError as exc:
         done = str(exc)
     msg = f"🏆 {person.name} правильно ответил(а) на вопрос викторины ({topic}): {done}"

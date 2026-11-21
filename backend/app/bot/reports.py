@@ -62,13 +62,15 @@ def _collect_quota_sync() -> list[dict]:
 
 
 GRANT = "gt"  # gt:<person id>:<minutes>: more time for a child, the same rule everywhere
+LIMITS_ONLY = "l"  # gt:<person id>:<minutes>:l under a limit alert: the minutes go to the limits
 
 
-def grant_button(person_id: int, minutes: int, label: str = "") -> InlineKeyboardButton:
+def grant_button(
+    person_id: int, minutes: int, label: str = "", limits_only: bool = False
+) -> InlineKeyboardButton:
     text = f"➕ {minutes} мин" + (f" · {label}" if label else "")
-    return InlineKeyboardButton(
-        text=text[:40], callback_data=f"{GRANT}:{person_id}:{minutes}", style=texts.SUCCESS
-    )
+    data = f"{GRANT}:{person_id}:{minutes}" + (f":{LIMITS_ONLY}" if limits_only else "")
+    return InlineKeyboardButton(text=text[:40], callback_data=data, style=texts.SUCCESS)
 
 
 def quota_buttons_keyboard(items: list[dict]) -> InlineKeyboardMarkup | None:
@@ -97,29 +99,36 @@ async def redraw_quota(message: Message) -> None:
     await rich.edit(message, screens.quota_html(items), quota_buttons_keyboard(items))
 
 
-def _grant_sync(person_id: int, minutes: int) -> str:
+def _grant_sync(person_id: int, minutes: int, limits_only: bool) -> tuple[str, bool]:
+    """(what to tell the parent, whether time was given)."""
     s = dbmod.session()
     try:
         person = s.get(Person, person_id)
         name = person.name if person else "Ребёнок"
+        give = time_grants.grant_limits if limits_only else time_grants.grant
         try:
-            return f"✅ {name}: {time_grants.grant(s, person_id, minutes, 'Добавлено родителем')}."
+            return f"✅ {name}: {give(s, person_id, minutes, 'Добавлено родителем').text}.", True
         except time_grants.GrantError as exc:
-            return f"⚠️ {exc}"
+            return f"⚠️ {exc}", False
     finally:
         s.close()
 
 
 async def cb_grant(cb: CallbackQuery) -> None:
     """A parent gives a child time from the quota report or from a "time is up" alert."""
-    _, person_id, minutes = (cb.data or "").split(":")
-    result = await asyncio.to_thread(_grant_sync, int(person_id), int(minutes))
+    parts = (cb.data or "").split(":")
+    person_id, minutes = int(parts[1]), int(parts[2])
+    limits_only = parts[3:] == [LIMITS_ONLY]
+    result, given = await asyncio.to_thread(_grant_sync, person_id, minutes, limits_only)
     if not isinstance(cb.message, Message):
         await cb.answer(result[:200], show_alert=True)
         return
     if cb.message.text is None:  # the rich quota report: fresh numbers, the buttons stay
         await cb.answer(result[:200], show_alert=True)
         await redraw_quota(cb.message)
+        return
+    if not given:  # nothing changed, so the buttons stay for when it can, as under a request
+        await cb.answer(result[:200], show_alert=True)
         return
     await cb.answer()
     await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)

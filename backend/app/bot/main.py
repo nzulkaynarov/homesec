@@ -134,7 +134,7 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
                     kb = alerts.bonus_keyboard(dev["person_id"], parent.hold)
                 elif kind == "bonus_request" and request_id is not None and parent is not None:
                     text = parent.text
-                    kb = alerts.bonus_request_keyboard(request_id, parent.hold)
+                    kb = alerts.request_keyboard(request_id, parent)
                 elif kind in ("quota_block", "quota_warn", "bonus_request"):
                     continue  # the request is gone: nothing to tell or answer
                 else:
@@ -207,7 +207,7 @@ async def followup_loop(bot: Bot, chat_ids: set[int]) -> None:
         try:
             reminders, weekly = await asyncio.to_thread(_followups)
             for request_id, notice in reminders:
-                keyboard = alerts.bonus_request_keyboard(request_id, notice.hold)
+                keyboard = alerts.request_keyboard(request_id, notice)
                 await _broadcast(bot, chat_ids, notice.text, keyboard)
             if weekly:
                 await _broadcast(bot, chat_ids, weekly)

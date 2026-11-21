@@ -122,7 +122,10 @@ def test_a_request_during_a_pause_names_the_child_and_the_reason(db, kid):
     assert notice.hold == time_notices.PAUSE
     assert notice.text.startswith("🙏 Миша просит ещё времени\nПричина: 📚 Доделать уроки")
     assert "⏸ Сейчас пауза до 14:00." in notice.text
-    assert "«▶️ До конца паузы» — до 14:00. Потом пауза продолжится." in notice.text
+    assert (
+        "«➕ 15 мин» и «➕ 30 мин» откроют интернет поверх паузы, потом пауза продолжится; "
+        "«▶️ До конца паузы» откроет до 14:00, когда пауза кончится." in notice.text
+    )
     assert "Телефон" not in notice.text  # the child is named, not the device
     _readable(notice.text, device)
     buttons = _buttons(alerts.bonus_request_keyboard(1, notice.hold))
@@ -159,7 +162,7 @@ def test_at_night_the_parent_is_told_the_buttons_wait_for_the_morning(db, kid):
     notice = time_notices.request_notice(db, _request(db, _device(db, kid)), NOW)
     assert notice.hold == time_notices.BEDTIME
     assert "🌙 Сейчас ночной режим до 13:00." in notice.text
-    assert "«➕» сработают после 13:00, отказать можно сразу" in notice.text
+    assert "Отказать можно сразу, а после 13:00 нажмите «➕»" in notice.text
     assert "Причина" not in notice.text  # no reason, no empty line for it
 
 
@@ -173,16 +176,28 @@ def test_with_nothing_to_add_to_the_parent_only_allows_or_refuses(db, kid):
     ]
 
 
-def test_a_device_without_an_owner_is_named_and_can_only_be_refused(db):
+def test_a_device_without_an_owner_asks_whose_it_is(db, kid):
     device = Device(mac="00:11:22:33:44:09", ip="192.168.88.59", name="Планшет")
     db.add(device)
     db.commit()
     notice = time_notices.request_notice(db, _request(db, device), NOW)
     assert notice.hold == time_notices.NO_OWNER
     assert notice.text.startswith("🙏 Устройство «Планшет» просит ещё времени")
-    assert "/devices" in notice.text
+    assert "Чьё оно? Выберите ниже" in notice.text and "/devices" not in notice.text
     _readable(notice.text, device)
-    assert _buttons(alerts.bonus_request_keyboard(1, notice.hold)) == ["🚫 Отказать"]
+    assert notice.people == ((kid.id, "Миша"),)
+    keyboard = alerts.request_keyboard(1, notice)
+    assert _buttons(keyboard) == ["→ Миша", "🚫 Отказать"]
+    assert keyboard.inline_keyboard[0][0].callback_data == f"bro:1:{kid.id}"
+
+
+def test_with_nobody_in_the_family_a_device_without_an_owner_can_only_be_refused(db):
+    device = Device(mac="00:11:22:33:44:09", ip="192.168.88.59", name="Планшет")
+    db.add(device)
+    db.commit()
+    notice = time_notices.request_notice(db, _request(db, device), NOW)
+    assert "можно только отказать" in notice.text
+    assert _buttons(alerts.request_keyboard(1, notice)) == ["🚫 Отказать"]
 
 
 def test_a_limit_almost_used_up(db, kid):
@@ -209,20 +224,149 @@ def test_the_internet_limit_used_up(db, kid):
     _readable(notice.text, device)
 
 
-def test_a_shared_limit_gets_no_buttons_that_would_not_reach_it(db, kid):
+def _group_limit(db, kid, category: str, minutes: int, used: int) -> None:
+    """A limit the panel sets: on the children's group, not on the child."""
     db.add(
         Quota(
             target_type="group",
             target="kid",
-            category="games",
-            minutes_per_day=60,
+            category=category,
+            minutes_per_day=minutes,
             days=EVERY_DAY,
             enabled=True,
         )
     )
-    db.add(QuotaUsage(device_id=_device(db, kid).id, date=TODAY, category="games", minutes=50))
+    db.add(QuotaUsage(device_id=_device(db, kid).id, date=TODAY, category=category, minutes=used))
+    db.commit()
+
+
+def test_a_group_limit_from_the_panel_gets_buttons_that_reach_it(db, kid):
+    _group_limit(db, kid, "games", 60, 50)
+    notice = time_notices.quota_notice(db, _device(db, kid), "quota_warn", "games", NOW)
+    assert notice.hold == time_notices.LIMITS
+    assert "не личный лимит" not in notice.text
+    assert "добавят минуты к каждому лимиту на сегодня" in notice.text
+    keyboard = alerts.bonus_keyboard(kid.id, notice.hold)
+    assert keyboard is not None
+    assert [b.callback_data for b in keyboard.inline_keyboard[0]] == [
+        f"gt:{kid.id}:15:l",
+        f"gt:{kid.id}:30:l",
+    ]
+
+
+def test_a_used_up_group_limit_is_not_called_nothing_to_add_to(db, kid):
+    """The panel's «Игры детям» is used up and the child has no limit of their own: the parent
+    reads the limit and gets buttons that add to it, not «Разрешить» over an open internet."""
+    _group_limit(db, kid, "games", 120, 120)
+    device = _device(db, kid)
+    notice = time_notices.request_notice(db, _request(db, device, "🎮 Доиграть"), NOW)
+    assert notice.hold == time_notices.LIMITS
+    assert "• Игры: 120 из 120 мин — исчерпан" in notice.text
+    assert "добавлять время не к чему" not in notice.text
+    assert "интернет открыт" not in notice.text
+    assert _buttons(alerts.request_keyboard(1, notice)) == [
+        "➕ 15 мин",
+        "➕ 30 мин",
+        "🌞 До конца дня",
+        "🚫 Отказать",
+    ]
+
+
+def test_a_device_switched_off_by_hand_is_named_with_a_way_to_switch_it_on(db, kid):
+    device = _device(db, kid)
+    device.blocked_manual = True
+    db.commit()
+    notice = time_notices.request_notice(db, _request(db, device), NOW)
+    assert notice.hold == time_notices.BLOCKED
+    assert "⛔ Выключено вручную: «Телефон»." in notice.text
+    assert "интернет открыт" not in notice.text
+    keyboard = alerts.request_keyboard(7, notice)
+    assert _buttons(keyboard) == ["✅ Включить «Телефон»", "🚫 Отказать"]
+    assert keyboard.inline_keyboard[0][0].callback_data == f"bru:7:{device.id}"
+    _readable(notice.text, device)
+
+
+def test_a_device_switched_off_by_hand_next_to_a_limit_keeps_both_ways(db, kid):
+    _limit(db, kid, "games", 60, 60)
+    device = _device(db, kid)
+    device.blocked_manual = True
+    db.commit()
+    notice = time_notices.request_notice(db, _request(db, device), NOW)
+    assert notice.hold == time_notices.LIMITS
+    assert "его можно включить кнопкой ниже" in notice.text
+    assert _buttons(alerts.request_keyboard(1, notice)) == [
+        "➕ 15 мин",
+        "➕ 30 мин",
+        "✅ Включить «Телефон»",
+        "🌞 До конца дня",
+        "🚫 Отказать",
+    ]
+
+
+def test_a_limit_alert_at_night_has_no_buttons_and_says_when_time_can_be_added(db, kid):
+    _limit(db, kid, "games", 60, 50)
+    db.add(
+        Rule(
+            name="Отбой",
+            target_type="person",
+            target=str(kid.id),
+            days=EVERY_DAY,
+            start_time="11:00",
+            end_time="13:00",
+        )
+    )
     db.commit()
     notice = time_notices.quota_notice(db, _device(db, kid), "quota_warn", "games", NOW)
-    assert notice.hold == time_notices.OPEN
-    assert "не личный лимит" in notice.text
+    assert notice.hold == time_notices.BEDTIME
+    assert "Ночью время не добавляется. После 13:00 его можно добавить в «⏳ Квоты»." in notice.text
+    assert "кнопки сработают" not in notice.text
     assert alerts.bonus_keyboard(kid.id, notice.hold) is None
+
+
+def test_a_limit_alert_before_midnight_says_the_limits_start_over(db, kid):
+    _limit(db, kid, "games", 60, 50)
+    db.add(
+        Rule(
+            name="Отбой",
+            target_type="person",
+            target=str(kid.id),
+            days=EVERY_DAY,
+            start_time="21:00",
+            end_time="07:00",
+        )
+    )
+    db.commit()
+    late = NOW.replace(hour=22)
+    notice = time_notices.quota_notice(db, _device(db, kid), "quota_warn", "games", late)
+    assert "в полночь лимиты начнутся заново" in notice.text
+    assert alerts.bonus_keyboard(kid.id, notice.hold) is None
+
+
+def test_a_limit_alert_during_a_pause_adds_to_the_limit_and_leaves_the_pause(db, kid):
+    _limit(db, kid, "games", 60, 50)
+    db.add(Pause(target_type="person", target=str(kid.id), until=NOW + timedelta(hours=2)))
+    db.commit()
+    notice = time_notices.quota_notice(db, _device(db, kid), "quota_warn", "games", NOW)
+    assert notice.hold == time_notices.PAUSE
+    assert "добавят минуты к каждому лимиту на сегодня, а пауза до 14:00 останется" in notice.text
+    assert "поверх паузы" not in notice.text
+    keyboard = alerts.bonus_keyboard(kid.id, notice.hold)
+    assert keyboard is not None and keyboard.inline_keyboard[0][0].callback_data.endswith(":l")
+
+
+def test_a_limit_lifted_before_the_alert_went_out_gets_no_buttons(db, kid):
+    _limit(db, kid, "video", 60, 10)
+    notice = time_notices.quota_notice(db, _device(db, kid), "quota_warn", "games", NOW)
+    assert notice.hold == time_notices.OPEN
+    assert "Этого лимита сегодня уже нет" in notice.text
+    assert alerts.bonus_keyboard(kid.id, notice.hold) is None
+
+
+def test_with_a_window_open_the_buttons_extend_it(db, kid):
+    db.add(Pause(target_type="person", target=str(kid.id), until=NOW + timedelta(hours=3)))
+    db.commit()
+    db.add(KVState(key=f"unlock:{kid.id}", value=f"{NOW + timedelta(hours=2):%Y-%m-%dT%H:%M:%S}"))
+    db.commit()
+    notice = time_notices.request_notice(db, _request(db, _device(db, kid)), NOW)
+    assert "Интернет уже открыт родителем до 14:00." in notice.text
+    assert "«➕ 15 мин» и «➕ 30 мин» продлят открытое время" in notice.text

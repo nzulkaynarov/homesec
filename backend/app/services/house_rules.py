@@ -320,13 +320,19 @@ def restriction(db: Session, person_id: int, now: datetime | None = None) -> dic
 
 def open_through_pause(db: Session, person_id: int, minutes: int | None) -> datetime:
     """Let the person through their pauses for some minutes; None means until
-    the pause ends. The pause stays and takes over again when the window closes."""
+    the pause ends. The pause stays and takes over again when the window closes.
+    More time never takes time away: with a window already open the minutes
+    count from its end, and the window never closes earlier than it would."""
     person = _person(db, person_id)
     now = datetime.now()
     paused = paused_until(db, person_id, now)
     if paused is None:
         raise RuleError("Паузы сейчас нет, интернет и так открыт")
-    until = paused if minutes is None else min(paused, now + timedelta(minutes=minutes))
+    opened = unlock.open_until(db, person_id, now)
+    start = now if opened is None else max(now, opened)
+    until = paused if minutes is None else min(paused, start + timedelta(minutes=minutes))
+    if opened is not None:
+        until = max(until, opened)
     until = unlock.open_window(db, person_id, until)
     _changed(db, f"Интернет для {person.name} открыт до {until:%H:%M} поверх паузы")
     return until

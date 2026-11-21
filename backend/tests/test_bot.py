@@ -125,7 +125,7 @@ def test_quota_block_notification_with_bonus_button(db):
 
     assert bonus_keyboard(None) is None
     kb = bonus_keyboard(7)
-    assert [b.callback_data for b in kb.inline_keyboard[0]] == ["gt:7:15", "gt:7:30"]
+    assert [b.callback_data for b in kb.inline_keyboard[0]] == ["gt:7:15:l", "gt:7:30:l"]
 
 
 def test_new_device_keyboard():
@@ -234,11 +234,11 @@ def test_bonus_request_approve_deny_idempotent(db):
 
     kb = bonus_request_keyboard(req_id)
     data = {b.callback_data for row in kb.inline_keyboard for b in row}
-    assert {f"br:{req_id}:15", f"br:{req_id}:30", f"br:{req_id}:day",
-            f"br:{req_id}:no"} == data
+    assert {f"br:{req_id}:15:l", f"br:{req_id}:30:l", f"br:{req_id}:day:l",
+            f"br:{req_id}:no:l"} == data
 
     # одобрение +30 -> заявка approved, создан QuotaBonus
-    answer = _resolve_bonus_request(req_id, "30")
+    answer = _resolve_bonus_request(req_id, "30", "l")
     assert answer.final and answer.text == "✅ Дима: +30 мин к лимитам: игры."
     db.expire_all()
     assert db.get(BonusRequest, req_id).status == "approved"
@@ -247,7 +247,7 @@ def test_bonus_request_approve_deny_idempotent(db):
     assert (bonus_row.target_type, bonus_row.minutes) == ("person", 30)
 
     # a second press, by the same or the other parent, adds nothing
-    assert "уже ответили: одобрено" in _resolve_bonus_request(req_id, "15").text
+    assert "уже ответили: одобрено" in _resolve_bonus_request(req_id, "15", "l").text
     assert db.query(QuotaBonus).count() == 1
 
     # отказ по новой заявке
@@ -266,11 +266,50 @@ def test_bonus_request_approve_deny_idempotent(db):
 
 
 def _clear_family(db):
-    from app.models import BonusRequest, Person, Quota, QuotaBonus, Rule
+    from app.models import BonusRequest, Pause, Person, Quota, QuotaBonus, Rule
 
-    for m in (BonusRequest, QuotaBonus, Quota, Rule, Device, Person):
+    for m in (BonusRequest, QuotaBonus, Quota, Rule, Pause, Device, Person):
         db.query(m).delete()
     db.commit()
+
+
+def _kid_with_phone(db):
+    from app.models import Person
+
+    _clear_family(db)
+    kid = Person(name="Миша", role="kid")
+    db.add(kid)
+    db.commit()
+    phone = Device(mac="AA:00:00:00:00:51", ip="192.168.88.151", name="Телефон", person_id=kid.id)
+    db.add(phone)
+    db.commit()
+    return kid, phone
+
+
+def _waiting(db, device, status="pending"):
+    from app.models import BonusRequest
+
+    req = BonusRequest(device_id=device.id, category="internet", status=status)
+    db.add(req)
+    db.commit()
+    return req
+
+
+def _callback(data, text="🙏 Миша просит ещё времени"):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram.types import Message
+
+    cb = MagicMock(data=data, answer=AsyncMock())
+    cb.message = MagicMock(spec=Message, text=text, edit_text=AsyncMock())
+    return cb
+
+
+def _edited(cb):
+    """The text and button labels a callback redrew its message with."""
+    call = cb.message.edit_text.call_args
+    markup = call.kwargs["reply_markup"]
+    return call.args[0], [b.text for row in markup.inline_keyboard for b in row]
 
 
 def test_parents_read_the_request_without_addresses_or_numbers(db):
@@ -354,7 +393,7 @@ def test_time_refused_at_night_keeps_the_request_and_its_buttons(db):
     db.add(req)
     db.commit()
 
-    cb = MagicMock(data=f"br:{req.id}:30", answer=AsyncMock())
+    cb = MagicMock(data=f"br:{req.id}:30:t", answer=AsyncMock())
     cb.message = MagicMock(spec=Message, text="🙏 Миша просит ещё времени", edit_text=AsyncMock())
     asyncio.run(alerts.cb_bonus_request(cb))
 
@@ -364,6 +403,154 @@ def test_time_refused_at_night_keeps_the_request_and_its_buttons(db):
     cb.message.edit_text.assert_not_called()  # the buttons stay: the parent can still refuse
     db.expire_all()
     assert db.get(BonusRequest, req.id).status == "pending"
+    _clear_family(db)
+
+
+def test_allowing_with_nothing_to_add_records_no_minutes(db):
+    """«👍 Разрешить» adds nothing, so Luna must not tell the child the internet was opened."""
+    from app.bot import alerts
+    from app.models import BonusRequest
+
+    _kid, phone = _kid_with_phone(db)
+    req = _waiting(db, phone)
+    answer = alerts._resolve_bonus_request(req.id, "ok", "o")
+    assert answer.final
+    assert answer.text == "👍 Миша: ограничений сейчас нет, Luna передаст, что вы разрешили."
+    db.expire_all()
+    stored = db.get(BonusRequest, req.id)
+    assert (stored.status, stored.minutes) == ("approved", 0)
+    _clear_family(db)
+
+
+def test_a_button_pressed_after_the_pause_ended_gives_nothing_and_asks_again(db):
+    """«▶️ До конца паузы» pressed once the pause is over must not lift every limit for the day."""
+    from app.bot import alerts
+    from app.models import BonusRequest, Quota, QuotaBonus
+    from app.services import time_notices
+
+    kid, phone = _kid_with_phone(db)
+    db.add(Quota(target_type="person", target=str(kid.id), category="games", minutes_per_day=60))
+    db.commit()
+    req = _waiting(db, phone)
+    answer = alerts._resolve_bonus_request(req.id, "day", "p")
+    assert not answer.final and answer.text == alerts.CHANGED
+    assert answer.redraw is not None and answer.redraw.hold == time_notices.LIMITS
+    assert db.query(QuotaBonus).count() == 0
+    db.expire_all()
+    assert db.get(BonusRequest, req.id).status == "pending"
+    # buttons sent before the hold travelled with them are drawn again too
+    assert alerts._resolve_bonus_request(req.id, "15").redraw is not None
+    assert db.query(QuotaBonus).count() == 0
+    _clear_family(db)
+
+
+def test_allow_pressed_after_a_pause_started_does_not_open_it(db):
+    import asyncio
+    from datetime import datetime, timedelta
+
+    from app.bot import alerts
+    from app.models import Pause
+    from app.services import unlock
+
+    kid, phone = _kid_with_phone(db)
+    req = _waiting(db, phone)
+    db.add(Pause(target_type="person", target=str(kid.id),
+                 until=datetime.now() + timedelta(hours=1)))
+    db.commit()
+    cb = _callback(f"br:{req.id}:ok:o")
+    asyncio.run(alerts.cb_bonus_request(cb))
+    assert unlock.open_until(db, kid.id) is None
+    assert cb.answer.call_args.args[0] == alerts.CHANGED
+    text, buttons = _edited(cb)
+    assert "⏸ Сейчас пауза до" in text
+    assert buttons == ["➕ 15 мин", "➕ 30 мин", "▶️ До конца паузы", "🚫 Отказать"]
+    _clear_family(db)
+
+
+def test_an_expired_request_does_not_say_somebody_answered(db):
+    from app.bot import alerts
+
+    _kid, phone = _kid_with_phone(db)
+    req = _waiting(db, phone, status="expired")
+    answer = alerts._resolve_bonus_request(req.id, "15", "l")
+    assert answer.final
+    assert answer.text == "Просьба закрылась сама: за сутки на неё никто не ответил."
+    _clear_family(db)
+
+
+def test_a_device_switched_on_from_under_the_request_shows_it_again(db):
+    import asyncio
+
+    from app.bot import alerts
+
+    _kid, phone = _kid_with_phone(db)
+    phone.blocked_manual = True
+    db.commit()
+    req = _waiting(db, phone)
+    cb = _callback(f"bru:{req.id}:{phone.id}")
+    asyncio.run(alerts.cb_switch_on_for_request(cb))
+    db.expire_all()
+    assert db.get(Device, phone.id).blocked_manual is False
+    text, buttons = _edited(cb)
+    assert text.startswith("🙏 Миша просит ещё времени") and "интернет открыт" in text
+    assert buttons == ["👍 Разрешить", "🚫 Отказать"]
+    _clear_family(db)
+
+
+def test_saying_whose_device_asks_brings_the_time_buttons(db):
+    import asyncio
+
+    from app.bot import alerts
+    from app.models import Person, Quota
+    from app.services import time_notices
+
+    _clear_family(db)
+    kid = Person(name="Миша", role="kid")
+    db.add(kid)
+    db.commit()
+    db.add(Quota(target_type="person", target=str(kid.id), category="games", minutes_per_day=60))
+    tablet = Device(mac="AA:00:00:00:00:52", ip="192.168.88.152", name="Планшет")
+    db.add(tablet)
+    db.commit()
+    req = _waiting(db, tablet)
+    notice = time_notices.request_notice(db, req)
+    assert notice.hold == time_notices.NO_OWNER
+    owner_button = alerts.request_keyboard(req.id, notice).inline_keyboard[0][0]
+    assert owner_button.text == "→ Миша"
+
+    cb = _callback(owner_button.callback_data, notice.text)
+    asyncio.run(alerts.cb_owner_for_request(cb))
+    db.expire_all()
+    assert db.get(Device, tablet.id).person_id == kid.id
+    text, buttons = _edited(cb)
+    assert text.startswith("🙏 Миша просит ещё времени")
+    assert buttons == ["➕ 15 мин", "➕ 30 мин", "🌞 До конца дня", "🚫 Отказать"]
+    _clear_family(db)
+
+
+def test_a_grant_refused_at_night_keeps_the_alert_buttons(db):
+    import asyncio
+    from datetime import datetime, timedelta
+
+    from app.bot import reports
+    from app.models import Person, Quota, QuotaBonus, Rule
+
+    _clear_family(db)
+    kid = Person(name="Миша", role="kid")
+    db.add(kid)
+    db.commit()
+    now = datetime.now()
+    db.add(Quota(target_type="person", target=str(kid.id), category="games", minutes_per_day=60))
+    db.add(Rule(name="Отбой", target_type="person", target=str(kid.id), days="0,1,2,3,4,5,6",
+                start_time=f"{now - timedelta(hours=1):%H:%M}",
+                end_time=f"{now + timedelta(hours=1):%H:%M}"))
+    db.commit()
+    cb = _callback(f"gt:{kid.id}:15:l", "⚠️ Миша: лимит «Игры» почти исчерпан (50 из 60 мин).")
+    asyncio.run(reports.cb_grant(cb))
+    assert "ночной режим" in cb.answer.call_args.args[0]
+    assert cb.answer.call_args.kwargs["show_alert"] is True
+    cb.message.edit_text.assert_not_called()  # the buttons stay
+    assert db.query(QuotaBonus).count() == 0
     _clear_family(db)
 
 

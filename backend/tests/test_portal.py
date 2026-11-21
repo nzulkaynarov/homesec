@@ -209,6 +209,26 @@ def test_me_page_request_and_ratelimit(db):
     db.commit()
 
 
+def test_me_page_does_not_say_minutes_were_added_when_none_were(db):
+    """A parent allowed a request with nothing to add to: HomeSec records 0 minutes."""
+    from app.models import BonusRequest
+
+    db.query(BonusRequest).delete()
+    kid = Person(name="Катя", role="kid")
+    db.add(kid)
+    db.commit()
+    d = Device(mac="AB:00:00:00:00:11", ip="testclient", name="Катин-планшет", person_id=kid.id)
+    db.add(d)
+    db.commit()
+    db.add(BonusRequest(device_id=d.id, category="internet", status="approved", minutes=0))
+    db.commit()
+    with TestClient(app) as c:
+        html = c.get("/me").text
+    assert "Родители разрешили. Сейчас ограничений нет" in html and "+0 мин" not in html
+    db.query(BonusRequest).delete()
+    db.commit()
+
+
 def test_me_no_device_shows_greeting(db):
     # нет устройства с ip клиента -> дружелюбное приветствие, а не ошибка
     with TestClient(app) as c:
