@@ -26,6 +26,7 @@ from ..services import family as family_svc
 from ..services import house_rules
 from . import (
     alerts,
+    charts_menu,
     common,
     device_menu,
     kid_menu,
@@ -139,6 +140,7 @@ alerts.register(router)
 onboarding.register(router)
 reports.register(router)
 server_menu.register(router)
+charts_menu.register(router)
 
 
 # ---------- выбор устройства кнопками ----------

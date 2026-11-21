@@ -5,11 +5,11 @@ import asyncio
 import logging
 
 from aiogram import Bot, F, Router
-from aiogram.types import Message
+from aiogram.types import InlineKeyboardMarkup, Message
 
 from .. import db as dbmod
 from ..services import hosts
-from . import common, rich, texts
+from . import charts_menu, common, rich, texts
 
 log = logging.getLogger("homesec.bot.server")
 
@@ -42,7 +42,8 @@ async def btn_server(message: Message) -> None:
     if role != "owner":
         await message.answer("Состояние серверов видит только владелец.")
         return
-    await rich.answer(message, await asyncio.to_thread(_status_sync))
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[charts_menu.button(charts_menu.SERVER)]])
+    await rich.answer(message, await asyncio.to_thread(_status_sync), keyboard)
 
 
 def _sample_and_judge() -> list[hosts.Change]:

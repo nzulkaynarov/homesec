@@ -11,3 +11,4 @@ pydantic-settings==2.*
 aiogram==3.*
 anthropic==0.*
 mac-vendor-lookup==0.1.*
+matplotlib==3.10.*

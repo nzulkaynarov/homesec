@@ -23,7 +23,7 @@ ADULT_ROLES = ("owner", "admin")
 
 KID_COMMANDS = {"start", "help", "quota", "ask"}
 KID_CALLBACKS: set[str] = set()  # a child has no inline buttons of its own
-OWNER_CALLBACKS = {"acc"}  # granting roles is reserved for the owner
+OWNER_CALLBACKS = {"acc", "chs"}  # granting roles and the server chart are the owner's
 GUEST_COMMANDS = {"start", "help"}
 GUEST_BUTTONS = {"📶 Wi-Fi", "❓ Помощь"}
 ADULT_BUTTONS = {

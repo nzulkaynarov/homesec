@@ -14,7 +14,7 @@ from .. import db as dbmod
 from ..ai import client as ai_client
 from ..config import settings
 from ..models import Device, Person, kv_get
-from . import common, rich, screens
+from . import access, charts_menu, common, rich, screens
 
 
 async def btn_quota(message: Message) -> None:
@@ -65,7 +65,7 @@ def _collect_quota_sync() -> list[dict]:
 
 
 def quota_buttons_keyboard(items: list[dict]) -> InlineKeyboardMarkup | None:
-    """Кнопки '+15м' и '+30м' под отчётом квот для каждого детского устройства."""
+    """Кнопки '+15м' и '+30м' под отчётом квот для каждого детского устройства и график недели."""
     rows = []
     for item in items:
         dev_id = item["device_id"]
@@ -83,12 +83,17 @@ def quota_buttons_keyboard(items: list[dict]) -> InlineKeyboardMarkup | None:
         ])
     if not rows:
         return None
+    rows.append([charts_menu.button(charts_menu.SCREEN)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def cmd_quota(message: Message) -> None:
+    user_id = message.from_user.id if message.from_user else 0
+    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
     items = await asyncio.to_thread(_collect_quota_sync)
-    await rich.answer(message, screens.quota_html(items), quota_buttons_keyboard(items))
+    # a child cannot press these buttons, so a child does not see them
+    keyboard = quota_buttons_keyboard(items) if role in access.ADULT_ROLES else None
+    await rich.answer(message, screens.quota_html(items), keyboard)
 
 
 async def redraw_quota(message: Message) -> None:
@@ -153,7 +158,9 @@ async def cmd_usage(message: Message) -> None:
         return
     today, week_tokens, left, gw = await asyncio.to_thread(_collect_usage_sync)
     rows, week_usd = await asyncio.to_thread(_spend_by_person_sync)
-    await rich.answer(message, screens.usage_html(today, week_tokens, left, gw, rows, week_usd))
+    keyboard = InlineKeyboardMarkup(inline_keyboard=[[charts_menu.button(charts_menu.SPEND)]])
+    screen = screens.usage_html(today, week_tokens, left, gw, rows, week_usd)
+    await rich.answer(message, screen, keyboard)
 
 
 def register(router: Router) -> None:
