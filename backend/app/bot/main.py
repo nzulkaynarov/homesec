@@ -20,7 +20,7 @@ from ..config import settings
 from ..db import Base, engine
 from ..migrations import ensure_schema
 from ..services import family as family_svc
-from ..services import followups, plain, time_notices, uptime
+from ..services import followups, night_watch, plain, time_notices, uptime
 from . import access, alerts, handlers, luna_watch, notify, server_menu, texts
 from .health import default_monitor
 from .triage import vendor_of
@@ -261,6 +261,37 @@ def _uptime_record(change: uptime.Change) -> None:
         s.close()
 
 
+NIGHT_WATCH_INTERVAL = 300
+
+
+def _awake() -> list[night_watch.Awake]:
+    s = dbmod.session()
+    try:
+        return night_watch.awake_devices(s)
+    finally:
+        s.close()
+
+
+def _awake_told(awake: night_watch.Awake) -> None:
+    s = dbmod.session()
+    try:
+        night_watch.remember(s, awake)
+    finally:
+        s.close()
+
+
+async def night_watch_loop(bot: Bot, chat_ids: set[int]) -> None:
+    """A child's device in use during bedtime, once a night; remembered only once delivered."""
+    while True:
+        try:
+            for awake in await asyncio.to_thread(_awake):
+                if await _broadcast(bot, chat_ids, awake.text):
+                    await asyncio.to_thread(_awake_told, awake)
+        except Exception:
+            log.exception("night_watch_loop")
+        await asyncio.sleep(NIGHT_WATCH_INTERVAL)
+
+
 async def uptime_loop(bot: Bot, chat_ids: set[int]) -> None:
     """Network equipment and marked devices: a message when one goes silent and when it is
     back. Remembered only once delivered, so an outage of Telegram does not swallow it."""
@@ -374,6 +405,7 @@ async def main() -> None:
         asyncio.create_task(digest_loop(bot, allowed)),
         asyncio.create_task(followup_loop(bot, allowed)),
         asyncio.create_task(uptime_loop(bot, allowed)),
+        asyncio.create_task(night_watch_loop(bot, allowed)),
         asyncio.create_task(luna_watch.watch_loop()),
         asyncio.create_task(server_menu.watch_loop(bot, allowed)),
     ]
