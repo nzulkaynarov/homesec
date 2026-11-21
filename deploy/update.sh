@@ -19,6 +19,11 @@ STATE_DIR=/var/lib/homesec
 DEPLOYED_FILE="$STATE_DIR/deployed_sha"
 
 REJECTED_FILE="$STATE_DIR/rejected_sha"
+# "<sha> <epoch>" of the last CI question about a commit still waiting to be deployed.
+# GitHub gives 60 unauthenticated calls an hour to the home address, shared by every device
+# in the house; asking every minute used them all, and one more call froze deploys for an hour.
+CI_CHECKED_FILE="$STATE_DIR/ci_checked"
+CI_CHECK_EVERY=120
 SELF=/usr/local/sbin/homesec-update
 CI_VERDICT_TARGET=/usr/local/lib/homesec/ci_verdict.py
 CI_VERDICT=$CI_VERDICT_TARGET
@@ -107,6 +112,13 @@ fi
 # следующего тика. Раньше здесь сравнивались строки без пробела после
 # двоеточия, а GitHub отвечает с пробелом, поэтому гейт не срабатывал никогда.
 if [ "${CHECK_CI:-1}" = "1" ]; then
+  now=$(date +%s)
+  checked_sha="" checked_at=0
+  { read -r checked_sha checked_at < "$CI_CHECKED_FILE"; } 2>/dev/null || true
+  if [ "$checked_sha" = "$remote_sha" ] && [ $((now - ${checked_at:-0})) -lt "$CI_CHECK_EVERY" ]; then
+    exit 0   # asked about this commit a moment ago; CI takes a few minutes anyway
+  fi
+  mkdir -p "$STATE_DIR" && echo "$remote_sha $now" > "$CI_CHECKED_FILE"
   ci_api="https://api.github.com/repos/nzulkaynarov/homesec/commits/$remote_sha/check-runs"
   verdict=$(curl -s -m 10 -H "Accept: application/vnd.github+json" "$ci_api" 2>/dev/null \
     | python3 -I "$CI_VERDICT" || echo wait)
