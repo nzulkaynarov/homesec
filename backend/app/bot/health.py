@@ -5,6 +5,7 @@
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from datetime import datetime
 
 import httpx
 
@@ -48,12 +49,73 @@ def probe_enforcement() -> bool:
     return _enforcement()[0]
 
 
+# What each reason for stopped rules means for the family and what a parent can do about it.
+CAUSE_TEXTS = {
+    "mikrotik": (
+        "Причина: роутер не отвечает. Если дома пропал интернет, выключите роутер из розетки "
+        "на 10 секунд и включите снова."
+    ),
+    "adguard": (
+        "Причина: не отвечает фильтр сайтов. Если через 15 минут не наладится, выключите "
+        "Raspberry Pi из розетки на 10 секунд и включите снова."
+    ),
+    "queues": "Причина: не получается менять скорость устройств, остальное должно работать.",
+    "self_ip": (
+        "HomeSec не может узнать свой адрес в сети и ничего не меняет, чтобы не оставить дом "
+        "без интернета. Нужен тот, кто настраивал систему."
+    ),
+}
+UNKNOWN_CAUSE = (
+    "Причину я записал в журнал. Если через 15 минут не придёт «снова применяются», "
+    "выключите Raspberry Pi из розетки на 10 секунд и включите снова."
+)
+
+
 def enforcement_detail() -> str:
-    error = _enforcement()[1]
-    return f"последняя ошибка: {error}" if error else "причина неизвестна, смотрите журнал панели"
+    """Why the rules stopped, in words for parents; the technical error stays in the log."""
+    session = dbmod.session()
+    try:
+        causes = enforcement.last_causes(session)
+    finally:
+        session.close()
+    known = [CAUSE_TEXTS[cause] for cause in causes if cause in CAUSE_TEXTS]
+    return "\n".join(known) if known else UNKNOWN_CAUSE
 
 
 ENFORCEMENT_CHECK = "Правила дома"
+ROUTER_CHECK = "Роутер"
+FILTER_CHECK = "Фильтр сайтов"
+PANEL_CHECK = "HomeSec на Raspberry Pi"
+SINCE = "{since}"  # replaced with the time of the first failed check
+
+FAILURE_TEXTS = {
+    ROUTER_CHECK: (
+        "🔴 Роутер не отвечает с {since}. Пока он не отвечает, паузы и лимиты не меняются.\n"
+        "Если дома пропал интернет, выключите роутер из розетки на 10 секунд и включите снова."
+    ),
+    FILTER_CHECK: (
+        "🔴 Фильтр сайтов не отвечает с {since}: сайты дома могут не открываться, "
+        "запреты сайтов для детей не действуют.\n"
+        "Если через 15 минут не придёт «снова работает», выключите Raspberry Pi из розетки "
+        "на 10 секунд и включите снова."
+    ),
+    PANEL_CHECK: (
+        "🔴 HomeSec на Raspberry Pi не отвечает с {since}: паузы, лимиты и отбой сейчас "
+        "не включаются и не выключаются. Кнопки бота отвечают, но до роутера не доходят.\n"
+        "Обычно он поднимается сам за пару минут. Если через 15 минут не придёт «снова "
+        "работает», выключите Raspberry Pi из розетки на 10 секунд и включите снова."
+    ),
+    ENFORCEMENT_CHECK: (
+        "🔴 Правила дома не применяются (заметил в {since}): новые паузы, лимиты и "
+        "блокировки могут не сработать."
+    ),
+}
+RECOVERY_TEXTS = {
+    ROUTER_CHECK: "✅ Роутер снова работает.",
+    FILTER_CHECK: "✅ Фильтр сайтов снова работает.",
+    PANEL_CHECK: "✅ HomeSec на Raspberry Pi снова работает.",
+    ENFORCEMENT_CHECK: "✅ Правила дома снова применяются.",
+}
 
 
 @dataclass
@@ -61,6 +123,7 @@ class _CheckState:
     fails: int = 0
     oks: int = 0
     alerted: bool = False
+    since: datetime | None = None  # the first failed check of this run of failures
 
 
 @dataclass
@@ -71,19 +134,23 @@ class HealthMonitor:
     state: dict[str, _CheckState] = field(default_factory=dict)
     failure_texts: dict[str, str] = field(default_factory=dict)
     details: dict[str, Callable[[], str]] = field(default_factory=dict)
+    recovery_texts: dict[str, str] = field(default_factory=dict)
 
-    def _failure(self, name: str, fails: int) -> str:
-        text = self.failure_texts.get(name, f"не отвечает (проверок подряд: {fails})")
+    def _failure(self, name: str, since: datetime) -> str:
+        """What stopped, since when, what it means for the family and what to do."""
+        text = self.failure_texts.get(name, f"🔴 {name}: не отвечает с {SINCE}.")
+        text = text.replace(SINCE, f"{since:%H:%M}")
         detail = self.details.get(name)
         if detail is not None:
             try:
-                text = f"{text}; {detail()}"
+                text = f"{text}\n{detail()}"
             except Exception:
                 log.exception("подробности %s не получены", name)
-        return f"🔴 {name}: {text}"
+        return text
 
-    def tick(self) -> list[str]:
+    def tick(self, now: datetime | None = None) -> list[str]:
         """Прогоняет все проверки, возвращает сообщения для отправки."""
+        now = now or datetime.now()
         messages = []
         for name, probe in self.checks.items():
             st = self.state.setdefault(name, _CheckState())
@@ -94,32 +161,30 @@ class HealthMonitor:
                 ok = False
             if ok:
                 st.fails = 0
+                st.since = None
                 st.oks += 1
                 if st.alerted and st.oks >= self.ok_after:
                     st.alerted = False
-                    messages.append(f"✅ {name}: снова работает")
+                    messages.append(self.recovery_texts.get(name, f"✅ {name}: снова работает"))
             else:
                 st.oks = 0
                 st.fails += 1
+                st.since = st.since or now
                 if not st.alerted and st.fails >= self.fail_after:
                     st.alerted = True
-                    messages.append(self._failure(name, st.fails))
+                    messages.append(self._failure(name, st.since))
         return messages
 
 
 def default_monitor() -> HealthMonitor:
     return HealthMonitor(
         checks={
-            "Роутер MikroTik": probe_router,
-            "AdGuard Home (DNS-фильтр)": probe_adguard,
-            "Панель HomeSec": probe_panel,
+            ROUTER_CHECK: probe_router,
+            FILTER_CHECK: probe_adguard,
+            PANEL_CHECK: probe_panel,
             ENFORCEMENT_CHECK: probe_enforcement,
         },
-        failure_texts={
-            ENFORCEMENT_CHECK: (
-                "ограничения не применяются больше 5 минут, "
-                "новые блокировки и паузы не работают"
-            ),
-        },
+        failure_texts=FAILURE_TEXTS,
         details={ENFORCEMENT_CHECK: enforcement_detail},
+        recovery_texts=RECOVERY_TEXTS,
     )

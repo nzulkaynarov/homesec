@@ -281,7 +281,7 @@ async def cmd_pause(message: Message, command: CommandObject) -> None:
         await message.answer(
             "Использование: /pause [кто] <минут>\n"
             "Например: /pause дети 60 или /pause 30 — выбор кнопками\n"
-            "Либо просто /pause — быстрые кнопки пресетов."
+            "Либо просто /pause — кнопки «⏸ Пауза»."
         )
         return
     target, minutes = _kids_word(" ".join(parts[:-1])), int(parts[-1])
@@ -300,17 +300,23 @@ async def cmd_resume(message: Message, command: CommandObject) -> None:
     await _target_command(message, "resume_internet", target, {})
 
 
+# The limits a /bonus adds to, by the words parents use; the codes still work for old habits.
+BONUS_WORDS = {"интернет": "internet", "игры": "games", "видео": "video", "соцсети": "social"}
+
+
 @router.message(Command("bonus"))
 async def cmd_bonus(message: Message, command: CommandObject) -> None:
     from ..services.quota import QUOTA_CATEGORIES
 
     parts = (command.args or "").split()
-    usage = ("Использование: /bonus [кто] <минут> [категория]\n"
-             "Например: /bonus Миша 30 games (без имени — выбор кнопками)\n"
-             f"Категории: {', '.join(QUOTA_CATEGORIES)} (по умолчанию internet)")
+    usage = ("Использование: /bonus [кто] <минут> [на что]\n"
+             "Например: /bonus Миша 30 игры (без имени — выбор кнопками)\n"
+             f"На что: {', '.join(BONUS_WORDS)} (по умолчанию интернет)")
     category = "internet"
     if parts and parts[-1].lower() in QUOTA_CATEGORIES:
         category = parts.pop().lower()
+    elif parts and parts[-1].lower() in BONUS_WORDS:
+        category = BONUS_WORDS[parts.pop().lower()]
     if not parts or not parts[-1].isdigit():
         await message.answer(usage)
         return
@@ -384,6 +390,17 @@ async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
         )
 
 
+VOICE_UNAVAILABLE = (
+    "Голосовые сейчас не понимаю: ИИ недоступен. "
+    "Напишите текстом или нажмите кнопку внизу."
+)
+VOICE_NOT_RECEIVED = "Голосовое до меня не дошло, отправьте его ещё раз."
+VOICE_FAILED = (
+    "Не получилось разобрать голосовое: ИИ сейчас недоступен. "
+    "Напишите текстом или нажмите кнопку внизу."
+)
+
+
 def _record_voice_spend_sync(caller: ai_client.Caller, seconds: int) -> None:
     # Gemini bills roughly 32 tokens per second of audio at the input price.
     s = dbmod.session()
@@ -398,9 +415,8 @@ async def handle_voice(message: Message) -> None:
     """Голосовое сообщение от пользователя: скачивает ogg аудиофайл,
     транскрибирует через LunaGPT STT и передаёт в ИИ-оркестратор."""
     if not ai_client.is_configured() or not settings.ai_base_url:
-        await message.answer(
-            "Голосовое управление не настроено: нужен шлюз LunaGPT (HS_AI_BASE_URL)."
-        )
+        log.warning("a voice message arrived, but speech to text is not configured")
+        await message.answer(VOICE_UNAVAILABLE)
         return
 
     if not message.voice or message.bot is None:
@@ -419,19 +435,19 @@ async def handle_voice(message: Message) -> None:
         await message.bot.send_chat_action(message.chat.id, "typing")
         file_info = await message.bot.get_file(message.voice.file_id)
         if not file_info.file_path:
-            await message.answer("Не удалось получить файл голосового сообщения из Telegram.")
+            await message.answer(VOICE_NOT_RECEIVED)
             return
 
         voice_buf = await message.bot.download_file(file_info.file_path)
         if voice_buf is None:
-            await message.answer("Не удалось скачать аудиозапись.")
+            await message.answer(VOICE_NOT_RECEIVED)
             return
         voice_bytes = voice_buf.getvalue() if hasattr(voice_buf, "getvalue") else voice_buf.read()
 
         transcribed_text = await ai_client.transcribe(voice_bytes, "ogg", caller)
-    except Exception as exc:
+    except Exception:
         log.exception("ошибка транскрипции голосового сообщения")
-        await message.answer(f"Не удалось распознать голос: {exc}")
+        await message.answer(VOICE_FAILED)
         return
 
     await asyncio.to_thread(_record_voice_spend_sync, caller, message.voice.duration)

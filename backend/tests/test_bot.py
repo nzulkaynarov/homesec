@@ -601,7 +601,7 @@ def test_describe_pending_resolves_device(db):
 
     desc = _describe_pending(db, "block_device", {"device_id": dev.id})
     assert "Планшет Миши" in desc
-    assert "192.168.88.45" in desc
+    assert "192.168.88.45" not in desc and dev.mac not in desc and str(dev.id) not in desc
 
 
 def test_handle_voice_without_gateway(monkeypatch):
@@ -617,7 +617,8 @@ def test_handle_voice_without_gateway(monkeypatch):
     msg.answer = AsyncMock()
     asyncio.run(handle_voice(msg))
     msg.answer.assert_called_once()
-    assert "HS_AI_BASE_URL" in msg.answer.call_args[0][0]
+    text = msg.answer.call_args[0][0]
+    assert "ИИ недоступен" in text and "HS_" not in text
 
 
 def test_handle_voice_transcription_success(monkeypatch):

@@ -11,7 +11,7 @@ from sqlalchemy import or_, select
 from sqlalchemy.orm import Session
 
 from ..models import Device, kv_get, kv_set
-from . import enforcement
+from . import enforcement, plain
 
 # last_seen moves every SEEN_STEP while a device answers, so this is 5 to 10 minutes of silence.
 OFFLINE_AFTER = timedelta(minutes=10)
@@ -31,7 +31,8 @@ def is_watched(device: Device) -> bool:
 
 
 def _name(device: Device) -> str:
-    return f"«{device.name or device.hostname or device.mac}» ({device.ip})"
+    """By name only: the address is on the device card for those who need it."""
+    return f"«{plain.device_name(device.name, device.hostname)}»"
 
 
 def _when(moment: datetime, now: datetime) -> str:

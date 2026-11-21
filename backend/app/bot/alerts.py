@@ -31,7 +31,7 @@ def new_device_keyboard(dev_id: int, people: list[tuple[int, str, str]]) -> Inli
             text="📺 Общее (ТВ/Колонка)", callback_data=f"nd:{dev_id}:kind:shared"
         ),
         InlineKeyboardButton(
-            text="🤖 Умный дом (IoT)", callback_data=f"nd:{dev_id}:kind:iot"
+            text="🤖 Умный дом", callback_data=f"nd:{dev_id}:kind:iot"
         ),
     ])
     rows.append([

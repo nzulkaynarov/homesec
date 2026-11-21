@@ -14,6 +14,7 @@ Telegram-бот читают и меняют состояние системы. 
 
 import inspect
 import json
+import logging
 import typing
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -24,6 +25,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import (
+    DEVICE_KIND_LABELS,
     GROUP_LABELS,
     GROUPS,
     Device,
@@ -38,10 +40,17 @@ from ..models import (
     kv_set,
     log_event,
 )
-from ..services import adguard, enforcement, house_rules, mikrotik, pause_state, pauses
+from ..services import adguard, enforcement, house_rules, mikrotik, pause_state, pauses, plain
 from ..services import family as family_svc
 from ..services import quota as quota_svc
 from ..services.device_links import move_device_rows
+
+log = logging.getLogger("homesec.ai.tools")
+
+# What a parent reads when a call cannot be carried out as asked; the reason goes to the log.
+UNKNOWN_ACTION = "Такого действия я не умею."
+NOT_UNDERSTOOD = "Не понял, что именно сделать. Скажите иначе или воспользуйтесь кнопками."
+DEVICE_GONE = "Не нашёл это устройство: возможно, его уже удалили."
 
 
 class ToolError(Exception):
@@ -116,11 +125,17 @@ def run_tool(db: Session, name: str, args: dict, source: str = "ai",
     ВЫЗЫВАЮЩЕГО: сюда мутирующий вызов должен приходить уже одобренным."""
     spec = REGISTRY.get(name)
     if spec is None:
-        raise ToolError(f"Неизвестный инструмент: {name}")
+        log.warning("unknown tool %s", name)
+        raise ToolError(UNKNOWN_ACTION)
+    problem = argument_problem(name, args)
+    if problem is not None:
+        log.warning("tool %s called with wrong arguments: %s", name, problem)
+        raise ToolError(NOT_UNDERSTOOD)
     try:
         result = spec.func(db, **args)
     except TypeError as e:
-        raise ToolError(f"Неверные аргументы {name}: {e}") from e
+        log.warning("tool %s failed on its arguments: %s", name, e)
+        raise ToolError(NOT_UNDERSTOOD) from e
     if spec.mutating:
         log_event(db, f"{source}_action", str(result))
         if reconcile_after:
@@ -131,6 +146,20 @@ def run_tool(db: Session, name: str, args: dict, source: str = "ai",
             else:
                 enforcement.reconcile(db)
     return result
+
+
+def argument_problem(name: str, args: dict) -> str | None:
+    """Why these arguments do not fit the tool, in words for the model; None when they do.
+    The orchestrator asks before proposing an action, so a parent never confirms a call that
+    cannot run."""
+    spec = REGISTRY.get(name)
+    if spec is None:
+        return f"Unknown tool {name}."
+    try:
+        inspect.signature(spec.func).bind(None, **args)
+    except TypeError as e:
+        return f"Wrong arguments for {name}: {e}"
+    return None
 
 
 # ---------- помощники (не инструменты) ----------
@@ -194,8 +223,21 @@ def find_device_candidates(db: Session, query: str = "") -> list[Device]:
 def _device_or_error(db: Session, device_id: int) -> Device:
     dev = db.get(Device, device_id)
     if dev is None:
-        raise ToolError(f"Устройство id={device_id} не найдено")
+        raise ToolError(DEVICE_GONE)
     return dev
+
+
+def device_label(dev: Device) -> str:
+    """A device as parents call it, in quotes: the name, never its addresses."""
+    return f"«{plain.device_name(dev.name, dev.hostname)}»"
+
+
+def _not_found(target: str) -> ToolError:
+    """A target nobody recognised; an id or an address is not repeated back to a parent."""
+    asked = target.strip()
+    if not asked or asked.isdigit() or plain.is_address(asked):
+        return ToolError(DEVICE_GONE)
+    return ToolError(f"Не нашёл ребёнка или устройство «{asked}», уточните имя.")
 
 
 def apply_merge(db: Session, dup: Device, target: Device) -> None:
@@ -218,11 +260,11 @@ def apply_merge(db: Session, dup: Device, target: Device) -> None:
 
 def _guard_self(dev: Device) -> None:
     if dev.kind == "infra":
-        raise ToolError(f"{dev.name} — это инфраструктура сети. Её блокировать нельзя.")
+        raise ToolError(f"{device_label(dev)} — это оборудование сети, его блокировать нельзя.")
     if dev.ip and dev.ip in enforcement.get_self_ips():
         raise ToolError(
-            f"{dev.name} ({dev.ip}) — это сама малинка (DNS и панель). "
-            "Инфраструктуру блокировать нельзя."
+            f"{device_label(dev)} — это сама малинка, Raspberry Pi с HomeSec: через неё "
+            "весь дом открывает сайты. Её блокировать нельзя."
         )
 
 
@@ -232,7 +274,7 @@ def _device_row(d: Device, pause: pause_state.DevicePause | None) -> dict:
     if d.kind == "shared":
         owner = "📺 Общие (ТВ/Колонки)"
     elif d.kind == "iot":
-        owner = "🤖 Умный дом (IoT)"
+        owner = "🤖 Умный дом"
     elif d.kind == "infra":
         owner = "🛠 Инфраструктура"
     return {
@@ -336,7 +378,11 @@ def get_recent_events(
     limit = max(1, min(int(limit), 200))
     events = db.scalars(select(EventLog).order_by(EventLog.ts.desc()).limit(limit))
     return [
-        {"ts": e.ts.isoformat(timespec="minutes"), "kind": e.kind, "message": e.message}
+        {
+            "ts": e.ts.isoformat(timespec="minutes"),
+            "kind": e.kind,
+            "message": plain.journal_line(e.message),
+        }
         for e in events
     ]
 
@@ -351,7 +397,7 @@ def get_device_activity(
     посещались и что было заблокировано."""
     dev = _device_or_error(db, device_id)
     if not dev.ip:
-        raise ToolError(f"{dev.name}: у устройства нет IP (офлайн)")
+        raise ToolError(f"{device_label(dev)} сейчас не в сети.")
     limit = max(1, min(int(limit), 100))
     try:
         entries = adguard.get_query_log(limit=500)
@@ -385,7 +431,7 @@ def block_device(
     _guard_self(dev)
     dev.blocked_manual = True
     db.commit()
-    return f"Заблокировано: {dev.name} ({dev.ip or dev.mac})"
+    return f"Заблокировано: {device_label(dev)}"
 
 
 @tool(mutating=True)
@@ -398,7 +444,7 @@ def unblock_device(
     dev = _device_or_error(db, device_id)
     dev.blocked_manual = False
     db.commit()
-    return f"Разблокировано: {dev.name} ({dev.ip or dev.mac})"
+    return f"Разблокировано: {device_label(dev)}"
 
 
 @tool(mutating=True)
@@ -411,12 +457,12 @@ def set_speed_limit(
     dev = _device_or_error(db, device_id)
     limit = limit.strip()
     if limit and not mikrotik.valid_speed_limit(limit):
-        raise ToolError(f"Неверный формат лимита «{limit}», ожидается вида 5M/20M")
+        raise ToolError("Не понял, какую скорость поставить.")
     dev.speed_limit = limit
     db.commit()
     if limit:
-        return f"Лимит скорости {limit} для {dev.name} ({dev.ip or dev.mac})"
-    return f"Лимит скорости снят: {dev.name} ({dev.ip or dev.mac})"
+        return f"Скорость {device_label(dev)}: {plain.speed_words(limit)}"
+    return f"Скорость {device_label(dev)}: без ограничения"
 
 
 def next_clock(clock: str, now: datetime) -> datetime:
@@ -425,7 +471,7 @@ def next_clock(clock: str, now: datetime) -> datetime:
     try:
         moment = datetime.strptime(clock.strip(), "%H:%M")
     except ValueError as exc:
-        raise ToolError(f"Время «{clock}» не похоже на ЧЧ:ММ") from exc
+        raise ToolError(f"Не понял время «{clock}»: нужно, например, 21:30.") from exc
     target = now.replace(hour=moment.hour, minute=moment.minute, second=0, microsecond=0)
     return target if target > now else target + timedelta(days=1)
 
@@ -461,7 +507,7 @@ def pause_internet(
         minutes = int(minutes)
         until_at = now + timedelta(minutes=minutes)
     if not 1 <= minutes <= 1440:
-        raise ToolError("Длительность паузы — от 1 до 1440 минут")
+        raise ToolError("Пауза бывает от 1 минуты до 24 часов.")
     t = target.strip()
     why = reason.strip() or "бот"
     chosen: pauses.Target
@@ -480,13 +526,22 @@ def pause_internet(
     else:
         dev = find_device(db, t)
         if dev is None:
-            raise ToolError(f"Не нашёл ребёнка или устройство «{target}» — уточните имя или id")
+            raise _not_found(target)
         _guard_self(dev)
         chosen = pauses.Target("device", dev.id)
     try:  # the same words as the «⏸ Пауза» screen
         return pauses.pause(db, chosen, until_at, now, why)
     except pauses.PauseError as exc:
         raise ToolError(str(exc)) from exc
+
+
+BEDTIME_KIDS = ("kid", "kids", "дети")  # who means every child in set_bedtime
+# The nights of a bedtime in the words of «📋 Правила» (house_rules.NIGHTS).
+NIGHT_WORDS = {
+    "school": f"ночи {house_rules.NIGHTS['school'][1]}",
+    "weekend": f"ночи {house_rules.NIGHTS['weekend'][1]}",
+    "all": "каждую ночь",
+}
 
 
 @tool(mutating=True)
@@ -502,10 +557,10 @@ def set_bedtime(
     («каждую ночь», «по будням»); разовую паузу ставит pause_internet."""
     choice = {"school": ["school"], "weekend": ["weekend"], "all": ["school", "weekend"]}
     if nights not in choice:
-        raise ToolError("nights: school, weekend или all")
+        raise ToolError("Не понял, какие ночи: перед учебными днями, на выходные или все.")
     key = who.strip()
     people = list(db.scalars(select(Person).order_by(Person.name)))
-    if key.lower() in ("kid", "kids", "дети"):
+    if key.lower() in BEDTIME_KIDS:
         targets = [p for p in people if p.role == "kid"]
     else:
         targets = [p for p in people if p.name.lower() == key.lower()]
@@ -518,7 +573,7 @@ def set_bedtime(
     except house_rules.RuleError as exc:
         raise ToolError(str(exc)) from exc
     names = ", ".join(p.name for p in targets)
-    return f"Отбой {start}–{end} ({nights}) для: {names}"
+    return f"Отбой {start}–{end}, {NIGHT_WORDS[nights]}: {names}"
 
 
 @tool(mutating=True)
@@ -549,8 +604,8 @@ def resume_internet(
         return pauses.resume(db, own)
     dev = find_device(db, t)
     if dev is None:
-        raise ToolError(f"Не нашёл ребёнка или устройство «{target}» — уточните имя или id")
-    label = f"{dev.name} ({dev.ip or dev.mac})"
+        raise _not_found(target)
+    name = device_label(dev)
     removed = _delete_pauses(db, "device", str(dev.id))
     still = pause_state.device_pauses(db, [dev]).get(dev.id)
     if still is not None and still.holds:
@@ -559,13 +614,13 @@ def resume_internet(
             if "person" in still.sources and dev.person
             else GROUP_LABELS.get(dev.group, dev.group)
         )
-        note = f"«{label}» всё ещё на паузе до {still.held_until:%H:%M}: её поставили на «{holder}»"
+        note = f"{name} всё ещё на паузе до {still.held_until:%H:%M}: её поставили на «{holder}»"
         if not removed:
-            raise ToolError(note + ". Сними паузу с этой цели.")
+            raise ToolError(note + f". Снимите паузу с «{holder}».")
         return f"Пауза устройства снята, но {note}"
     if not removed:
-        raise ToolError(f"Активных пауз для «{label}» нет")
-    return f"Пауза снята: {label}"
+        raise ToolError(f"Активных пауз для {name} нет")
+    return f"Пауза снята: {name}"
 
 
 def _find_person(db: Session, name: str) -> Person | None:
@@ -604,6 +659,11 @@ def get_quota_status(db: Session) -> list[dict]:
     return out
 
 
+UNKNOWN_LIMIT = "Не понял, какой лимит: " + ", ".join(
+    words.lower() for words in quota_svc.QUOTA_CATEGORY_LABELS.values()
+) + "."
+
+
 def _parse_quota_target(db: Session, target: str) -> tuple[str, str, str]:
     """-> (target_type, target, человекочитаемое имя)."""
     t = target.strip()
@@ -615,8 +675,8 @@ def _parse_quota_target(db: Session, target: str) -> tuple[str, str, str]:
         return "person", str(person.id), f"{person.name} ({role_label})"
     dev = find_device(db, t)
     if dev is not None:
-        return "device", str(dev.id), f"{dev.name} ({dev.ip or dev.mac})"
-    raise ToolError(f"Не нашёл устройство или человека «{target}» — уточните имя или id")
+        return "device", str(dev.id), device_label(dev)
+    raise _not_found(target)
 
 
 @tool(mutating=True)
@@ -630,8 +690,7 @@ def set_quota(
     """Ставит, меняет или удаляет дневную квоту времени. Для группы квота
     действует на каждое устройство группы отдельно."""
     if category not in quota_svc.QUOTA_CATEGORIES:
-        raise ToolError(f"Неизвестная категория «{category}», есть: "
-                        + ", ".join(quota_svc.QUOTA_CATEGORIES))
+        raise ToolError(UNKNOWN_LIMIT)
     target_type, target_key, label = _parse_quota_target(db, target)
     minutes_per_day = int(minutes_per_day)
     existing = db.scalar(select(Quota).where(
@@ -673,8 +732,7 @@ def add_bonus_time(
     if not 1 <= minutes <= 720:
         raise ToolError("Бонус — от 1 до 720 минут")
     if category not in quota_svc.QUOTA_CATEGORIES:
-        raise ToolError(f"Неизвестная категория «{category}», есть: "
-                        + ", ".join(quota_svc.QUOTA_CATEGORIES))
+        raise ToolError(UNKNOWN_LIMIT)
     target_type, target_key, label = _parse_quota_target(db, target)
     dev_group = ""
     dev_person_id = ""
@@ -726,10 +784,10 @@ def merge_devices(
     dup = _device_or_error(db, int(duplicate_id))
     target = _device_or_error(db, int(target_id))
     _guard_self(dup)
-    dup_label = f"{dup.name} ({dup.mac})"
+    dup_label = device_label(dup)
     apply_merge(db, dup, target)
     db.commit()
-    return f"Объединено: {dup_label} → «{target.name}»; правила и владелец сохранены"
+    return f"Объединено: {dup_label} → {device_label(target)}; правила и владелец сохранены"
 
 
 @tool(mutating=True)
@@ -745,14 +803,14 @@ def assign_device(
     if not name:
         dev.person = None  # правим связь, а не FK: сессия живёт с expire_on_commit=False
         db.commit()
-        return f"{dev.name}: владелец снят, группа — Неизвестные"
+        return f"{device_label(dev)}: владелец снят, группа — Неизвестные"
     person = db.scalar(select(Person).where(Person.name == name))
     if person is None:
         known = ", ".join(p.name for p in db.scalars(select(Person))) or "список пуст"
         raise ToolError(f"Человек «{name}» не найден. Есть: {known}")
     dev.person = person
     db.commit()
-    return f"{dev.name} → {person.name} ({GROUP_LABELS[person.role]})"
+    return f"{device_label(dev)} → {person.name} ({GROUP_LABELS[person.role]})"
 
 
 @tool(mutating=True)
@@ -767,18 +825,12 @@ def set_device_kind(
     dev = _device_or_error(db, device_id)
     k = kind.strip().lower()
     if k not in ("personal", "shared", "iot", "infra"):
-        raise ToolError("Категория должна быть personal, shared, iot или infra")
+        raise ToolError("Не понял вид устройства: личное, общее, умный дом или оборудование сети.")
     dev.kind = k
     if k == "infra":
         dev.person = None  # equipment belongs to the home, so no person's limits can reach it
     db.commit()
-    labels = {
-        "personal": "Личное",
-        "shared": "Общее (ТВ/Колонка)",
-        "iot": "Умный дом (IoT)",
-        "infra": "Инфраструктура",
-    }
-    return f"{dev.name}: установлена категория «{labels[k]}»"
+    return f"{device_label(dev)}: тип «{DEVICE_KIND_LABELS[k]}»"
 
 
 @tool()

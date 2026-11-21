@@ -138,7 +138,7 @@ def _spend_sync() -> str:
     s = dbmod.session()
     try:
         names = {f"person:{p.id}": p.name for p in s.scalars(select(Person))}
-        names["system"] = "Система (алерты, дайджест)"
+        names["system"] = "Сам бот (предупреждения, сводка)"
         ledger = ai_client.ledger_for_day(s)
         rows = sorted(
             (

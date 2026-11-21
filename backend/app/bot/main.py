@@ -20,9 +20,10 @@ from ..config import settings
 from ..db import Base, engine
 from ..migrations import ensure_schema
 from ..services import family as family_svc
-from ..services import followups, time_notices, uptime
+from ..services import followups, plain, time_notices, uptime
 from . import access, alerts, handlers, luna_watch, notify, server_menu, texts
 from .health import default_monitor
+from .triage import vendor_of
 
 log = logging.getLogger("homesec.bot")
 
@@ -78,6 +79,28 @@ def _parent_notice(
     return None
 
 
+def _registration_requests(
+    s: Session, items: list[notify.Notification]
+) -> dict[int, tuple[str, str]]:
+    """{device id: (the name, the comment)} of the latest welcome-page request per device: the
+    journal line carries the device's addresses, the parent reads who asked and why."""
+    from ..models import RegistrationRequest
+
+    ids = {n.device.id for n in items if n.kind == "register_request"}
+    if not ids:
+        return {}
+    rows = s.query(RegistrationRequest).filter(RegistrationRequest.device_id.in_(ids))
+    found: dict[int, tuple[str, str]] = {}
+    for row in rows.order_by(RegistrationRequest.id):
+        found[row.device_id] = (row.name, row.comment or "")
+    return found
+
+
+async def _vendor(dev: dict) -> str | None:
+    """Who made it, a hint for recognising a new device; a changing address tells nothing."""
+    return None if dev["random_mac"] else await vendor_of(dev["mac"])
+
+
 def _collect_notifications() -> tuple[int, list[PendingNotice]]:
     """(latest journal id, [(kind, устройство, текст события, id оригинала, люди, id заявки,
     id события, текст для родителей)]). The cursor does not move here: only after delivery."""
@@ -90,6 +113,7 @@ def _collect_notifications() -> tuple[int, list[PendingNotice]]:
         from ..models import Person
 
         people = [(p.id, p.name, p.role) for p in s.query(Person).order_by(Person.name)]
+        requests = _registration_requests(s, items)
         now = datetime.now()
         pending: list[PendingNotice] = []
         switched_off: set[int] = set()
@@ -99,11 +123,16 @@ def _collect_notifications() -> tuple[int, list[PendingNotice]]:
                 if n.device.person_id in switched_off:
                     continue
                 switched_off.add(n.device.person_id)
+            request = requests.get(n.device.id) if n.kind == "register_request" else None
+            twin = n.extra_device
             pending.append((
                 n.kind,
-                {"id": n.device.id, "name": n.device.name, "mac": n.device.mac,
-                 "ip": n.device.ip, "random_mac": n.device.mac_is_random,
-                 "person_id": n.device.person_id},
+                {"id": n.device.id, "name": n.device.name, "hostname": n.device.hostname,
+                 "mac": n.device.mac, "random_mac": n.device.mac_is_random,
+                 "person_id": n.device.person_id,
+                 "twin_name": plain.device_name(twin.name, twin.hostname) if twin else None,
+                 "request_name": request[0] if request else "",
+                 "request_comment": request[1] if request else ""},
                 n.message,
                 n.extra_device.id if n.extra_device else None,
                 people,
@@ -121,13 +150,13 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
         try:
             latest, items = await asyncio.to_thread(_collect_notifications)
             done_until = latest
-            for kind, dev, message, extra_id, people, request_id, event_id, parent in items:
+            for kind, dev, _message, extra_id, people, request_id, event_id, parent in items:
                 kb: InlineKeyboardMarkup | None
                 if kind == "device_maybe_same" and extra_id is not None:
-                    text = f"🔁 {message}"
+                    text = texts.format_maybe_same(dev)
                     kb = alerts.merge_keyboard(dev["id"], extra_id)
                 elif kind == "register_request":
-                    text = texts.format_registration(message)
+                    text = texts.format_registration(dev, await _vendor(dev))
                     kb = alerts.new_device_keyboard(dev["id"], people)
                 elif kind in ("quota_block", "quota_warn") and parent is not None:
                     text = parent.text
@@ -138,7 +167,7 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
                 elif kind in ("quota_block", "quota_warn", "bonus_request"):
                     continue  # the request is gone: nothing to tell or answer
                 else:
-                    text = texts.format_new_device(dev)
+                    text = texts.format_new_device(dev, await _vendor(dev))
                     kb = alerts.new_device_keyboard(dev["id"], people)
                 if not await _broadcast(bot, chat_ids, text, kb):
                     # Nobody got it (no internet, Telegram down): keep it for the next round.

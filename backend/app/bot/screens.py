@@ -93,7 +93,8 @@ def usage_html(
     rows = []
     for name, usd, requests, features in spend:
         top = sorted(features.items(), key=lambda item: item[1], reverse=True)
-        detail = ", ".join(f"{texts.FEATURE_LABELS.get(k, k)} ${v:.2f}" for k, v in top)
+        labels = texts.FEATURE_LABELS
+        detail = ", ".join(f"{labels.get(k, texts.OTHER_FEATURE)} ${v:.2f}" for k, v in top)
         rows.append((name, f"${usd:.2f}", str(requests), detail))
     if rows:
         total_usd = sum(r[1] for r in spend)

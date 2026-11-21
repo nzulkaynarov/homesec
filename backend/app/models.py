@@ -12,7 +12,7 @@ GROUP_LABELS = {
     "adult": "Взрослые",
     "guest": "Гости",
     "shared": "Общие (ТВ/Колонки)",
-    "iot": "Умный дом (IoT)",
+    "iot": "Умный дом",
     "infra": "Инфраструктура",
     "unknown": "Неизвестные",
 }
@@ -22,7 +22,7 @@ DEVICE_KINDS = ("personal", "shared", "iot", "infra")
 DEVICE_KIND_LABELS = {
     "personal": "Личное",
     "shared": "Общее (ТВ/Колонка)",
-    "iot": "Умный дом (IoT)",
+    "iot": "Умный дом",
     "infra": "Инфраструктура",
 }
 

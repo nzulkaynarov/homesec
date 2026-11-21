@@ -120,12 +120,16 @@ def _log_error_throttled(db: Session, key: str, msg: str) -> None:
 
 LAST_OK_KEY = "reconcile_last_ok"
 LAST_ERROR_KEY = "reconcile_last_error"
+# Which part failed last (mikrotik, adguard, queues, self_ip, unexpected), comma-separated:
+# parents are told the reason in plain words, the error text above is for the log.
+LAST_CAUSES_KEY = "reconcile_last_causes"
 STALE_AFTER = timedelta(minutes=5)
 
 
 def _fail(db: Session, summary: dict, key: str, msg: str) -> None:
     summary["ok"] = False
     summary["errors"].append(msg)
+    summary.setdefault("causes", []).append(key)
     log.warning("%s", msg)
     _log_error_throttled(db, key, msg)
 
@@ -135,8 +139,11 @@ def _record_outcome(db: Session, summary: dict) -> None:
     try:
         if summary["ok"]:
             kv_set(db, LAST_OK_KEY, datetime.now().isoformat(timespec="seconds"))
+            kv_set(db, LAST_CAUSES_KEY, "")
         else:
             kv_set(db, LAST_ERROR_KEY, "; ".join(summary["errors"])[:300])
+            causes = dict.fromkeys(summary.get("causes", []))
+            kv_set(db, LAST_CAUSES_KEY, ",".join(causes))
     except Exception:  # noqa: BLE001 — the marker must never break enforcement itself
         log.exception("could not record the reconcile outcome")
         db.rollback()
@@ -151,6 +158,11 @@ def enforcement_status(db: Session, now: datetime | None = None) -> tuple[bool, 
     except ValueError:
         fresh = False
     return fresh, kv_get(db, LAST_ERROR_KEY)
+
+
+def last_causes(db: Session) -> list[str]:
+    """Which parts failed in the last unsuccessful pass; empty after a success."""
+    return [cause for cause in kv_get(db, LAST_CAUSES_KEY, "").split(",") if cause]
 
 
 def rule_is_active(rule: Rule, now: datetime | None = None) -> bool:
@@ -526,6 +538,7 @@ def reconcile(db: Session) -> dict:
         _log_error_throttled(db, "self_ip", msg)
         summary["ok"] = False
         summary["errors"].append(msg)
+        summary["causes"] = ["self_ip"]
         _record_outcome(db, summary)
         return summary
 

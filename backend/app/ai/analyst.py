@@ -15,7 +15,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import Device, EventLog, Person, QuotaUsage
-from ..services import adguard
+from ..services import adguard, plain
 from ..services.quota import QUOTA_CATEGORY_LABELS
 from . import client
 
@@ -31,6 +31,8 @@ DIGEST_SYSTEM = """Ты пишешь родителям короткий дай�
 - если errors не пуст, не пиши, что всё работает, стабильно или в порядке, и не преуменьшай ошибки;
 - если kid_safety_alerts больше нуля, не успокаивай;
 - если данных мало, так и скажи, одной строкой;
+- простыми словами: без адресов устройств и технических терминов, dns_queries_today — это
+  «обращений к сайтам»;
 - без приветствий и прощаний."""
 
 
@@ -79,8 +81,13 @@ def collect_digest_data(db: Session) -> dict:
     return {
         "date": datetime.now().strftime("%d.%m.%Y"),
         "events_by_kind": dict(by_kind),
-        "new_devices": [e.message for e in events if e.kind == "device_new"],
-        "blocks": [e.message for e in events if e.kind in ("block", "ai_action", "bot_action")],
+        # The journal keeps addresses for the bot's linkage; parents read names.
+        "new_devices": [plain.journal_line(e.message) for e in events if e.kind == "device_new"],
+        "blocks": [
+            plain.journal_line(e.message)
+            for e in events
+            if e.kind in ("block", "ai_action", "bot_action")
+        ],
         "errors": [e.message for e in events if e.kind == "error"][-5:],
         "dns_queries_today": stats.get("num_dns_queries"),
         "dns_blocked_today": stats.get("num_blocked_filtering"),
@@ -122,11 +129,11 @@ def _must_see_lines(data: dict) -> list[str]:
 
 
 def _fallback_digest(data: dict) -> str:
-    lines = [f"Дайджест HomeSec за {data['date']} (ИИ выключен, краткая сводка)"]
+    lines = [f"📋 Сводка за {data['date']}"]
     if data["dns_queries_today"] is not None:
         lines.append(
-            f"DNS: {data['dns_queries_today']} запросов, "
-            f"{data.get('dns_blocked_today', 0)} заблокировано"
+            f"🌐 Обращений к сайтам: {data['dns_queries_today']}, "
+            f"заблокировано фильтром: {data.get('dns_blocked_today', 0)}"
         )
     for name, cats in data.get("screen_time", {}).items():
         spent = ", ".join(f"{label.lower()} {minutes} мин" for label, minutes in cats.items())

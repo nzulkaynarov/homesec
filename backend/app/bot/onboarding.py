@@ -110,11 +110,11 @@ async def notify_owner_about_access_request(message: Message) -> None:
     user = message.from_user
     if not user:
         return
-    uname = f"@{user.username}" if user.username else user.full_name
+    # Name and @username tell people apart; the Telegram number is in the buttons, not the text.
+    uname = f" ({texts.escape_markdown('@' + user.username)})" if user.username else ""
     text = (
         f"🔔 *Кто-то просит доступ к боту HomeSec*\n\n"
-        f"Пользователь: {texts.escape_markdown(user.full_name)} "
-        f"({texts.escape_markdown(uname)}, ID: `{user.id}`)\n\n"
+        f"Пользователь: {texts.escape_markdown(user.full_name)}{uname}\n\n"
         f"Этот бот только для родителей. Детям и гостям нужна Luna.\n"
         f"Открыть этому человеку управление домашней сетью?"
     )

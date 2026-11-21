@@ -16,7 +16,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import log_event
-from . import client, tools
+from . import client, confirmations, tools
 
 log = logging.getLogger("homesec.ai.orchestrator")
 
@@ -36,7 +36,10 @@ SYSTEM = """Ты — интеллектуальный семейный асси�
    коды домофонов, списки покупок и важные факты, и находи их по запросу (get_family_notes).
 3. Универсальный домашний помощник: отвечай на любые вопросы семьи (подбор фильмов на вечер,
    быстрые рецепты, советы по дому, досуг).
-4. Правила: отвечай по-русски, лаконично и по делу. Не меняй системный firewall/NAT роутера."""
+4. Правила: отвечай по-русски, лаконично и по делу. Не меняй системный firewall/NAT роутера.
+5. Пиши для родителей простыми словами: называй устройства по имени и владельцу, не показывай
+   MAC- и IP-адреса, номера (id), названия параметров и английские слова (kid, internet, games),
+   не упоминай инструменты по названию."""
 
 
 @dataclass
@@ -67,63 +70,8 @@ def _run_read_tool(db: Session, name: str, args: dict) -> tuple[str, bool]:
 
 
 def _describe_pending(db: Session, name: str, args: dict) -> str:
-    from ..models import GROUP_LABELS, Device
-
-    spec = tools.REGISTRY[name]
-    first_line = spec.description.splitlines()[0]
-    details: list[str] = []
-
-    # Резолвим device_id в имя и IP устройства из БД
-    if "device_id" in args:
-        try:
-            dev = db.get(Device, int(args["device_id"]))
-            if dev:
-                details.append(f"{dev.name} ({dev.ip or dev.mac})")
-            else:
-                details.append(f"id={args['device_id']}")
-        except (ValueError, TypeError):
-            details.append(f"id={args['device_id']}")
-
-    # Резолвим дубли при merge_devices
-    if "duplicate_id" in args and "target_id" in args:
-        try:
-            dup = db.get(Device, int(args["duplicate_id"]))
-            tgt = db.get(Device, int(args["target_id"]))
-            dup_name = dup.name if dup else f"id={args['duplicate_id']}"
-            tgt_name = tgt.name if tgt else f"id={args['target_id']}"
-            details.append(f"дубль «{dup_name}» → в «{tgt_name}»")
-        except (ValueError, TypeError):
-            pass
-
-    # Резолвим target (группа или устройство)
-    if "target" in args:
-        t = str(args["target"]).strip()
-        if t in GROUP_LABELS:
-            details.append(f"группа «{GROUP_LABELS[t]}»")
-        else:
-            dev = tools.find_device(db, t)
-            if dev:
-                details.append(f"{dev.name} ({dev.ip or dev.mac})")
-            else:
-                details.append(t)
-
-    for k, v in args.items():
-        if k in ("device_id", "duplicate_id", "target_id", "target"):
-            continue
-        if k == "minutes":
-            details.append(f"{v} мин")
-        elif k == "limit":
-            details.append(f"лимит {v}")
-        elif k == "category":
-            details.append(f"категория {v}")
-        elif k == "person_name":
-            details.append(f"владелец {v}")
-        elif v:
-            details.append(f"{k}={v}")
-
-    if details:
-        return f"{first_line}: {', '.join(details)}"
-    return first_line
+    """The confirmation a parent reads: who, what and until when, in plain words."""
+    return confirmations.describe(db, name, args)
 
 
 def handle(db: Session, user_text: str, history: list[dict] | None = None) -> Answer:
@@ -197,7 +145,11 @@ def handle(db: Session, user_text: str, history: list[dict] | None = None) -> An
             if block.type != "tool_use":
                 continue
             args = dict(block.input or {})
-            if tools.is_mutating(block.name) and any(
+            problem = tools.argument_problem(block.name, args)
+            if problem is not None:
+                # Told to the model to fix, never offered to a parent as a broken button.
+                content, is_error = problem, True
+            elif tools.is_mutating(block.name) and any(
                 p.tool == block.name and p.args == args for p in pending
             ):
                 content = "Это действие уже ожидает подтверждения. Заверши ответ."

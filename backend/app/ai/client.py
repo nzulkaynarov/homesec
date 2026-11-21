@@ -42,11 +42,20 @@ CACHE_WRITE_MULTIPLIER = 1.25
 
 
 class AiError(Exception):
-    """Ошибка ИИ-слоя; текст безопасен для показа пользователю."""
+    """Ошибка ИИ-слоя; текст безопасен для показа пользователю. Parents read it as it is, so it
+    says what happened in plain words; the technical reason goes to the log where it is raised."""
 
 
 class BudgetExceeded(AiError):
     pass
+
+
+UNAVAILABLE = "ИИ сейчас недоступен, кнопки внизу работают как обычно."
+BUSY = "ИИ сейчас перегружен, попробуйте через минуту. Кнопки внизу работают как обычно."
+SPENT = (
+    "На сегодня лимит расходов на ИИ исчерпан, продолжу завтра. "
+    "Кнопки внизу работают как обычно."
+)
 
 
 @dataclass(frozen=True)
@@ -113,7 +122,8 @@ STT_INSTRUCTION = (
 async def transcribe(audio: bytes, audio_format: str, caller: Caller, language: str = "ru") -> str:
     """Speech to text through the LunaGPT gateway with HomeSec's own key and budget."""
     if not is_configured():
-        raise AiError("Распознавание голоса не настроено: нужен шлюз LunaGPT (HS_AI_BASE_URL).")
+        log.warning("speech to text asked without a model key")
+        raise AiError(UNAVAILABLE)
     payload = {
         "model": settings.ai_model_stt,
         "messages": [{
@@ -265,7 +275,9 @@ def ask_with_fallback(db: Session, models: list[str], **kwargs):
         except AiError as e:
             log.warning("model %s failed: %s", model, e)
             last_error = e
-    raise last_error or AiError("Не настроена ни одна модель")
+    if last_error is None:
+        log.warning("no model is configured for this call")
+    raise last_error or AiError(UNAVAILABLE)
 
 
 def ask(
@@ -281,15 +293,14 @@ def ask(
     """Один вызов Claude API с проверкой бюджета и учётом расхода.
     Возвращает объект Message SDK; поднимает AiError/BudgetExceeded."""
     if not is_configured():
-        raise AiError("ИИ не настроен: задайте HS_ANTHROPIC_API_KEY в .env")
+        log.warning("AI is not configured: the model key is empty")
+        raise AiError(UNAVAILABLE)
     caller = current_caller()
     _check_personal_limit(db, caller)
     left = budget_left(db)
     if left is not None and left <= 0:
-        raise BudgetExceeded(
-            "Дневной бюджет ИИ исчерпан — продолжу завтра. "
-            f"(лимит {settings.ai_daily_token_budget} токенов, HS_AI_DAILY_TOKEN_BUDGET)"
-        )
+        log.warning("daily AI token budget of %s is spent", settings.ai_daily_token_budget)
+        raise BudgetExceeded(SPENT)
 
     import anthropic  # импорт здесь: без ключа зависимость не нужна на горячем пути
 
@@ -314,11 +325,14 @@ def ask(
     try:
         response = client.messages.create(**kwargs)
     except anthropic.RateLimitError as e:
-        raise AiError("Claude API: превышен лимит запросов, попробуйте позже") from e
+        log.warning("model %s: rate limited", kwargs["model"])
+        raise AiError(BUSY) from e
     except anthropic.APIStatusError as e:
-        raise AiError(f"Claude API: ошибка {e.status_code}") from e
+        log.warning("model %s: HTTP %s %s", kwargs["model"], e.status_code, e.message)
+        raise AiError(UNAVAILABLE) from e
     except anthropic.APIConnectionError as e:
-        raise AiError("Claude API недоступен (нет интернета?)") from e
+        log.warning("model %s: no connection to the gateway: %s", kwargs["model"], e)
+        raise AiError(UNAVAILABLE) from e
 
     usage = response.usage
     cache_read = int(getattr(usage, "cache_read_input_tokens", 0) or 0)

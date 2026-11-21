@@ -1,5 +1,7 @@
 """Форматирование сообщений бота — чистые функции, покрыты тестами."""
 
+from ..services import plain
+
 # The "/" menu (set_my_commands at start-up): every feature is a button, so the menu only brings
 # the buttons back and explains them. The other commands still work for those used to them.
 BOT_COMMANDS: list[tuple[str, str]] = [
@@ -67,22 +69,52 @@ def hhmm(minutes: int) -> str:
     return f"{minutes // 60}:{minutes % 60:02d}"
 
 
-def format_registration(event_message: str) -> str:
-    return f"📨 {event_message}\n\nКому назначить устройство?"
+CHANGING_ADDRESS = (
+    "⚠️ Это устройство меняет свой адрес в сети (на iPhone это «Частный адрес Wi-Fi», "
+    "на Android — «случайный адрес»). Чтобы правила для него не слетали, выключите это "
+    "в настройках домашней сети Wi-Fi на самом устройстве."
+)
 
 
-def format_new_device(dev: dict) -> str:
-    warning = ""
+def _what_it_is(dev: dict, vendor: str | None) -> list[str]:
+    """What a parent recognises a device by: its name, what it calls itself, who made it. The
+    MAC and IP stay on the device card in «📱 Устройства» for those who need them."""
+    name = plain.device_name(dev.get("name") or "", dev.get("hostname") or "")
+    lines = [f"«{name}»" if name != plain.UNNAMED else "Без имени"]
+    hostname = (dev.get("hostname") or "").strip()
+    if hostname and hostname != name and not plain.is_address(hostname):
+        lines.append(f"Называет себя: {hostname}")
+    if vendor:
+        lines.append(f"Производитель: {vendor}")
     if dev.get("random_mac"):
-        warning = (
-            "\n⚠️ Случайный MAC («приватный адрес»). Для домашней сети "
-            "его лучше выключить на устройстве, иначе правила будут слетать."
-        )
+        lines.append(CHANGING_ADDRESS)
+    return lines
+
+
+def format_new_device(dev: dict, vendor: str | None = None) -> str:
+    lines = ["🆕 В сети новое устройство", *_what_it_is(dev, vendor)]
+    return "\n".join(lines) + "\n\nКому оно принадлежит?"
+
+
+def format_registration(dev: dict, vendor: str | None = None) -> str:
+    """Someone on an unknown device introduced themselves on the welcome page."""
+    lines = ["📨 Просят доступ в интернет"]
+    if dev.get("request_name"):
+        lines.append(f"Представился: {dev['request_name']}")
+    if dev.get("request_comment"):
+        lines.append(f"Пишет: «{dev['request_comment']}»")
+    lines += ["", "Устройство:", *_what_it_is(dev, vendor)]
+    return "\n".join(lines) + "\n\nКому назначить устройство?"
+
+
+def format_maybe_same(dev: dict) -> str:
+    """A new record whose network name matches a known device: a phone that changed its address."""
+    new = plain.device_name(dev.get("name") or "", dev.get("hostname") or "")
+    old = dev.get("twin_name") or plain.UNNAMED
     return (
-        "🆕 Новое устройство в сети\n"
-        f"{dev['name']}\n"
-        f"MAC: {dev['mac']}\nIP: {dev['ip'] or '—'}{warning}\n\n"
-        "Кому оно принадлежит?"
+        f"🔁 Похоже, новое устройство «{new}» — это снова «{old}»: они называют себя "
+        "одинаково. Так бывает, когда телефон меняет свой адрес в сети.\n\n"
+        f"Объединить их в одно? Имя, владелец и правила останутся от «{old}»."
     )
 
 
@@ -127,7 +159,8 @@ FEATURE_LABELS = {
     "orchestrator": "ассистент",
     "tutor": "репетитор",
     "quiz": "викторина",
-    "digest": "дайджест",
-    "watchdog": "алерты",
+    "digest": "вечерняя сводка",
+    "watchdog": "предупреждения",
     "stt": "голос",
 }
+OTHER_FEATURE = "другое"  # a spend recorded without a known feature

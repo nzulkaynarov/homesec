@@ -14,8 +14,12 @@ def _text(text):
     )
 
 
+# Arguments a call needs, so it is proposed rather than sent back to the model to fix.
+ARGS = {"pause_internet": {"target": "kid", "minutes": 30}}
+
+
 def _tool(name):
-    block = SimpleNamespace(type="tool_use", name=name, input={}, id="t1")
+    block = SimpleNamespace(type="tool_use", name=name, input=dict(ARGS.get(name, {})), id="t1")
     return SimpleNamespace(stop_reason="tool_use", content=[block])
 
 

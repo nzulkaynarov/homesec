@@ -266,19 +266,19 @@ def test_digest_uses_only_the_local_model(db, monkeypatch):
 def test_digest_falls_back_to_the_plain_summary_not_a_paid_model(db, monkeypatch):
     text, asked = _digest_with_model(db, monkeypatch)
     assert asked == ["luna-local"]
-    assert "DNS: 500 запросов" in text
+    assert "Обращений к сайтам: 500" in text
 
 
 def test_digest_without_a_local_model_is_the_plain_summary(db, monkeypatch):
     text, asked = _digest_with_model(db, monkeypatch, "текст", local="")
     assert asked == []
-    assert "DNS: 500 запросов" in text
+    assert "Обращений к сайтам: 500" in text
 
 
 def test_digest_with_an_invented_number_is_discarded(db, monkeypatch):
     text, _ = _digest_with_model(db, monkeypatch, "DNS: 777 запросов")
     assert "777" not in text
-    assert "DNS: 500 запросов" in text
+    assert "Обращений к сайтам: 500" in text
 
 
 def test_digest_cannot_hide_a_child_safety_alert(db, monkeypatch):
