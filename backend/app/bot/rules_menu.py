@@ -5,6 +5,7 @@ the Luna PC is off."""
 
 import asyncio
 import time
+from datetime import datetime
 from typing import Any
 
 from aiogram import F, Router
@@ -13,7 +14,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .. import db as dbmod
 from ..services import house_rules, pauses
 from ..services.quota import QUOTA_CATEGORY_LABELS
-from . import access
+from . import access, waits
 from .texts import DANGER
 
 BTN_RULES = "📋 Правила"
@@ -27,7 +28,7 @@ MENU_TEXTS = access.ADULT_BUTTONS | {"❓ Помощь"}
 Card = tuple[str, InlineKeyboardMarkup]
 
 # (chat, user) -> (what, argument, deadline); what is "new" (argument = role) or "name".
-_typing: dict[tuple[int, int], tuple[str, str, float]] = {}
+_typing: dict[tuple[int, int], tuple[str, str, float]] = waits.table()
 
 
 def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
@@ -54,24 +55,37 @@ def _hhmm(value: str) -> str:
     return f"{value[:2]}:{value[2:]}"
 
 
-def _overview_data(db: Any) -> tuple[list[tuple[int, str, list[str]]], Any]:
+def _all_kids_line(ends: dict[str, datetime]) -> str:
+    """The banner while every child is paused: one time when they all come back together,
+    otherwise who comes back first, so nobody expects every child back at the first end."""
+    first = min(ends.values())
+    if len({end.replace(second=0, microsecond=0) for end in ends.values()}) == 1:
+        return f"⏸ Сейчас пауза всем детям до {first:%H:%M}"
+    soonest = first.replace(second=0, microsecond=0)
+    names = [name for name, end in ends.items() if end.replace(second=0, microsecond=0) == soonest]
+    who = f"первым выйдет {names[0]}" if len(names) == 1 else f"первыми выйдут {', '.join(names)}"
+    return f"⏸ Все дети на паузе, {who} в {first:%H:%M}"
+
+
+def _overview_data(db: Any) -> tuple[list[tuple[int, str, list[str]]], str | None]:
     kids = [
         (p.id, p.name, house_rules.summary(db, p))
         for p in house_rules.people(db)
         if p.role == "kid"
     ]
-    return kids, house_rules.kids_paused_until(db)
+    ends = house_rules.kids_pause_ends(db)
+    return kids, _all_kids_line(ends) if ends else None
 
 
 async def _overview(notice: str = "") -> Card:
-    kids, all_until = await _call(_overview_data)
+    kids, all_paused = await _call(_overview_data)
     blocks = [f"🎒 {name}\n" + "\n".join(lines) for _, name, lines in kids]
     body = "\n\n".join(blocks) or "Детей в списке нет. Добавьте их в «👥 Люди»."
-    if all_until is not None:  # every child is paused, however the pause was set
-        body = f"⏸ Сейчас пауза всем детям до {all_until:%H:%M}\n\n{body}"
+    if all_paused is not None:  # every child is paused, however the pause was set
+        body = f"{all_paused}\n\n{body}"
     text = (f"{notice}\n\n" if notice else "") + f"📋 Правила для детей\n\n{body}"
     rows = [[_button(f"🎒 {name}", f"hrp:{pid}")] for pid, name, _ in kids]
-    if all_until is not None:
+    if all_paused is not None:
         rows.append([_button("▶️ Снять паузу всем детям", "hrra")])
     rows.append([_button("⏸ Пауза всем детям до утра", "hrza")])
     rows.append([_button("👥 Люди", "hrl")])
@@ -105,7 +119,7 @@ async def _person(person_id: int, notice: str = "") -> Card:
         [
             _button("⏸ 30 мин", f"hrz:{pid}:30"),
             _button("⏸ 1 ч", f"hrz:{pid}:60"),
-            _button("⏸ До утра", f"hrz:{pid}:m"),
+            _button("⏸ До утра", f"hrz:{pid}:{pauses.MORNING}"),
         ],
     ]
     if paused:
@@ -163,6 +177,29 @@ def _pause_all_kids(db: Any) -> str:
         return pauses.pause(db, pauses.ALL_KIDS, pauses.morning(db, pauses.ALL_KIDS))
     except pauses.PauseError as exc:
         return f"⚠️ {exc}"
+
+
+def _pause_kid(db: Any, person_id: int, choice: str) -> str:
+    """The same pause as «⏸ Пауза» → the child → «Все устройства»: it replaces the child's
+    pause, whatever its time, and the words are the same."""
+    target = pauses.Target("person", person_id)
+    try:
+        return pauses.pause(db, target, pauses.until_for(db, target, choice))
+    except pauses.PauseError as exc:
+        return f"⚠️ {exc}"
+
+
+def _resume_kid(db: Any, person_id: int) -> str:
+    """The same as «▶️ Включить сейчас» on the «⏸ Пауза» screen."""
+    return pauses.resume(db, pauses.Target("person", person_id))
+
+
+async def _pause_change(person_id: int, work: Any, *args: Any) -> Card:
+    try:
+        result = await _call(work, person_id, *args)
+    except LookupError:
+        return await _overview(GONE)
+    return await _person(person_id, result)
 
 
 # ---------- people ----------
@@ -257,7 +294,7 @@ def waiting_for_text(message: Message) -> bool:
 def _ask(cb: CallbackQuery, what: str, argument: str) -> None:
     if isinstance(cb.message, Message):
         deadline = time.monotonic() + INPUT_SECONDS
-        _typing[(cb.message.chat.id, cb.from_user.id)] = (what, argument, deadline)
+        waits.start(_typing, (cb.message.chat.id, cb.from_user.id), (what, argument, deadline))
 
 
 async def on_text(message: Message) -> None:
@@ -340,14 +377,12 @@ async def cb_limit_save(cb: CallbackQuery) -> None:
 
 
 async def cb_pause(cb: CallbackQuery) -> None:
-    pid, minutes = _parts(cb)
-    await _show(
-        cb, await _apply(int(pid), house_rules.pause, None if minutes == "m" else int(minutes))
-    )
+    pid, choice = _parts(cb)  # minutes, or pauses.MORNING
+    await _show(cb, await _pause_change(int(pid), _pause_kid, choice))
 
 
 async def cb_resume(cb: CallbackQuery) -> None:
-    await _show(cb, await _apply(int(_parts(cb)[0]), house_rules.resume))
+    await _show(cb, await _pause_change(int(_parts(cb)[0]), _resume_kid))
 
 
 async def cb_pause_all(cb: CallbackQuery) -> None:

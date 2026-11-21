@@ -458,14 +458,18 @@ def _desired_state(
 
     quota_spent = quota.exhausted(db, devices, now)  # {device_id: категории}
     # A parent's grant during a pause opens a window (services/time_grants.py): for its minutes
-    # the person's used-up limits let them through as well, or "+15 min" would open nothing.
-    granted = set(unlock.open_windows(db, now))
+    # the limits used up when it opened let the person through as well, or "+15 min" would open
+    # nothing; a limit that runs out during the window still holds.
+    windows = unlock.open_windows(db, now)
     self_ips = get_self_ips() if self_ips is None else self_ips
     for dev in devices:
         if not dev.ip or dev.ip in self_ips or dev.kind == "infra":
             continue  # the network's own equipment is never a client, whatever its flags say
         group = dev.group
-        spent = set() if dev.person_id in granted else quota_spent.get(dev.id, set())
+        spent = quota_spent.get(dev.id, set())
+        window = windows.get(dev.person_id) if dev.person_id is not None else None
+        if window is not None:
+            spent = {category for category in spent if not window.lets_through_limit(category)}
         if group in GROUP_ADDRESS_LISTS:
             lists[GROUP_ADDRESS_LISTS[group]].add(dev.ip)
         paused = dev.id in pauses and pauses[dev.id].holds

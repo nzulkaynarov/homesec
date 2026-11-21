@@ -13,7 +13,7 @@ from ..ai.tools import ToolError
 from ..models import DEVICE_KIND_LABELS, Device, Person
 from ..services import device_owners, device_triage, pauses, uptime
 from ..services.pauses import Target
-from . import access
+from . import access, waits
 from .texts import DANGER
 from .triage import vendor_of
 
@@ -33,7 +33,7 @@ SPEED_PRESETS = ("2M/2M", "5M/5M", "10M/10M", "20M/20M")
 Card = tuple[str, InlineKeyboardMarkup]
 
 # (chat, user) -> (device, section, page, deadline): who is typing a new name for what.
-_renames: dict[tuple[int, int], tuple[int, str, int, float]] = {}
+_renames: dict[tuple[int, int], tuple[int, str, int, float]] = waits.table()
 
 
 def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
@@ -446,7 +446,8 @@ async def _ask_name(cb: CallbackQuery, device_id: int, section: str, page: int) 
         return await _section(section, page, GONE)
     if isinstance(cb.message, Message):
         deadline = time.monotonic() + RENAME_SECONDS
-        _renames[(cb.message.chat.id, cb.from_user.id)] = (device_id, section, page, deadline)
+        key = (cb.message.chat.id, cb.from_user.id)
+        waits.start(_renames, key, (device_id, section, page, deadline))
     text = f"Как назвать «{view['name']}»? Напишите новое имя одним сообщением."
     cancel = _button("← Отмена", f"dmd:{device_id}:{section}:{page}")
     return text, InlineKeyboardMarkup(inline_keyboard=[[cancel]])

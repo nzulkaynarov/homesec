@@ -263,6 +263,7 @@ PROPOSALS = {
     "resume_internet": {"target": "Миша"},
     "set_quota": {"target": "kid", "category": "games", "minutes_per_day": 90, "days": "0,1,2,3,4"},
     "add_bonus_time": {"target": "Миша", "minutes": 30, "category": "video"},
+    "give_time": {"who": "Миша", "minutes": 30},
     "merge_devices": {"duplicate_id": "{gone}", "target_id": "{phone}"},
     "assign_device": {"device_id": "{phone}", "person_name": "Миша"},
     "set_device_kind": {"device_id": "{phone}", "kind": "shared"},

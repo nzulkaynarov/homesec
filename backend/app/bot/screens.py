@@ -150,7 +150,9 @@ def presence_html(status: dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def notes_html(notes: list[FamilyNote], total: int | None = None) -> str:
+def notes_html(
+    notes: list[FamilyNote], total: int | None = None, page: int = 0, pages: int = 1
+) -> str:
     if not notes:
         return paragraph(
             "📝 В семейной памяти пока пусто. Нажмите «➕ Добавить» "
@@ -161,6 +163,9 @@ def notes_html(notes: list[FamilyNote], total: int | None = None) -> str:
         author = f" ({esc(n.author)})" if n.author else ""
         items.append(f"<li>{esc(n.content)}{author} — <i>{n.created:%d.%m %H:%M}</i></li>")
     parts = [heading("📝 Семейная память"), "<ol>", *items, "</ol>"]
-    if total is not None and total > len(notes):
-        parts.append(f"<footer>Показаны последние {len(notes)} из {total}.</footer>")
+    if pages > 1:  # the notes screen has pages: «← Новее» and «Старее →»
+        parts.append(
+            f"<footer>Страница {page + 1} из {pages}, всего заметок: {total}. "
+            "Новые сверху.</footer>"
+        )
     return "".join(parts)

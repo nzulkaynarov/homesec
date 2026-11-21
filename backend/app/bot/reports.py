@@ -104,7 +104,8 @@ def _grant_sync(person_id: int, minutes: int, limits_only: bool) -> tuple[str, b
     try:
         person = s.get(Person, person_id)
         name = person.name if person else "Ребёнок"
-        give = time_grants.grant_limits if limits_only else time_grants.grant
+        # «➕» in the report is the same "yes" as under a request, and answers a waiting one.
+        give = time_grants.grant_limits if limits_only else time_grants.give
         try:
             return f"✅ {name}: {give(s, person_id, minutes, 'Добавлено родителем').text}.", True
         except time_grants.GrantError as exc:

@@ -21,9 +21,9 @@ from .. import db as dbmod
 from ..ai import client as ai_client
 from ..ai import orchestrator, tools
 from ..config import settings
-from ..models import GROUPS
+from ..models import GROUPS, Person
 from ..services import family as family_svc
-from ..services import house_rules, pauses
+from ..services import house_rules, pauses, time_grants
 from . import (
     alerts,
     charts_menu,
@@ -39,6 +39,7 @@ from . import (
     shared_menu,
     texts,
     triage,
+    waits,
 )
 from .access import AccessMiddleware
 from .texts import SUCCESS
@@ -75,6 +76,16 @@ def _find_device_id(query: str) -> int | None:
         s.close()
 
 
+def _find_person(query: str) -> tuple[int, str] | None:
+    """(id, name) of the person a parent named in a command, before any device is looked up."""
+    s = dbmod.session()
+    try:
+        person = tools.find_person(s, query)
+        return (person.id, person.name) if person else None
+    finally:
+        s.close()
+
+
 async def _do_tool(message: Message, name: str, args: dict) -> None:
     """Исполняет инструмент и отвечает результатом или текстом ошибки."""
     try:
@@ -103,7 +114,8 @@ def _movie_sync() -> str:
 _access = AccessMiddleware(onboarding.notify_owner_about_access_request, texts.START_UNAUTHORIZED)
 router.message.outer_middleware(_access)
 router.callback_query.outer_middleware(_access)
-notes_menu.register(router)  # first: its wait for a typed note ends on any other button
+waits.register(router)  # first: a menu button, a command or a press ends every typed wait
+notes_menu.register(router)
 triage.register(router)
 device_menu.register(router)
 pause_menu.register(router)
@@ -143,12 +155,15 @@ def _find_candidates(query: str) -> list[tuple[int, str]]:
         s.close()
 
 
-async def _pick_device(message: Message, query: str, tool: str, extra: str = "") -> None:
+async def _pick_device(message: Message, query: str, tool: str, extra: str = "",
+                       missing: str = "") -> None:
     """Когда имя не задано или неоднозначно — кнопки с кандидатами вместо
     ложного «не нашёл»."""
     candidates = await asyncio.to_thread(_find_candidates, query)
     if not candidates:
-        await message.answer(f"Не нашёл устройство «{query}». Все устройства — в «📱 Устройства».")
+        await message.answer(
+            missing or f"Не нашёл устройство «{query}». Все устройства — в «📱 Устройства»."
+        )
         return
     text = (f"Нашлось несколько устройств по «{query}» — выберите:" if query
             else "Выберите устройство:")
@@ -157,19 +172,30 @@ async def _pick_device(message: Message, query: str, tool: str, extra: str = "")
     await message.answer(text, reply_markup=device_pick_keyboard(candidates, tool, extra))
 
 
+NOBODY = (
+    "Не нашёл ни ребёнка, ни устройство «{}». "
+    "Дети — в «📋 Правила», устройства — в «📱 Устройства»."
+)
+
+
 async def _target_command(message: Message, tool_name: str, target: str,
                           args: dict, extra: str = "") -> None:
-    """Команды с целью-строкой (пауза/резюм/бонус): группа исполняется сразу,
-    устройство — с кнопками выбора при пустом или неоднозначном имени."""
+    """Команды с целью-строкой (пауза/резюм, бонус устройству): группа и ребёнок по
+    имени исполняются сразу, устройство — с кнопками выбора при пустом или
+    неоднозначном имени."""
     if target in GROUPS:
         await _do_tool(message, tool_name, {"target": target, **args})
         return
     if target:
+        person = await asyncio.to_thread(_find_person, target)
+        if person is not None:  # the same pause as «⏸ Пауза» → the child → «Все устройства»
+            await _do_tool(message, tool_name, {"target": person[1], **args})
+            return
         dev_id = await asyncio.to_thread(_find_device_id, target)
         if dev_id is not None:
             await _do_tool(message, tool_name, {"target": str(dev_id), **args})
             return
-    await _pick_device(message, target, tool_name, extra)
+    await _pick_device(message, target, tool_name, extra, NOBODY.format(target))
 
 
 @router.callback_query(F.data.startswith("pick:"))
@@ -279,8 +305,8 @@ async def cmd_pause(message: Message, command: CommandObject) -> None:
         return
     if not parts[-1].isdigit():
         await message.answer(
-            "Использование: /pause [кто] <минут>\n"
-            "Например: /pause дети 60 или /pause 30 — выбор кнопками\n"
+            "Использование: /pause [ребёнок, дети или устройство] <минут>\n"
+            "Например: /pause Миша 60, /pause дети 30 или /pause 30 — выбор кнопками\n"
             "Либо просто /pause — кнопки «⏸ Пауза»."
         )
         return
@@ -304,14 +330,37 @@ async def cmd_resume(message: Message, command: CommandObject) -> None:
 BONUS_WORDS = {"интернет": "internet", "игры": "games", "видео": "video", "соцсети": "social"}
 
 
+def _give_sync(person_id: int, minutes: int) -> str:
+    s = dbmod.session()
+    try:
+        person = s.get(Person, person_id)
+        if person is None:
+            return "Такого человека больше нет."
+        name = person.name
+        if person.role != "kid":
+            return f"{name} — взрослый, время дают только детям."
+        if not 1 <= minutes <= tools.GIVE_MAX_MINUTES:
+            return f"Время — от 1 до {tools.GIVE_MAX_MINUTES} минут."
+        try:
+            granted = time_grants.give(s, person_id, minutes, "Добавлено родителем")
+        except time_grants.GrantError as exc:
+            return f"⚠️ {exc}"
+        return f"✅ {name}: {granted.text}."
+    finally:
+        s.close()
+
+
 @router.message(Command("bonus"))
 async def cmd_bonus(message: Message, command: CommandObject) -> None:
+    """/bonus Миша 30 gives a child time the way «➕ 30 мин» does: through a pause or onto every
+    limit. A device keeps the old meaning: minutes onto one of its limits."""
     from ..services.quota import QUOTA_CATEGORIES
 
     parts = (command.args or "").split()
-    usage = ("Использование: /bonus [кто] <минут> [на что]\n"
-             "Например: /bonus Миша 30 игры (без имени — выбор кнопками)\n"
-             f"На что: {', '.join(BONUS_WORDS)} (по умолчанию интернет)")
+    usage = ("Использование: /bonus <ребёнок> <минут>\n"
+             "Например: /bonus Миша 30 — как кнопка «➕ 30 мин»\n"
+             "Для устройства можно назвать лимит: /bonus Планшет 30 игры "
+             f"({', '.join(BONUS_WORDS)})")
     category = "internet"
     if parts and parts[-1].lower() in QUOTA_CATEGORIES:
         category = parts.pop().lower()
@@ -321,6 +370,10 @@ async def cmd_bonus(message: Message, command: CommandObject) -> None:
         await message.answer(usage)
         return
     target, minutes = " ".join(parts[:-1]), int(parts[-1])
+    person = await asyncio.to_thread(_find_person, target) if target else None
+    if person is not None:
+        await message.answer(await asyncio.to_thread(_give_sync, person[0], minutes))
+        return
     await _target_command(message, "add_bonus_time", target,
                           {"minutes": minutes, "category": category},
                           extra=f":{minutes}:{category}")

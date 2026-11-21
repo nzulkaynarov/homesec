@@ -2,7 +2,7 @@
 
 "More time" used to mean "+N minutes of the internet quota" everywhere, but nobody has an internet
 quota, so a child read "approved" and nothing changed. Now the grant acts on what actually holds
-the child back: a pause opens for the minutes, and the limits used up today open with it for the
+the child back: a pause opens for the minutes, and the limits already used up open with it for the
 same minutes (enforcement lets a parent's window through them, services/unlock.py), every limit
 on the child's devices grows by them (their own, their group's or a device's: a person's bonus
 counts toward each of them), and at night nothing is added (the owner decided on 2026-11-11 that
@@ -16,7 +16,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import Device, Person, QuotaBonus, kv_set, log_event
-from . import house_rules, quota
+from . import bonus, house_rules, quota
 from .quota import QUOTA_CATEGORY_LABELS
 
 WHOLE_DAY = None  # "until the end of the day / the pause"
@@ -103,10 +103,11 @@ def _add_to_limits(
 def _through_pause(
     db: Session, person_id: int, minutes: int | None, paused: datetime, now: datetime
 ) -> str:
-    """Open a window through the pause; the used-up limits let the child through for the same
-    minutes, and the text says so, and what holds the child again once the window closes."""
+    """Open a window through the pause; the limits used up now let the child through for the
+    same minutes (a limit that runs out later still holds), and the text says so, and what holds
+    the child again once the window closes."""
     spent = spent_categories(db, person_id, now)
-    until = house_rules.open_through_pause(db, person_id, minutes)
+    until = house_rules.open_through_pause(db, person_id, minutes, spent)
     ends_with_pause = until >= paused  # then only a used-up limit holds the child again
     text = f"интернет открыт до {until:%H:%M}" + (", до конца паузы" if ends_with_pause else "")
     if spent:
@@ -142,6 +143,16 @@ def grant(
         names = ", ".join(f"«{name}»" for name in blocked)
         return Granted(f"паузы и лимитов нет; выключено вручную: {names}, время это не изменит", 0)
     return Granted("ограничений сейчас нет, интернет и так открыт", 0)
+
+
+def give(
+    db: Session, person_id: int, minutes: int | None, comment: str, now: datetime | None = None
+) -> Granted:
+    """A parent's "more time" said without a request's buttons (the AI, /bonus, «⏳ Квоты»): the
+    same grant, and the child's request still waiting is answered with it."""
+    granted = grant(db, person_id, minutes, comment, now)
+    bonus.approve_waiting(db, person_id, granted.minutes, now)
+    return granted
 
 
 def grant_limits(

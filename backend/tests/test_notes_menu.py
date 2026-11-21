@@ -7,7 +7,7 @@ import pytest
 from aiogram.filters import CommandObject
 from aiogram.types import CallbackQuery, Message
 
-from app.bot import access, handlers, notes_menu
+from app.bot import access, handlers, notes_menu, waits
 from app.bot.rich import to_plain
 from app.bot.texts import DANGER
 from app.db import Base, engine, session
@@ -128,10 +128,10 @@ def test_a_menu_button_or_command_ends_the_wait(db, text):
 def test_another_inline_button_ends_the_wait(db):
     """A name typed for a device or a time typed for a pause never lands in the notes."""
     _press_run(notes_menu.cb_add, notes_menu.ADD)
-    assert notes_menu.moved_on(_press("dmr:5:none:0")) is False  # never takes the press
+    assert waits.press_moved_on(_press("dmr:5:none:0")) is False  # never takes the press
     assert not notes_menu.waiting_for_note(_typed("Планшет Миши"))
-    _press_run(notes_menu.cb_add, notes_menu.ADD)
-    assert notes_menu.moved_on(_press(notes_menu.ADD)) is False
+    assert waits.press_moved_on(_press(notes_menu.ADD)) is False
+    _press_run(notes_menu.cb_add, notes_menu.ADD)  # the press that asks starts the wait again
     assert notes_menu.waiting_for_note(_typed("Код домофона 4589"))
 
 
@@ -172,11 +172,42 @@ def test_nothing_to_delete_goes_back_to_the_notes(db):
     assert "Удалять нечего." in text and notes_menu.ADD in buttons
 
 
-def test_the_screen_says_when_older_notes_are_not_shown(db):
-    for i in range(notes_menu.ON_SCREEN + 2):
+def test_older_notes_are_read_and_deleted_page_by_page(db):
+    """With more notes than one screen holds, the oldest one (a door code saved first) can still
+    be read and deleted: the screen and the delete list both have pages."""
+    oldest = family_svc.save_family_note(db, "Папа", "Код домофона 1234")
+    for i in range(notes_menu.ON_SCREEN + 1):
         family_svc.save_family_note(db, "Папа", f"Заметка {i}")
-    text, _ = _press_run(notes_menu.cb_screen, notes_menu.SCREEN)
-    assert f"Показаны последние {notes_menu.ON_SCREEN} из {notes_menu.ON_SCREEN + 2}." in text
+    text, buttons = _press_run(notes_menu.cb_screen, notes_menu.SCREEN)
+    assert "Страница 1 из 2, всего заметок: 12." in text and "Код домофона" not in text
+    assert buttons[f"{notes_menu.SCREEN}:1"] == "Старее →"
+
+    text, buttons = _press_run(notes_menu.cb_screen, f"{notes_menu.SCREEN}:1")
+    assert "Код домофона 1234" in text and "Страница 2 из 2" in text
+    assert buttons[notes_menu.SCREEN] == "← Новее"
+    assert buttons[f"{notes_menu.PICK}:1"] == "🗑 Удалить"
+
+    text, buttons = _press_run(notes_menu.cb_pick, f"{notes_menu.PICK}:1")
+    assert text == "Какую заметку удалить? Страница 2 из 2."
+    confirm = f"{notes_menu.CONFIRM}:{oldest.id}:1"
+    assert buttons[confirm] == "🗑 2. Код домофона 1234"
+    assert buttons[notes_menu.PICK] == "← Новее" and buttons[f"{notes_menu.SCREEN}:1"] == "← Назад"
+
+    text, buttons = _press_run(notes_menu.cb_confirm, confirm)
+    assert text == "Удалить заметку «Код домофона 1234»?"
+    assert buttons[f"{notes_menu.PICK}:1"] == "← Назад"
+    text, buttons = _press_run(notes_menu.cb_delete, f"{notes_menu.DELETE}:{oldest.id}:1")
+    assert "🗑 Заметка удалена." in text and "Заметка 0" in text  # the page it was on
+    assert db.query(FamilyNote).filter_by(id=oldest.id).count() == 0
+    text, buttons = _press_run(notes_menu.cb_screen, f"{notes_menu.SCREEN}:1")
+    assert "Страница 2 из 2" in text and "Заметка 0" in text
+
+
+def test_a_page_past_the_end_shows_the_last_one(db):
+    family_svc.save_family_note(db, "Папа", "Код домофона 4589")
+    text, buttons = _press_run(notes_menu.cb_screen, f"{notes_menu.SCREEN}:3")
+    assert "Код домофона 4589" in text and "Страница" not in text
+    assert set(buttons) == {notes_menu.ADD, notes_menu.PICK}
 
 
 def test_note_command_saves_at_once_or_asks_like_the_button(db):
@@ -203,12 +234,13 @@ def test_both_parents_manage_the_notes():
         assert access.check_callback("admin", data).allowed
 
 
-def test_the_wait_is_checked_before_any_other_handler():
+def test_the_waits_end_before_any_other_handler():
     messages = [h.callback for h in handlers.router.message.handlers]
-    assert messages[0] is notes_menu.on_note
+    assert messages[0] is waits._never_message
+    assert messages.index(notes_menu.on_note) < messages.index(handlers.free_text)
     assert messages.index(notes_menu.btn_notes) < messages.index(handlers.free_text)
     callbacks = [h.callback for h in handlers.router.callback_query.handlers]
-    assert callbacks[0] is notes_menu._never
+    assert callbacks[0] is waits._never_press
     assert {notes_menu.cb_add, notes_menu.cb_confirm, notes_menu.cb_delete} <= set(callbacks)
 
 

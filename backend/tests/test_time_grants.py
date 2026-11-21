@@ -1,9 +1,11 @@
 """A parent's "yes" changes what really holds the child back."""
 
+import asyncio
 from datetime import datetime, timedelta
 
 import pytest
 
+from app.ai import tools
 from app.db import Base, engine, session
 from app.models import (
     Device,
@@ -16,7 +18,15 @@ from app.models import (
     QuotaUsage,
     Rule,
 )
-from app.services import enforcement, quota, restrictions, time_grants, unlock
+from app.services import (
+    enforcement,
+    house_rules,
+    pauses,
+    quota,
+    restrictions,
+    time_grants,
+    unlock,
+)
 
 NOON = datetime(2026, 11, 13, 12, 0)
 EVERY_DAY = "0,1,2,3,4,5,6"
@@ -295,3 +305,115 @@ def test_a_window_does_not_open_bedtime(db):
                 start_time=start, end_time=end, enabled=True))
     db.commit()
     assert phone.ip in _state(db, datetime.now())["lists"]["hs-blocked"]
+
+
+def test_a_grant_during_a_pause_opens_only_the_limits_used_up_then(db):
+    """The hole: a grant during a pause switched off every limit for the whole window, also
+    the games limit that had 40 minutes left, so games stayed open after it ran out."""
+    kid = _kid(db)
+    phone = _phone(db, kid)
+    now = datetime.now()
+    db.add(Pause(target_type="person", target=str(kid.id), until=now + timedelta(hours=2)))
+    db.commit()
+    _spent(db, kid, phone, "internet", now)
+    db.add(Quota(target_type="person", target=str(kid.id), category="games", minutes_per_day=60,
+                 days=EVERY_DAY))
+    db.commit()
+    _used(db, phone, "games", 20, now)  # 40 minutes of games left when the parent says yes
+
+    said = time_grants.grant(db, kid.id, time_grants.WHOLE_DAY, "тест")
+    assert "исчерпанные лимиты (интернет целиком)" in said.text and "игры" not in said.text
+    window = unlock.window(db, kid.id)
+    assert window is not None and window.spent == frozenset({"internet"})
+    opened = _state(db, datetime.now())
+    assert phone.ip not in opened["lists"]["hs-blocked"]
+    assert PHONE_CLIENT not in opened["ag_clients"]
+
+    _used(db, phone, "games", 50, now)  # the games limit runs out during the window
+    held = _state(db, datetime.now())
+    assert phone.ip not in held["lists"]["hs-blocked"]  # the internet stays open
+    assert "roblox" in held["ag_clients"][PHONE_CLIENT]["blocked_services"]  # games do not
+
+
+def test_more_time_keeps_the_limits_the_window_already_opened(db):
+    kid = _kid(db)
+    now = datetime.now()
+    db.add(Pause(target_type="person", target=str(kid.id), until=now + timedelta(hours=3)))
+    db.commit()
+    unlock.open_window(db, kid.id, now + timedelta(minutes=30), ["games"])
+    time_grants.grant(db, kid.id, 15, "тест")
+    window = unlock.window(db, kid.id)
+    assert window is not None and window.spent == frozenset({"games"})
+
+
+def test_a_window_stored_before_the_limits_were_kept_opens_every_limit(db):
+    kid = _kid(db)
+    until = datetime.now() + timedelta(minutes=30)
+    db.add(KVState(key=f"{unlock.PREFIX}{kid.id}", value=until.isoformat(timespec="seconds")
+                   + ";" + datetime.now().isoformat()))
+    db.commit()
+    window = unlock.window(db, kid.id)
+    assert window is not None and window.spent is None
+    assert window.lets_through_limit("games") and window.lets_through_limit("internet")
+
+
+def _resume_rules_button(db, kid: Person) -> None:
+    from app.bot import rules_menu
+
+    rules_menu._typing.clear()
+    asyncio.run(rules_menu.cb_resume(_press(f"hrr:{kid.id}")))
+
+
+def _press(data: str):
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram.types import Message
+
+    cb = MagicMock(data=data, answer=AsyncMock())
+    cb.from_user.id = 1
+    cb.message = MagicMock(spec=Message, edit_text=AsyncMock())
+    cb.message.chat = MagicMock(id=1)
+    return cb
+
+
+RESUMES = {
+    "pause screen, the child": lambda db, kid: pauses.resume(db, pauses.Target("person", kid.id)),
+    "pause screen, all children": lambda db, kid: pauses.resume(db, pauses.ALL_KIDS),
+    "all pauses": lambda db, kid: house_rules.resume_all(db),
+    "rules screen": _resume_rules_button,
+    "AI": lambda db, kid: tools.run_tool(db, "resume_internet", {"target": kid.name}, "bot"),
+}
+
+
+@pytest.mark.parametrize("way", RESUMES)
+def test_lifting_the_pause_gives_the_limits_back(db, way):
+    """The window outlived the pause: after «▶️ Снять паузу» the used-up limits stayed open
+    until the window's end, up to 12 hours, and no screen said why."""
+    kid = _kid(db)
+    phone = _phone(db, kid)
+    now = datetime.now()
+    db.add(Pause(target_type="person", target=str(kid.id), until=now + timedelta(hours=2)))
+    db.commit()
+    _spent(db, kid, phone, "internet", now)
+    time_grants.grant(db, kid.id, time_grants.WHOLE_DAY, "тест")
+    assert phone.ip not in _state(db, datetime.now())["lists"]["hs-blocked"]
+
+    RESUMES[way](db, kid)
+    db.expire_all()
+    assert unlock.open_until(db, kid.id) is None, way
+    after = _state(db, datetime.now())
+    assert after["quota_blocked"] == {phone.ip: phone}, way  # the limit holds and is told
+
+
+def test_lifting_a_device_pause_keeps_the_window_while_the_child_is_paused(db):
+    kid = _kid(db)
+    phone = _phone(db, kid)
+    now = datetime.now()
+    db.add(Pause(target_type="person", target=str(kid.id), until=now + timedelta(hours=2)))
+    db.add(Pause(target_type="device", target=str(phone.id), until=now + timedelta(hours=1)))
+    db.commit()
+    time_grants.grant(db, kid.id, 30, "тест")
+    pauses.resume(db, pauses.Target("device", phone.id))
+    assert unlock.open_until(db, kid.id) is not None  # the child's own pause is still there
+    pauses.resume(db, pauses.Target("person", kid.id))
+    assert unlock.open_until(db, kid.id) is None

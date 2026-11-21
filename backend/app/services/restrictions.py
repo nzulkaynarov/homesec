@@ -44,9 +44,10 @@ def restriction_for_ip(db: Session, ip: str) -> dict | None:
     if paused is not None:
         return {"kind": "pause", "until": paused, **base}
 
-    opened = dev.person_id is not None and unlock.open_until(db, dev.person_id, now) is not None
+    window = unlock.window(db, dev.person_id, now) if dev.person_id is not None else None
+    opened = window is not None and window.lets_through_limit("internet")
     spent = any(r["category"] == "internet" and r["used"] >= r["limit"] for r in quota_rows)
-    if spent and not opened:  # a parent's open window lets used-up limits through
+    if spent and not opened:  # a parent's window lets the limits used up when it opened through
         return {"kind": "quota", **base}
 
     for rule in db.scalars(select(Rule)):

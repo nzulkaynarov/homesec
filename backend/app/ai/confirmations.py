@@ -181,6 +181,26 @@ def _bonus(db: Session, args: dict, now: datetime) -> list[str]:
     return lines
 
 
+def _give(db: Session, args: dict, now: datetime) -> list[str]:
+    who = str(args.get("who") or "").strip()
+    person = _person(db, who)
+    if who.casefold() in pauses.KIDS_WORDS:
+        whom = GROUP_WORDS["kid"]
+    elif person is not None:
+        whom = person.name
+    else:
+        whom = f"«{who}» (такого не нашёл)" if who else "не указано"
+    minutes = _int(args.get("minutes"))
+    whole = "до конца паузы, без паузы — весь день без лимитов"
+    how = f"+{duration(minutes)}" if minutes > 0 else whole
+    return [
+        "➕ Дать ещё времени",
+        f"Кому: {whom}",
+        f"Сколько: {how}",
+        "Во время паузы интернет откроется на это время, без паузы время добавится к лимитам.",
+    ]
+
+
 def _merge(db: Session, args: dict, now: datetime) -> list[str]:
     duplicate = _device_words(_device(db, args.get("duplicate_id")))
     target = _device_words(_device(db, args.get("target_id")))
@@ -228,6 +248,7 @@ DESCRIBERS: dict[str, Callable[[Session, dict, datetime], list[str]]] = {
     "resume_internet": _resume,
     "set_quota": _quota,
     "add_bonus_time": _bonus,
+    "give_time": _give,
     "merge_devices": _merge,
     "assign_device": _assign,
     "set_device_kind": _kind,

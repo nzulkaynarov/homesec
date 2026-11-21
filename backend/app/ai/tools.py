@@ -40,7 +40,16 @@ from ..models import (
     kv_set,
     log_event,
 )
-from ..services import adguard, enforcement, house_rules, mikrotik, pause_state, pauses, plain
+from ..services import (
+    adguard,
+    enforcement,
+    house_rules,
+    mikrotik,
+    pause_state,
+    pauses,
+    plain,
+    time_grants,
+)
 from ..services import family as family_svc
 from ..services import quota as quota_svc
 from ..services.device_links import move_device_rows
@@ -519,7 +528,7 @@ def pause_internet(
         db.add(Pause(target_type="group", target=t, until=until_at, reason=why))
         db.commit()
         return f"⏸ {GROUP_LABELS[t]}: без интернета до {until_at:%H:%M}"
-    elif (person := _find_person(db, t)) is not None:
+    elif (person := find_person(db, t)) is not None:
         if person.role == "adult":
             raise ToolError("Взрослых ставить на паузу нельзя")
         chosen = pauses.Target("person", person.id)
@@ -597,7 +606,7 @@ def resume_internet(
         if not removed:
             raise ToolError(f"Активных пауз для «{GROUP_LABELS[t]}» нет")
         return f"Пауза снята: {GROUP_LABELS[t]}"
-    if (person := _find_person(db, t)) is not None:
+    if (person := find_person(db, t)) is not None:
         own = pauses.Target("person", person.id)
         if not pauses.own_pauses(db, own):
             raise ToolError(f"У «{person.name}» своей паузы нет")
@@ -607,6 +616,8 @@ def resume_internet(
         raise _not_found(target)
     name = device_label(dev)
     removed = _delete_pauses(db, "device", str(dev.id))
+    if dev.person_id is not None:
+        house_rules.close_window_if_free(db, dev.person_id)
     still = pause_state.device_pauses(db, [dev]).get(dev.id)
     if still is not None and still.holds:
         holder = (
@@ -623,7 +634,7 @@ def resume_internet(
     return f"Пауза снята: {name}"
 
 
-def _find_person(db: Session, name: str) -> Person | None:
+def find_person(db: Session, name: str) -> Person | None:
     key = name.strip().casefold()
     if not key:
         return None
@@ -667,6 +678,8 @@ UNKNOWN_LIMIT = "Не понял, какой лимит: " + ", ".join(
 def _parse_quota_target(db: Session, target: str) -> tuple[str, str, str]:
     """-> (target_type, target, человекочитаемое имя)."""
     t = target.strip()
+    if t.casefold() in pauses.KIDS_WORDS:  # «дети», as the confirmation reads «все дети»
+        t = "kid"
     if t in GROUPS:
         return "group", t, GROUP_LABELS[t]
     person = db.scalar(select(Person).where(Person.name.ilike(t)))
@@ -768,6 +781,56 @@ def add_bonus_time(
     db.commit()
     return (f"Бонус +{minutes} мин ({quota_svc.QUOTA_CATEGORY_LABELS[category]}) "
             f"для {label} на сегодня" + (f": {comment}" if comment else ""))
+
+
+GIVE_MAX_MINUTES = 720
+
+
+def _children(db: Session, who: str) -> list[Person]:
+    """The children a parent named: one by name, or every child for «дети»."""
+    key = who.strip()
+    if key.casefold() in pauses.KIDS_WORDS:
+        children = pauses.kids(db)
+        if not children:
+            raise ToolError("В HomeSec пока нет детей.")
+        return children
+    person = find_person(db, key)
+    if person is None:
+        known = ", ".join(p.name for p in pauses.kids(db)) or "детей в списке нет"
+        raise ToolError(f"Не нашёл ребёнка «{key}». Дети: {known}.")
+    if person.role != "kid":
+        raise ToolError(f"{person.name} — взрослый, время дают только детям.")
+    return [person]
+
+
+@tool(mutating=True)
+def give_time(
+    db: Session,
+    who: Annotated[str, "имя ребёнка; «дети» — всем детям"],
+    minutes: Annotated[
+        int, "сколько минут дать (1–720); 0 — до конца паузы, а без паузы лимиты сняты на сегодня"
+    ] = 0,
+) -> str:
+    """Даёт ребёнку ещё времени — то же, что кнопки «➕ 15 мин» и ответ на просьбу ребёнка:
+    во время паузы открывает интернет на эти минуты (и исчерпанные лимиты тоже), без паузы
+    добавляет минуты ко всем дневным лимитам ребёнка; ночью время не добавляется. Используй,
+    когда просят «дай/добавь Мише ещё 30 минут». Просьба ребёнка о времени, если ждёт ответа,
+    закрывается этим же ответом."""
+    minutes = int(minutes)
+    if not 0 <= minutes <= GIVE_MAX_MINUTES:
+        raise ToolError(f"Время — от 1 до {GIVE_MAX_MINUTES} минут.")
+    given = time_grants.WHOLE_DAY if minutes == 0 else minutes
+    lines, refused = [], []
+    for child in _children(db, who):
+        try:
+            granted = time_grants.give(db, child.id, given, "Добавлено родителем")
+        except time_grants.GrantError as exc:
+            refused.append(f"{child.name}: {exc}")
+            continue
+        lines.append(f"✅ {child.name}: {granted.text}.")
+    if not lines:
+        raise ToolError(" ".join(refused))
+    return "\n".join(lines + [f"⚠️ {line}" for line in refused])
 
 
 @tool(mutating=True)

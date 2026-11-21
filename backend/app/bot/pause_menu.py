@@ -13,7 +13,7 @@ from .. import db as dbmod
 from ..models import Device, Person
 from ..services import house_rules, pauses
 from ..services.pauses import ALL_KIDS, MORNING, PRESET_MINUTES, PauseError, Target
-from . import access
+from . import access, waits
 
 BTN_PAUSE = "⏸ Пауза"
 CUSTOM_SECONDS = 300
@@ -26,7 +26,7 @@ ASK_TIME = (
 Card = tuple[str, InlineKeyboardMarkup]
 
 # (chat, user) -> (target code, deadline): who is typing a time for what.
-_custom: dict[tuple[int, int], tuple[str, float]] = {}
+_custom: dict[tuple[int, int], tuple[str, float]] = waits.table()
 
 
 def _button(text: str, data: str) -> InlineKeyboardButton:
@@ -233,6 +233,8 @@ async def cb_kid(cb: CallbackQuery) -> None:
 
 
 async def cb_picker(cb: CallbackQuery) -> None:
+    if isinstance(cb.message, Message):  # "← Отмена" while typing a time lands here
+        _custom.pop((cb.message.chat.id, cb.from_user.id), None)
     (code,) = _parts(cb)
     await _show(cb, await picker(code))
 
@@ -253,7 +255,8 @@ async def cb_custom(cb: CallbackQuery) -> None:
         await _show(cb, await overview(GONE))
         return
     if isinstance(cb.message, Message):
-        _custom[(cb.message.chat.id, cb.from_user.id)] = (code, time.monotonic() + CUSTOM_SECONDS)
+        key = (cb.message.chat.id, cb.from_user.id)
+        waits.start(_custom, key, (code, time.monotonic() + CUSTOM_SECONDS))
     cancel = InlineKeyboardMarkup(inline_keyboard=[[_button("← Отмена", f"pzt:{code}")]])
     await _show(cb, (ASK_TIME.format(name=name), cancel))
 

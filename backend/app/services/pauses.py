@@ -221,7 +221,9 @@ def own_pauses(db: Session, target: Target) -> list[Pause]:
 
 
 def resume(db: Session, target: Target) -> str:
-    """Lift the pauses set on the target itself; a bedtime or a limit keeps working."""
+    """Lift the pauses set on the target itself; a bedtime or a limit keeps working. A window a
+    parent opened through the pause closes once nothing pauses the person, so their limits hold
+    again."""
     if target.kind == "kids":
         removed = house_rules.resume_kids(db)
         kv_set(db, "reconcile_asap", "1")
@@ -232,6 +234,10 @@ def resume(db: Session, target: Target) -> str:
     rows = own_pauses(db, target)
     for row in rows:
         db.delete(row)
+    db.flush()
+    person_id = target.id if target.kind == "person" else _device(db, target.id).person_id
+    if person_id is not None:
+        house_rules.close_window_if_free(db, person_id)
     if not rows:
         return f"У «{name}» паузы не было"
     _applied(db, f"Пауза снята: {name}")

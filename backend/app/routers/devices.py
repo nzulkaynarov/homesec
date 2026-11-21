@@ -17,7 +17,7 @@ from ..models import (
     QuotaBonus,
     log_event,
 )
-from ..services import device_owners, mikrotik, pause_state, pauses, quota
+from ..services import device_owners, house_rules, mikrotik, pause_state, pauses, quota
 from ..services.enforcement import reconcile
 from ..services.quota import QUOTA_CATEGORIES
 from ..templates_env import templates
@@ -199,6 +199,8 @@ async def unpause_device(
         was_blocked = dev.blocked_manual
         dev.blocked_manual = False
         db.commit()
+        if dev.person_id is not None:  # a window opened through the pause has nothing to open
+            house_rules.close_window_if_free(db, dev.person_id)
         log_event(db, "unpause",
                   f"Разблокировано: {dev.name}" if was_blocked else f"Пауза снята: {dev.name}")
     tasks.add_task(_reconcile_bg)

@@ -4,6 +4,7 @@ The enforcement core already understands rules, quotas and pauses aimed at a
 person (all of their devices together); this module is what the bot's buttons
 call, so parents can run the house without the LAN-only panel or the AI."""
 
+from collections.abc import Iterable
 from datetime import datetime, timedelta
 from typing import Any
 
@@ -180,21 +181,27 @@ def _kids(db: Session) -> list[Person]:
     return list(db.scalars(select(Person).where(Person.role == "kid")))
 
 
-def kids_paused_until(db: Session, now: datetime | None = None) -> datetime | None:
-    """While every child is paused as a whole, the moment the first of them comes back.
+def kids_pause_ends(db: Session, now: datetime | None = None) -> dict[str, datetime]:
+    """While every child is paused as a whole, when each of them comes back: {name: end};
+    empty when some child is not paused.
 
     "Pause all children" is one pause per child (services/pauses.py), so one child can be let
     out and grants work per child; a pause on the whole children group, which the AI and /pause
     set before, still counts for each child until it ends. A pause on one device is not a pause
     on the child here."""
     now = now or datetime.now()
-    ends = []
-    for kid in _kids(db):
+    ends: dict[str, datetime] = {}
+    for kid in sorted(_kids(db), key=lambda kid: kid.name):
         whole = [p.until for p in _pauses_for(db, kid, now) if p.target_type != "device"]
         if not whole:
-            return None
-        ends.append(max(whole))
-    return min(ends, default=None)
+            return {}
+        ends[kid.name] = max(whole)
+    return ends
+
+
+def kids_paused_until(db: Session, now: datetime | None = None) -> datetime | None:
+    """While every child is paused as a whole, the moment the first of them comes back."""
+    return min(kids_pause_ends(db, now).values(), default=None)
 
 
 def group_pauses(db: Session, now: datetime | None = None) -> list[Pause]:
@@ -231,14 +238,18 @@ def split_group_pause(db: Session, now: datetime | None = None) -> None:
 
 
 def resume_kids(db: Session) -> int:
-    """Lift every pause that keeps children offline: group, person and device ones."""
+    """Lift every pause that keeps children offline: group, person and device ones. A window a
+    parent opened through them closes too, so the children's limits hold again."""
     now = datetime.now()
     rows: dict[int, Pause] = {p.id: p for p in group_pauses(db, now)}
-    for kid in _kids(db):
+    kids = _kids(db)
+    for kid in kids:
         rows.update({p.id: p for p in _pauses_for(db, kid, now)})
     for row in rows.values():
         db.delete(row)
     db.commit()
+    for kid in kids:
+        unlock.close_window(db, kid.id)
     if rows:
         _changed(db, f"Сняты паузы детей: {len(rows)}")
     return len(rows)
@@ -258,31 +269,11 @@ def wake_time(db: Session, person_id: int, now: datetime | None = None) -> datet
     return moment if moment > now else moment + timedelta(days=1)
 
 
-def pause(db: Session, person_id: int, minutes: int | None) -> str:
-    """Pause all of the person's devices; None means until they wake up."""
-    person = _person(db, person_id)
-    now = datetime.now()
-    until = wake_time(db, person_id, now) if minutes is None else now + timedelta(minutes=minutes)
-    db.add(Pause(target_type="person", target=str(person_id), until=until, reason="бот"))
-    db.commit()
-    _changed(db, f"Пауза для {person.name} до {until:%H:%M}")
-    return f"⏸ Пауза до {until:%H:%M}"
-
-
-def resume(db: Session, person_id: int) -> str:
-    """Lift every pause that keeps this person offline; the other children stay paused."""
-    person = _person(db, person_id)
-    now = datetime.now()
-    if person.role == "kid":
-        split_group_pause(db, now)
-    rows = _pauses_for(db, person, now)
-    for row in rows:
-        db.delete(row)
-    db.commit()
-    removed = len(rows)
-    if removed:
-        _changed(db, f"Пауза для {person.name} снята")
-    return "▶️ Пауза снята" if removed else "Паузы не было"
+def close_window_if_free(db: Session, person_id: int, now: datetime | None = None) -> None:
+    """A window opens a pause: once no pause holds the person, it closes, so the limits it let
+    through hold again instead of staying open until the window's end."""
+    if paused_until(db, person_id, now) is None:
+        unlock.close_window(db, person_id)
 
 
 def resume_all(db: Session) -> int:
@@ -290,6 +281,7 @@ def resume_all(db: Session) -> int:
     for row in rows:
         db.delete(row)
     db.commit()
+    unlock.close_all(db)
     if rows:
         _changed(db, f"Сняты все паузы: {len(rows)}")
     return len(rows)
@@ -365,22 +357,28 @@ def restriction(db: Session, person_id: int, now: datetime | None = None) -> dic
     return None
 
 
-def open_through_pause(db: Session, person_id: int, minutes: int | None) -> datetime:
+def open_through_pause(
+    db: Session, person_id: int, minutes: int | None, spent: Iterable[str] = ()
+) -> datetime:
     """Let the person through their pauses for some minutes; None means until
     the pause ends. The pause stays and takes over again when the window closes.
-    More time never takes time away: with a window already open the minutes
-    count from its end, and the window never closes earlier than it would."""
+    `spent` are the limits used up now: the window lets them through too, and
+    only them. More time never takes time away: with a window already open the
+    minutes count from its end, the window never closes earlier than it would,
+    and the limits it already let through stay open."""
     person = _person(db, person_id)
     now = datetime.now()
     paused = paused_until(db, person_id, now)
     if paused is None:
         raise RuleError("Паузы сейчас нет, интернет и так открыт")
-    opened = unlock.open_until(db, person_id, now)
+    current = unlock.window(db, person_id, now)
+    opened = current.until if current is not None else None
     start = now if opened is None else max(now, opened)
     until = paused if minutes is None else min(paused, start + timedelta(minutes=minutes))
     if opened is not None:
         until = max(until, opened)
-    until = unlock.open_window(db, person_id, until)
+    kept = set(spent) | set(current.spent or ()) if current is not None else set(spent)
+    until = unlock.open_window(db, person_id, until, kept)
     _changed(db, f"Интернет для {person.name} открыт до {until:%H:%M} поверх паузы")
     return until
 

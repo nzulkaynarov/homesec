@@ -181,12 +181,13 @@ def save_family_note(db: Session, author: str, content: str) -> FamilyNote:
     return note
 
 
-def get_family_notes(db: Session, limit: int = 10) -> list[FamilyNote]:
-    """Возвращает последние семейные заметки."""
+def get_family_notes(db: Session, limit: int = 10, offset: int = 0) -> list[FamilyNote]:
+    """Возвращает последние семейные заметки; offset skips that many newer ones (paging)."""
     return list(
         db.scalars(
             select(FamilyNote)
-            .order_by(FamilyNote.created.desc())
+            .order_by(FamilyNote.created.desc(), FamilyNote.id.desc())
+            .offset(offset)
             .limit(limit)
         )
     )

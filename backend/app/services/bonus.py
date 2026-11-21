@@ -80,3 +80,20 @@ def resolve(db: Session, req: BonusRequest, status: str, minutes: int = 0) -> No
     req.minutes = minutes
     req.resolved = datetime.now()
     db.commit()
+
+
+def approve_waiting(db: Session, person_id: int, minutes: int,
+                    now: datetime | None = None) -> int:
+    """A parent gave the child time without the request's buttons (the AI, /bonus, «⏳ Квоты»):
+    the child's requests still waiting get that answer, so Luna tells the child and a later press
+    on the request says it is answered instead of giving the time twice. Returns how many."""
+    now = now or datetime.now()
+    waiting = list(db.scalars(
+        select(BonusRequest)
+        .join(Device, Device.id == BonusRequest.device_id)
+        .where(Device.person_id == person_id, BonusRequest.status == "pending",
+               BonusRequest.created > now - REQUEST_TTL)
+    ))
+    for req in waiting:
+        resolve(db, req, "approved", minutes)
+    return len(waiting)

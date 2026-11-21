@@ -118,9 +118,10 @@ def test_pause_until_morning_follows_the_bedtime(db):
     friday_evening = datetime(2026, 11, 13, 20, 0)
     assert house_rules.wake_time(db, kid.id, friday_evening) == datetime(2026, 11, 14, 7, 0)
     text, actions = _run(rules_menu.cb_pause, f"hrz:{kid.id}:m")
-    assert "⏸ Пауза до" in text and f"hrr:{kid.id}" in actions
+    assert "⏸ Алимбек: без интернета до" in text and f"hrr:{kid.id}" in actions
     assert house_rules.paused_until(db, kid.id) is not None
-    _run(rules_menu.cb_resume, f"hrr:{kid.id}")
+    text, _ = _run(rules_menu.cb_resume, f"hrr:{kid.id}")
+    assert text.startswith("▶️ Алимбек: интернет снова включён")
     assert house_rules.paused_until(db, kid.id) is None
 
 
@@ -239,7 +240,7 @@ def test_a_group_pause_left_from_before_shows_up_and_lets_one_child_out(db):
     assert f"⏸ Пауза до {until:%H:%M}" in text  # the child's own summary shows it too
 
     text, actions = _run(rules_menu.cb_resume, f"hrr:{kid.id}")
-    assert "▶️ Пауза снята" in text and "всем детям" not in text
+    assert "▶️ Алимбек: интернет снова включён" in text and "всем детям" not in text
     assert house_rules.paused_until(db, kid.id) is None
     assert house_rules.paused_until(db, sister.id) == until
     rows = [(p.target_type, p.target, p.created) for p in db.query(Pause)]
@@ -264,6 +265,26 @@ def test_all_children_banner_and_button_follow_the_pause_for_all(db):
     assert text.startswith("У детей паузы не было")
 
 
+def test_children_paused_until_different_times_are_not_one_pause_for_all(db):
+    """The banner said «пауза всем детям до 15:00» while one child was off until morning."""
+    from datetime import timedelta
+
+    kid, sister = _kid(db), _kid(db, "Аня")
+    soon = datetime.now() + timedelta(hours=1)
+    late = datetime.now() + timedelta(hours=10)
+    db.add(Pause(target_type="person", target=str(kid.id), until=soon))
+    db.add(Pause(target_type="person", target=str(sister.id), until=late))
+    db.commit()
+    text, actions = _run(rules_menu.cb_overview, "hr")
+    assert f"⏸ Все дети на паузе, первым выйдет Алимбек в {soon:%H:%M}" in text
+    assert "пауза всем детям до" not in text and "hrra" in actions
+
+    db.query(Pause).filter_by(target=str(sister.id)).update({"until": soon})
+    db.commit()
+    text, _ = _run(rules_menu.cb_overview, "hr")
+    assert f"⏸ Сейчас пауза всем детям до {soon:%H:%M}" in text
+
+
 def test_a_pause_on_one_child_is_not_a_pause_for_all(db):
     kid = _kid(db)
     _kid(db, "Аня")
@@ -284,5 +305,35 @@ def test_device_pause_counts_for_its_owner(db):
     )
     db.commit()
     assert house_rules.paused_until(db, kid.id) is not None
-    house_rules.resume(db, kid.id)
+    text, _ = _run(rules_menu.cb_resume, f"hrr:{kid.id}")
+    assert text.startswith("▶️ Алимбек: интернет снова включён")
     assert house_rules.paused_until(db, kid.id) is None
+
+
+def test_a_childs_pause_here_replaces_the_one_before_as_on_the_pause_screen(db):
+    """The hole: all children were paused until morning; «⏸ 30 мин» on one child said «Пауза до
+    15:30», but added a pause next to the old one, and the child stayed off until morning."""
+    from datetime import timedelta
+
+    from app.bot import pause_menu
+    from app.services import pauses
+
+    kid, sister = _kid(db), _kid(db, "Аня")
+    morning = pauses.pause(db, pauses.ALL_KIDS, datetime.now() + timedelta(hours=10))
+    assert morning.startswith("⏸ Все дети")
+    text, _ = _run(rules_menu.cb_pause, f"hrz:{kid.id}:30")
+    db.expire_all()
+    until = house_rules.paused_until(db, kid.id)
+    assert until is not None and until - datetime.now() < timedelta(minutes=31)
+    assert text.startswith(f"⏸ Алимбек: без интернета до {until:%H:%M}")
+    assert f"⏸ Пауза до {until:%H:%M}" in text  # the summary says the same time
+    assert db.query(Pause).filter_by(target_type="person", target=str(kid.id)).count() == 1
+    assert house_rules.paused_until(db, sister.id) is not None  # the others stay paused
+
+    db.query(Pause).delete()
+    db.commit()
+    screens = {
+        "rules": _run(rules_menu.cb_pause, f"hrz:{kid.id}:60")[0].split("\n")[0],
+        "pause": _run(pause_menu.cb_set, f"pzs:p{kid.id}:60")[0].split("\n")[0],
+    }
+    assert screens["rules"] == screens["pause"], screens  # one action, one wording
