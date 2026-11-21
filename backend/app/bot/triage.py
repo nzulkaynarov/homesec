@@ -2,6 +2,7 @@
 
 import asyncio
 import logging
+from datetime import datetime
 from typing import Any
 
 from aiogram import F, Router
@@ -78,6 +79,15 @@ def card_keyboard(device_id: int, index: int, total: int) -> InlineKeyboardMarku
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
+def _when(iso: str) -> str:
+    """'2026-11-21T14:05:33' as '21.11 в 14:05'; anything else as it is."""
+    try:
+        moment = datetime.fromisoformat(iso)
+    except ValueError:
+        return iso.replace("T", " ")
+    return f"{moment:%d.%m} в {moment:%H:%M}"
+
+
 def card_text(group: dict[str, Any], index: int, total: int, vendor: str | None) -> str:
     lines = [f"🗂 Разбор устройств: {index + 1} из {total}", "", f"«{group['name']}»"]
     if group["count"] > 1:
@@ -89,9 +99,7 @@ def card_text(group: dict[str, Any], index: int, total: int, vendor: str | None)
         lines.append("Адрес приватный, производителя не определить.")
     if vendor:
         lines.append(f"Производитель: {vendor}")
-    if group["ip"]:
-        lines.append(f"Последний адрес в сети: {group['ip']}")
-    lines.append(f"Последняя новая запись: {group['last_seen'].replace('T', ' ')}")
+    lines.append(f"Последний раз появилось: {_when(group['last_seen'])}")
     if group["owners"]:
         names = ", ".join(owner["name"] for owner in group["owners"])
         lines.append(f"С таким именем уже есть у: {names}")

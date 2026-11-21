@@ -202,7 +202,7 @@ def test_speed_preset_from_the_device_card(db):
     assert f"dmvs:{device.id}:1:none:0" in actions
     text, _ = _run(device_menu.cb_speed, f"dmvs:{device.id}:1:none:0")
     db.expire_all()
-    assert db.get(Device, device.id).speed_limit == "5M/5M" and "🐢 Скорость: 5M/5M" in text
+    assert db.get(Device, device.id).speed_limit == "5M/5M" and "🐢 Скорость: до 5 Мбит/с" in text
     _run(device_menu.cb_speed, f"dmvs:{device.id}:-1:none:0")
     db.expire_all()
     assert db.get(Device, device.id).speed_limit == ""

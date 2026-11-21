@@ -11,7 +11,7 @@ from sqlalchemy import select
 from .. import db as dbmod
 from ..ai.tools import ToolError
 from ..models import DEVICE_KIND_LABELS, Device, Person
-from ..services import device_owners, device_triage, pauses, uptime
+from ..services import device_owners, device_triage, pauses, plain, uptime
 from ..services.pauses import Target
 from . import access, waits
 from .texts import DANGER
@@ -190,7 +190,7 @@ async def _device(device_id: int, section: str, page: int, notice: str = "") -> 
     view = await _call(_device_view, device_id)
     if view is None:
         return await _section(section, page, GONE)
-    lines = [view["name"], f"Тип: {view['kind_label']}", f"Владелец: {view['owner']}"]
+    lines = [view["name"], f"Что это: {view['kind_label']}", f"Владелец: {view['owner']}"]
     if view["hostname"] and view["hostname"] != view["name"]:
         lines.append(f"Имя в сети: {view['hostname']}")
     lines.append(f"В сети: {view['seen']}")
@@ -201,7 +201,7 @@ async def _device(device_id: int, section: str, page: int, notice: str = "") -> 
     if view["paused_until"] is not None:
         lines.append(f"⏸ Без интернета до {view['paused_until']:%H:%M}")
     if view["speed"]:
-        lines.append(f"🐢 Скорость: {view['speed']}")
+        lines.append(f"🐢 Скорость: {plain.speed_words(view['speed'])}")
     if view["watched"] and not view["is_pi"]:
         lines.append("🔔 Сообщу, если пропадёт из сети")
     if not view["random"]:
@@ -408,7 +408,7 @@ async def _speed_pick(device_id: int, section: str, page: int) -> Card:
     rows = [buttons[:2], buttons[2:]]
     rows.append([_button("Без ограничения", f"dmvs:{device_id}:-1:{section}:{page}")])
     rows.append([_button("← Назад", f"dmd:{device_id}:{section}:{page}")])
-    now = view["speed"] or "без ограничения"
+    now = plain.speed_words(view["speed"] or "")
     return f"Скорость «{view['name']}» сейчас: {now}. Какую поставить?", InlineKeyboardMarkup(
         inline_keyboard=rows
     )
