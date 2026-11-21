@@ -13,6 +13,7 @@ from .. import db as dbmod
 from ..ai.tools import ToolError
 from ..models import Person
 from ..services import device_triage
+from .texts import SUCCESS
 
 log = logging.getLogger("homesec.bot.triage")
 
@@ -160,7 +161,9 @@ async def _choose(device_id: int, destination: str, index: int) -> Card:
         inline_keyboard=[
             [
                 InlineKeyboardButton(
-                    text="✅ Да", callback_data=f"trgy:{device_id}:{destination}:{index}"
+                    text="✅ Да",
+                    callback_data=f"trgy:{device_id}:{destination}:{index}",
+                    style=SUCCESS,
                 )
             ],
             [InlineKeyboardButton(text="← Назад", callback_data=f"trg:{index}")],

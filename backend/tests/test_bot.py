@@ -611,3 +611,16 @@ def test_rich_html_escapes_what_people_type():
     cell = table([("<b>Ваня & Co</b>", "*x*")])
     assert "&lt;b&gt;Ваня &amp; Co&lt;/b&gt;" in cell
     assert to_plain(cell) == "<b>Ваня & Co</b> · *x*"
+
+
+def test_button_colours_mean_the_same_everywhere():
+    from app.bot import alerts, kid_menu
+
+    def styles(markup):
+        return {b.text: b.style for row in markup.inline_keyboard for b in row}
+
+    request = styles(alerts.bonus_request_keyboard(1))
+    assert request["🚫 Отказать"] == texts.DANGER and request["➕ 15 мин"] == texts.SUCCESS
+    direct = styles(kid_menu.bonus_request_direct_keyboard(1))
+    assert direct["🚫 Отказать"] == texts.DANGER and direct["➕ 1 час"] == texts.SUCCESS
+    assert styles(alerts.new_device_keyboard(1, []))["⛔ Блокировать"] == texts.DANGER

@@ -13,6 +13,7 @@ from ..config import settings
 from ..models import Person
 from ..services import family as family_svc
 from . import common, texts
+from .texts import DANGER
 
 log = logging.getLogger("homesec.bot.onboarding")
 
@@ -35,7 +36,11 @@ def access_request_keyboard(
         ],
         [
             InlineKeyboardButton(text="🏡 Гость", callback_data=f"acc:{requester_id}:guest"),
-            InlineKeyboardButton(text="⛔ Отклонить", callback_data=f"acc:{requester_id}:deny"),
+            InlineKeyboardButton(
+                text="⛔ Отклонить",
+                callback_data=f"acc:{requester_id}:deny",
+                style=DANGER,
+            ),
         ],
     ])
 

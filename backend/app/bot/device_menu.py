@@ -14,6 +14,7 @@ from ..models import DEVICE_KIND_LABELS, Device, Person
 from ..services import device_owners, device_triage, pauses, uptime
 from ..services.pauses import Target
 from . import access
+from .texts import DANGER
 from .triage import vendor_of
 
 BTN_DEVICES = "📱 Устройства"
@@ -35,8 +36,8 @@ Card = tuple[str, InlineKeyboardMarkup]
 _renames: dict[tuple[int, int], tuple[int, str, int, float]] = {}
 
 
-def _button(text: str, data: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text[:60], callback_data=data)
+def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text[:60], callback_data=data, style=style)
 
 
 def _in_session(work: Any, *args: Any) -> Any:
@@ -328,7 +329,7 @@ async def _delete_confirm(device_id: int, section: str, page: int) -> Card:
         lines.append("Сейчас оно заблокировано, после удаления блокировка пропадёт.")
     markup = InlineKeyboardMarkup(
         inline_keyboard=[
-            [_button("🗑 Да, удалить", f"dmxy:{device_id}:{section}:{page}")],
+            [_button("🗑 Да, удалить", f"dmxy:{device_id}:{section}:{page}", DANGER)],
             [_button("← Назад", f"dmd:{device_id}:{section}:{page}")],
         ]
     )
@@ -359,7 +360,7 @@ async def _purge_confirm() -> Card:
     text = f"Удалить устройств без владельца: {len(devices)}?\n\n" + "\n".join(names)
     markup = InlineKeyboardMarkup(
         inline_keyboard=[
-            [_button("🗑 Да, удалить все", "dmzy")],
+            [_button("🗑 Да, удалить все", "dmzy", DANGER)],
             [_button("← Назад", f"dms:{device_owners.STALE}:0")],
         ]
     )

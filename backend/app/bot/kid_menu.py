@@ -14,6 +14,7 @@ from ..models import Person, log_event
 from ..services import family as family_svc
 from ..services import time_grants
 from . import common, texts
+from .texts import DANGER, SUCCESS
 
 log = logging.getLogger("homesec.bot.kid")
 
@@ -30,15 +31,35 @@ def bonus_request_direct_keyboard(person_id: int) -> InlineKeyboardMarkup:
     """Кнопки родителям при прямом запросе времени ребёнком через Telegram."""
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="➕ 15 мин", callback_data=f"bdir:{person_id}:15"),
-            InlineKeyboardButton(text="➕ 30 мин", callback_data=f"bdir:{person_id}:30"),
+            InlineKeyboardButton(
+                text="➕ 15 мин",
+                callback_data=f"bdir:{person_id}:15",
+                style=SUCCESS,
+            ),
+            InlineKeyboardButton(
+                text="➕ 30 мин",
+                callback_data=f"bdir:{person_id}:30",
+                style=SUCCESS,
+            ),
         ],
         [
-            InlineKeyboardButton(text="➕ 1 час", callback_data=f"bdir:{person_id}:60"),
-            InlineKeyboardButton(text="🌞 До конца дня", callback_data=f"bdir:{person_id}:day"),
+            InlineKeyboardButton(
+                text="➕ 1 час",
+                callback_data=f"bdir:{person_id}:60",
+                style=SUCCESS,
+            ),
+            InlineKeyboardButton(
+                text="🌞 До конца дня",
+                callback_data=f"bdir:{person_id}:day",
+                style=SUCCESS,
+            ),
         ],
         [
-            InlineKeyboardButton(text="🚫 Отказать", callback_data=f"bdir:{person_id}:deny"),
+            InlineKeyboardButton(
+                text="🚫 Отказать",
+                callback_data=f"bdir:{person_id}:deny",
+                style=DANGER,
+            ),
         ],
     ])
 

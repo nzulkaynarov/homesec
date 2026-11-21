@@ -10,6 +10,7 @@ from sqlalchemy import select
 from .. import db as dbmod
 from ..models import Device
 from ..services import family as family_svc
+from .texts import DANGER
 
 SHARED_STATE_LABELS = {"kid": "👶 Детский режим", "off": "⛔ Выключено", "adult": "🍿 Для взрослых"}
 
@@ -41,7 +42,7 @@ def _shared_list_markup(rows: list[tuple[int, str, str, str]]) -> InlineKeyboard
 def _shared_actions_markup(dev_id: int) -> InlineKeyboardMarkup:
     action = f"shs:{dev_id}"
     return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="⛔ Выключить", callback_data=f"{action}:off"),
+        [InlineKeyboardButton(text="⛔ Выключить", callback_data=f"{action}:off", style=DANGER),
          InlineKeyboardButton(text="👶 Детский режим", callback_data=f"{action}:kid")],
         [InlineKeyboardButton(text="🍿 Взрослым на 3 часа", callback_data=f"{action}:3"),
          InlineKeyboardButton(text="🌙 Взрослым до утра", callback_data=f"{action}:m")],

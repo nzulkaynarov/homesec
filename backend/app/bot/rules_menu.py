@@ -14,6 +14,7 @@ from .. import db as dbmod
 from ..services import house_rules
 from ..services.quota import QUOTA_CATEGORY_LABELS
 from . import access
+from .texts import DANGER
 
 BTN_RULES = "📋 Правила"
 GONE = "Этого человека уже нет в списке."
@@ -29,8 +30,8 @@ Card = tuple[str, InlineKeyboardMarkup]
 _typing: dict[tuple[int, int], tuple[str, str, float]] = {}
 
 
-def _button(text: str, data: str) -> InlineKeyboardButton:
-    return InlineKeyboardButton(text=text[:60], callback_data=data)
+def _button(text: str, data: str, style: str | None = None) -> InlineKeyboardButton:
+    return InlineKeyboardButton(text=text[:60], callback_data=data, style=style)
 
 
 def _markup(rows: list[list[InlineKeyboardButton]]) -> InlineKeyboardMarkup:
@@ -221,7 +222,7 @@ async def _delete_confirm(person_id: int) -> Card:
     if view["linked"]:
         text += " Доступ к боту у этого человека пропадёт."
     rows = [
-        [_button("🗑 Да, удалить", f"hrldy:{person_id}")],
+        [_button("🗑 Да, удалить", f"hrldy:{person_id}", DANGER)],
         [_button("← Назад", f"hrlp:{person_id}")],
     ]
     return text, _markup(rows)

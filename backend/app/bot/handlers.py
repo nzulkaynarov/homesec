@@ -42,6 +42,7 @@ from . import (
     triage,
 )
 from .access import AccessMiddleware
+from .texts import SUCCESS
 
 log = logging.getLogger("homesec.bot")
 router = Router()
@@ -433,7 +434,11 @@ def _orchestrate(chat_id: int, text: str) -> orchestrator.Answer:
 
 def confirm_keyboard(pending_id: int) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(text="✅ Выполнить", callback_data=f"act:{pending_id}:yes"),
+        InlineKeyboardButton(
+            text="✅ Выполнить",
+            callback_data=f"act:{pending_id}:yes",
+            style=SUCCESS,
+        ),
         InlineKeyboardButton(text="❌ Отмена", callback_data=f"act:{pending_id}:no"),
     ]])
 

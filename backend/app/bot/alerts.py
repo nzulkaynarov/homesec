@@ -13,6 +13,7 @@ from ..ai import tools
 from ..models import GROUP_LABELS, Device, Person
 from ..services import house_rules
 from . import common
+from .texts import DANGER, SUCCESS
 
 log = logging.getLogger("homesec.bot.alerts")
 
@@ -33,7 +34,11 @@ def new_device_keyboard(dev_id: int, people: list[tuple[int, str, str]]) -> Inli
         ),
     ])
     rows.append([
-        InlineKeyboardButton(text="⛔ Блокировать", callback_data=f"nd:{dev_id}:block"),
+        InlineKeyboardButton(
+            text="⛔ Блокировать",
+            callback_data=f"nd:{dev_id}:block",
+            style=DANGER,
+        ),
         InlineKeyboardButton(text="Оставить как есть", callback_data=f"nd:{dev_id}:skip"),
     ])
     return InlineKeyboardMarkup(inline_keyboard=rows)
@@ -64,17 +69,37 @@ def bonus_request_keyboard(request_id: int, category: str = "internet") -> Inlin
     from ..services.bonus import PAUSE_CATEGORY
 
     if category == PAUSE_CATEGORY:
-        whole = InlineKeyboardButton(text="▶️ До конца паузы", callback_data=f"br:{request_id}:day")
+        whole = InlineKeyboardButton(
+            text="▶️ До конца паузы",
+            callback_data=f"br:{request_id}:day",
+            style=SUCCESS,
+        )
     else:
-        whole = InlineKeyboardButton(text="🌞 До конца дня", callback_data=f"br:{request_id}:day")
+        whole = InlineKeyboardButton(
+            text="🌞 До конца дня",
+            callback_data=f"br:{request_id}:day",
+            style=SUCCESS,
+        )
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="➕ 15 мин", callback_data=f"br:{request_id}:15"),
-            InlineKeyboardButton(text="➕ 30 мин", callback_data=f"br:{request_id}:30"),
+            InlineKeyboardButton(
+                text="➕ 15 мин",
+                callback_data=f"br:{request_id}:15",
+                style=SUCCESS,
+            ),
+            InlineKeyboardButton(
+                text="➕ 30 мин",
+                callback_data=f"br:{request_id}:30",
+                style=SUCCESS,
+            ),
         ],
         [
             whole,
-            InlineKeyboardButton(text="🚫 Отказать", callback_data=f"br:{request_id}:no"),
+            InlineKeyboardButton(
+                text="🚫 Отказать",
+                callback_data=f"br:{request_id}:no",
+                style=DANGER,
+            ),
         ],
     ])
 

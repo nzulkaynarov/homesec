@@ -128,6 +128,10 @@ def progress_bar(used: int, limit: int, length: int = 8) -> str:
     return f"[{'█' * filled}{'░' * (length - filled)}]"
 
 
+# Button colours (Bot API 9.4): green agrees or gives time, red refuses, blocks or deletes.
+SUCCESS = "success"
+DANGER = "danger"
+
 TELEGRAM_MESSAGE_LIMIT = 4000  # Telegram rejects messages above 4096 characters
 
 
