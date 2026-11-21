@@ -10,6 +10,7 @@ import logging
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher
+from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import BotCommand, InlineKeyboardMarkup, ReplyKeyboardRemove
 
 from .. import db as dbmod
@@ -284,6 +285,9 @@ async def _tell_children_they_moved(bot: Bot) -> None:
     for person_id, chat_id in await asyncio.to_thread(_children_to_tell):
         try:
             await bot.send_message(chat_id, access.MOVED, reply_markup=ReplyKeyboardRemove())
+        except (TelegramBadRequest, TelegramForbiddenError):
+            # Never opened this bot, or blocked it: there is no old menu to take away.
+            log.info("person %s has no chat with this bot, nothing to tell", person_id)
         except Exception:
             log.warning("could not tell person %s about the move to Luna", person_id, exc_info=True)
             continue
