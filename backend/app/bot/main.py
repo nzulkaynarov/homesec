@@ -12,6 +12,7 @@ from datetime import datetime, timedelta
 from aiogram import Bot, Dispatcher
 from aiogram.exceptions import TelegramBadRequest, TelegramForbiddenError
 from aiogram.types import BotCommand, InlineKeyboardMarkup, ReplyKeyboardRemove
+from sqlalchemy.orm import Session
 
 from .. import db as dbmod
 from ..ai import analyst, watchdog
@@ -19,7 +20,7 @@ from ..config import settings
 from ..db import Base, engine
 from ..migrations import ensure_schema
 from ..services import family as family_svc
-from ..services import followups, uptime
+from ..services import followups, time_notices, uptime
 from . import access, alerts, handlers, luna_watch, notify, server_menu, texts
 from .health import default_monitor
 
@@ -57,12 +58,29 @@ async def _broadcast(bot: Bot, chat_ids: set[int], text: str, keyboard=None) -> 
     return delivered
 
 
-PendingNotice = tuple[str, dict, str, int | None, list, int | None, int]
+PendingNotice = tuple[
+    str, dict, str, int | None, list, int | None, int, time_notices.Notice | None
+]
+
+
+def _parent_notice(
+    s: Session, n: notify.Notification, now: datetime
+) -> time_notices.Notice | None:
+    """The text parents read about a child's time, rendered from the request and the device:
+    the journal line keeps the MAC and the request number for the linkage, not for people."""
+    from ..models import BonusRequest
+
+    if n.kind == "bonus_request" and n.request_id is not None:
+        req = s.get(BonusRequest, n.request_id)
+        return time_notices.request_notice(s, req, now) if req is not None else None
+    if n.kind in ("quota_warn", "quota_block"):
+        return time_notices.quota_notice(s, n.device, n.kind, n.category, now)
+    return None
 
 
 def _collect_notifications() -> tuple[int, list[PendingNotice]]:
     """(latest journal id, [(kind, устройство, текст события, id оригинала, люди, id заявки,
-    id события)]). The cursor does not move here: only after delivery."""
+    id события, текст для родителей)]). The cursor does not move here: only after delivery."""
     s = dbmod.session()
     try:
         latest = notify.latest_event_id(s)
@@ -72,28 +90,28 @@ def _collect_notifications() -> tuple[int, list[PendingNotice]]:
         from ..models import Person
 
         people = [(p.id, p.name, p.role) for p in s.query(Person).order_by(Person.name)]
-        return latest, [
-            (n.kind,
-             {"id": n.device.id, "name": n.device.name, "mac": n.device.mac,
-              "ip": n.device.ip, "random_mac": n.device.mac_is_random,
-              "person_id": n.device.person_id},
-             n.message,
-             n.extra_device.id if n.extra_device else None,
-             people,
-             n.request_id,
-             n.event_id)
-            for n in items
-        ]
-    finally:
-        s.close()
-
-
-def _request_category(request_id: int) -> str:
-    from ..services import bonus
-
-    s = dbmod.session()
-    try:
-        return bonus.category_of(s, request_id)
+        now = datetime.now()
+        pending: list[PendingNotice] = []
+        switched_off: set[int] = set()
+        for n in items:
+            if n.kind == "quota_block" and n.device.person_id is not None:
+                # One child's devices go off one by one; the parent needs to hear it once.
+                if n.device.person_id in switched_off:
+                    continue
+                switched_off.add(n.device.person_id)
+            pending.append((
+                n.kind,
+                {"id": n.device.id, "name": n.device.name, "mac": n.device.mac,
+                 "ip": n.device.ip, "random_mac": n.device.mac_is_random,
+                 "person_id": n.device.person_id},
+                n.message,
+                n.extra_device.id if n.extra_device else None,
+                people,
+                n.request_id,
+                n.event_id,
+                _parent_notice(s, n, now),
+            ))
+        return latest, pending
     finally:
         s.close()
 
@@ -103,7 +121,7 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
         try:
             latest, items = await asyncio.to_thread(_collect_notifications)
             done_until = latest
-            for kind, dev, message, extra_id, people, request_id, event_id in items:
+            for kind, dev, message, extra_id, people, request_id, event_id, parent in items:
                 kb: InlineKeyboardMarkup | None
                 if kind == "device_maybe_same" and extra_id is not None:
                     text = f"🔁 {message}"
@@ -111,16 +129,14 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
                 elif kind == "register_request":
                     text = texts.format_registration(message)
                     kb = alerts.new_device_keyboard(dev["id"], people)
-                elif kind == "quota_block":
-                    text = f"⏳ {message}\nМожно добавить время кнопкой:"
-                    kb = alerts.bonus_keyboard(dev)
-                elif kind == "quota_warn":
-                    text = f"⚠️ {message}\nМожно добавить время заранее:"
-                    kb = alerts.bonus_keyboard(dev)
-                elif kind == "bonus_request" and request_id is not None:
-                    text = f"🙏 {message}"
-                    category = await asyncio.to_thread(_request_category, request_id)
-                    kb = alerts.bonus_request_keyboard(request_id, category)
+                elif kind in ("quota_block", "quota_warn") and parent is not None:
+                    text = parent.text
+                    kb = alerts.bonus_keyboard(dev["person_id"], parent.hold)
+                elif kind == "bonus_request" and request_id is not None and parent is not None:
+                    text = parent.text
+                    kb = alerts.bonus_request_keyboard(request_id, parent.hold)
+                elif kind in ("quota_block", "quota_warn", "bonus_request"):
+                    continue  # the request is gone: nothing to tell or answer
                 else:
                     text = texts.format_new_device(dev)
                     kb = alerts.new_device_keyboard(dev["id"], people)
@@ -171,11 +187,11 @@ async def watchdog_loop(bot: Bot, chat_ids: set[int]) -> None:
         await asyncio.sleep(WATCHDOG_INTERVAL)
 
 
-def _followups() -> tuple[list[tuple[int, str, str]], str | None]:
+def _followups() -> tuple[list[tuple[int, time_notices.Notice]], str | None]:
     """Reminders for waiting time requests, expired ones closed, and the weekly summary when due."""
     s = dbmod.session()
     try:
-        reminders = [(req.id, req.category, text) for req, text in followups.due_reminders(s)]
+        reminders = [(req.id, notice) for req, notice in followups.due_reminders(s)]
         followups.expire_stale(s)
         weekly = None
         if followups.weekly_due(s):
@@ -190,9 +206,9 @@ async def followup_loop(bot: Bot, chat_ids: set[int]) -> None:
     while True:
         try:
             reminders, weekly = await asyncio.to_thread(_followups)
-            for request_id, category, text in reminders:
-                keyboard = alerts.bonus_request_keyboard(request_id, category)
-                await _broadcast(bot, chat_ids, text, keyboard)
+            for request_id, notice in reminders:
+                keyboard = alerts.bonus_request_keyboard(request_id, notice.hold)
+                await _broadcast(bot, chat_ids, notice.text, keyboard)
             if weekly:
                 await _broadcast(bot, chat_ids, weekly)
         except Exception:

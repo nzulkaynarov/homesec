@@ -121,9 +121,10 @@ def test_quota_block_notification_with_bonus_button(db):
               "доступ выключен до полуночи.")
     found = collect_notifications(db)
     assert [(n.kind, n.device.id) for n in found] == [("quota_block", dev.id)]
+    assert found[0].category == "internet"
 
-    assert bonus_keyboard({"id": dev.id, "person_id": None}) is None
-    kb = bonus_keyboard({"id": dev.id, "person_id": 7})
+    assert bonus_keyboard(None) is None
+    kb = bonus_keyboard(7)
     assert [b.callback_data for b in kb.inline_keyboard[0]] == ["gt:7:15", "gt:7:30"]
 
 
@@ -237,7 +238,8 @@ def test_bonus_request_approve_deny_idempotent(db):
             f"br:{req_id}:no"} == data
 
     # одобрение +30 -> заявка approved, создан QuotaBonus
-    assert "Одобрено" in _resolve_bonus_request(req_id, "30")
+    answer = _resolve_bonus_request(req_id, "30")
+    assert answer.final and answer.text == "✅ Дима: +30 мин к лимитам: игры."
     db.expire_all()
     assert db.get(BonusRequest, req_id).status == "approved"
     assert db.get(BonusRequest, req_id).minutes == 30
@@ -245,14 +247,14 @@ def test_bonus_request_approve_deny_idempotent(db):
     assert (bonus_row.target_type, bonus_row.minutes) == ("person", 30)
 
     # a second press, by the same or the other parent, adds nothing
-    assert "уже ответили: одобрено" in _resolve_bonus_request(req_id, "15")
+    assert "уже ответили: одобрено" in _resolve_bonus_request(req_id, "15").text
     assert db.query(QuotaBonus).count() == 1
 
     # отказ по новой заявке
     req2 = BonusRequest(device_id=d.id, category="games", status="pending")
     db.add(req2)
     db.commit()
-    assert "Отказано" in _resolve_bonus_request(req2.id, "no")
+    assert _resolve_bonus_request(req2.id, "no").text == "🚫 Дима: отказано, Luna скажет об этом."
     db.expire_all()
     assert db.get(BonusRequest, req2.id).status == "denied"
 
@@ -261,6 +263,108 @@ def test_bonus_request_approve_deny_idempotent(db):
     db.delete(d)
     db.query(Person).delete()
     db.commit()
+
+
+def _clear_family(db):
+    from app.models import BonusRequest, Person, Quota, QuotaBonus, Rule
+
+    for m in (BonusRequest, QuotaBonus, Quota, Rule, Device, Person):
+        db.query(m).delete()
+    db.commit()
+
+
+def test_parents_read_the_request_without_addresses_or_numbers(db):
+    """The journal line keeps the MAC and [req#N] for the linkage; the parent's text is rendered
+    from the request: the child's name, the reason and what holds them back now."""
+    from app.bot import main as bot_main
+    from app.models import Person
+    from app.services import bonus
+
+    _clear_family(db)
+    kid = Person(name="Миша", role="kid")
+    db.add(kid)
+    db.commit()
+    dev = Device(mac="AA:00:00:00:00:41", ip="192.168.88.141", name="Телефон Миши",
+                 person_id=kid.id)
+    db.add(dev)
+    db.commit()
+    assert collect_notifications(db) == []  # инициализация курсора
+    req = bonus.create_request(db, dev, "internet", "🎮 Доиграть или досмотреть")
+    assert req is not None
+    event = db.query(EventLog).filter(EventLog.kind == "bonus_request").one()
+    assert dev.mac in event.message and f"[req#{req.id}]" in event.message  # linkage kept
+
+    _latest, items = bot_main._collect_notifications()
+    assert [(item[0], item[5]) for item in items] == [("bonus_request", req.id)]
+    notice = items[0][7]
+    assert notice is not None
+    assert notice.text.startswith("🙏 Миша просит ещё времени\nПричина: 🎮 Доиграть или досмотреть")
+    assert dev.mac not in notice.text and dev.ip not in notice.text and "req#" not in notice.text
+    assert "Телефон" not in notice.text and "internet" not in notice.text
+    _clear_family(db)
+
+
+def test_one_child_switched_off_is_told_once(db):
+    from app.bot import main as bot_main
+    from app.models import Person
+
+    _clear_family(db)
+    kid = Person(name="Миша", role="kid")
+    db.add(kid)
+    db.commit()
+    phone = Device(mac="AA:00:00:00:00:42", ip="192.168.88.142", name="Телефон", person_id=kid.id)
+    tablet = Device(mac="AA:00:00:00:00:43", ip="192.168.88.143", name="Планшет", person_id=kid.id)
+    db.add_all([phone, tablet])
+    db.commit()
+    assert collect_notifications(db) == []  # инициализация курсора
+    for dev in (phone, tablet):
+        log_event(db, "quota_block",
+                  f"Квота на интернет исчерпана: {dev.name} ({dev.mac}, {dev.ip}) — "
+                  "доступ выключен до полуночи.")
+    _latest, items = bot_main._collect_notifications()
+    assert len(items) == 1
+    text = items[0][7].text
+    assert text.startswith("⛔ Миша: лимит «Интернет целиком» исчерпан")
+    assert phone.mac not in text and phone.ip not in text
+    _clear_family(db)
+
+
+def test_time_refused_at_night_keeps_the_request_and_its_buttons(db):
+    import asyncio
+    from datetime import datetime, timedelta
+    from unittest.mock import AsyncMock, MagicMock
+
+    from aiogram.types import Message
+
+    from app.bot import alerts
+    from app.models import BonusRequest, Person, Rule
+
+    _clear_family(db)
+    kid = Person(name="Миша", role="kid")
+    db.add(kid)
+    db.commit()
+    dev = Device(mac="AA:00:00:00:00:44", ip="192.168.88.144", name="Телефон", person_id=kid.id)
+    db.add(dev)
+    now = datetime.now()
+    db.add(Rule(name="Отбой", target_type="person", target=str(kid.id), days="0,1,2,3,4,5,6",
+                start_time=f"{now - timedelta(hours=1):%H:%M}",
+                end_time=f"{now + timedelta(hours=1):%H:%M}"))
+    db.commit()
+    req = BonusRequest(device_id=dev.id, category="internet", status="pending")
+    db.add(req)
+    db.commit()
+
+    cb = MagicMock(data=f"br:{req.id}:30", answer=AsyncMock())
+    cb.message = MagicMock(spec=Message, text="🙏 Миша просит ещё времени", edit_text=AsyncMock())
+    asyncio.run(alerts.cb_bonus_request(cb))
+
+    said = cb.answer.call_args
+    assert "ночной режим" in said.args[0] and "Просьба ждёт ответа" in said.args[0]
+    assert said.kwargs["show_alert"] is True
+    cb.message.edit_text.assert_not_called()  # the buttons stay: the parent can still refuse
+    db.expire_all()
+    assert db.get(BonusRequest, req.id).status == "pending"
+    _clear_family(db)
 
 
 def test_describe_pending_resolves_device(db):
@@ -502,7 +606,7 @@ def test_a_parent_gives_time_from_the_quota_report(db):
     cb.data = f"gt:{kid.id}:30"
     cb.answer = AsyncMock()
     msg = MagicMock(spec=Message)
-    msg.text = "⏳ Квота «Игры» использована на 80%"
+    msg.text = "⚠️ Коля: лимит «Игры» почти исчерпан (50 из 60 мин), осталось 10 мин."
     msg.edit_text = AsyncMock()
     cb.message = msg
 

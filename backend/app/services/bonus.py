@@ -67,6 +67,8 @@ def create_request(db: Session, dev: Device, category: str,
     db.commit()
     cat_label = PAUSE_LABEL if category == PAUSE_CATEGORY else quota.QUOTA_CATEGORY_LABELS.get(
         category, category)
+    # The journal line is for the bot's linkage and the panel; parents read the text that
+    # time_notices.request_notice renders from the request, without the MAC or the number.
     log_event(db, "bonus_request",
               f"Запрос времени: {dev.name} ({dev.mac}, {dev.ip}) просит «{cat_label}»"
               + (f" — «{req.reason}»" if req.reason else "") + f" [req#{req.id}]")
@@ -78,8 +80,3 @@ def resolve(db: Session, req: BonusRequest, status: str, minutes: int = 0) -> No
     req.minutes = minutes
     req.resolved = datetime.now()
     db.commit()
-
-
-def category_of(db: Session, request_id: int) -> str:
-    req = db.get(BonusRequest, request_id)
-    return req.category if req is not None else "internet"

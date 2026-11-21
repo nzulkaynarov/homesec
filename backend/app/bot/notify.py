@@ -12,6 +12,7 @@ from sqlalchemy import func, select
 from sqlalchemy.orm import Session
 
 from ..models import BonusRequest, Device, EventLog, kv_get, kv_set
+from ..services.quota import QUOTA_CATEGORY_LABELS
 
 CURSOR_KEY = "bot_last_event_id"
 NOTIFY_KINDS = ("device_new", "register_request", "device_maybe_same",
@@ -19,6 +20,9 @@ NOTIFY_KINDS = ("device_new", "register_request", "device_maybe_same",
 
 _MAC_RE = re.compile(r"([0-9A-F]{2}(?::[0-9A-F]{2}){5})", re.IGNORECASE)
 _REQ_RE = re.compile(r"req#(\d+)")
+# A quota warning starts with our own words and the limit's label; the device name comes later.
+_WARN_RE = re.compile(r"^Квота «([^»]+)»")
+_CATEGORY_BY_LABEL = {label: category for category, label in QUOTA_CATEGORY_LABELS.items()}
 
 
 @dataclass
@@ -29,6 +33,14 @@ class Notification:
     extra_device: Device | None = None  # для maybe_same: устройство-оригинал
     request_id: int | None = None  # для bonus_request: id заявки на бонус
     event_id: int = 0  # the journal row, so the cursor moves only past what was delivered
+    category: str | None = None  # for quota_warn and quota_block: which limit it is about
+
+
+def _category(event: EventLog) -> str | None:
+    if event.kind == "quota_block":
+        return "internet"  # only the internet limit switches a device off
+    found = _WARN_RE.match(event.message) if event.kind == "quota_warn" else None
+    return _CATEGORY_BY_LABEL.get(found.group(1)) if found else None
 
 
 def latest_event_id(db: Session) -> int:
@@ -91,7 +103,8 @@ def collect_notifications(
             if extra is None:
                 continue  # оригинал уже объединили/удалили
         out.append(Notification(kind=e.kind, device=dev, message=e.message,
-                                extra_device=extra, request_id=req_id, event_id=e.id))
+                                extra_device=extra, request_id=req_id, event_id=e.id,
+                                category=_category(e)))
     if advance and max_id > last:
         kv_set(db, CURSOR_KEY, str(max_id))
     return out

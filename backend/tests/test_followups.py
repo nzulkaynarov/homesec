@@ -46,7 +46,10 @@ def test_parents_are_reminded_once_after_an_hour(db):
     waiting = _request(db, 75)
     due = followups.due_reminders(db, NOW)
     assert [req.id for req, _ in due] == [waiting.id]
-    assert "Миша (Телефон) ждёт ответа 75 мин" in due[0][1]
+    text = due[0][1].text
+    assert text.startswith("⏰ Миша ждёт ответа уже 1 ч 15 мин: просит ещё времени")
+    assert "Телефон" not in text and "00:11:22:33:44:01" not in text and "192.168" not in text
+    assert "req#" not in text and "games" not in text
     assert followups.due_reminders(db, NOW) == []  # never twice
     assert fresh.status == "pending"
 

@@ -3,6 +3,7 @@ for more time and a device that looks like a known one with a new MAC."""
 
 import asyncio
 import logging
+from typing import NamedTuple
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -10,7 +11,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .. import db as dbmod
 from ..ai import tools
 from ..models import GROUP_LABELS, Device, Person
-from ..services import time_grants
+from ..services import time_grants, time_notices
 from . import common
 from .texts import DANGER, SUCCESS
 
@@ -43,13 +44,15 @@ def new_device_keyboard(dev_id: int, people: list[tuple[int, str, str]]) -> Inli
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def bonus_keyboard(dev: dict) -> InlineKeyboardMarkup | None:
+def bonus_keyboard(
+    person_id: int | None, hold: str = time_notices.LIMITS
+) -> InlineKeyboardMarkup | None:
     """«+15» and «+30» under a "time is running out" alert: the same rule as everywhere a parent
-    gives time. A device without an owner has nobody to give time to, so it gets no buttons."""
+    gives time. Time goes to a person, so a device without an owner gets no buttons, and neither
+    does a limit that is not the child's own, because a grant would not reach it."""
     from .reports import grant_button
 
-    person_id = dev.get("person_id")
-    if person_id is None:
+    if person_id is None or hold in (time_notices.NO_OWNER, time_notices.OPEN):
         return None
     return InlineKeyboardMarkup(
         inline_keyboard=[[grant_button(person_id, 15), grant_button(person_id, 30)]]
@@ -58,58 +61,55 @@ def bonus_keyboard(dev: dict) -> InlineKeyboardMarkup | None:
 
 STATUS_WORDS = {"approved": "одобрено", "denied": "отказано", "expired": "срок вышел"}
 
-# ---------- запрос ребёнка «попросить ещё времени» ----------
+# ---------- a child's request for more time, sent from Luna ----------
 
-# Пресеты одобрения родителем. "day" ≈ до конца дня (add_bonus_time режет по 720).
+# What the parent's buttons give. "day" means until the pause ends or, without a pause, the
+# limits are off until midnight (time_grants.WHOLE_DAY).
+BONUS_PRESETS = {"15": 15, "30": 30}
 
 
-BONUS_PRESETS = {"15": 15, "30": 30, "day": 720}
-
-
-def bonus_request_keyboard(request_id: int, category: str = "internet") -> InlineKeyboardMarkup:
-    """Кнопки под заявкой ребёнка: +15 / +30 / до конца дня / Отказать.
-    Для просьбы во время паузы третья кнопка открывает интернет до её конца."""
-    from ..services.bonus import PAUSE_CATEGORY
-
-    if category == PAUSE_CATEGORY:
-        whole = InlineKeyboardButton(
-            text="▶️ До конца паузы",
-            callback_data=f"br:{request_id}:day",
-            style=SUCCESS,
+def bonus_request_keyboard(
+    request_id: int, hold: str = time_notices.LIMITS
+) -> InlineKeyboardMarkup:
+    """Buttons under a child's request, chosen by what holds the child back now (see
+    time_notices): during a pause the third button opens it to its end, with nothing to add to
+    there is one "allow", and a device nobody owns can only be refused."""
+    deny = InlineKeyboardButton(
+        text=time_notices.DENY, callback_data=f"br:{request_id}:no", style=DANGER
+    )
+    if hold == time_notices.NO_OWNER:
+        return InlineKeyboardMarkup(inline_keyboard=[[deny]])
+    if hold == time_notices.OPEN:
+        allow = InlineKeyboardButton(
+            text=time_notices.ALLOW, callback_data=f"br:{request_id}:day", style=SUCCESS
         )
-    else:
-        whole = InlineKeyboardButton(
-            text="🌞 До конца дня",
-            callback_data=f"br:{request_id}:day",
-            style=SUCCESS,
-        )
+        return InlineKeyboardMarkup(inline_keyboard=[[allow, deny]])
+    whole = time_notices.WHOLE_PAUSE if hold == time_notices.PAUSE else time_notices.WHOLE_DAY
     return InlineKeyboardMarkup(inline_keyboard=[
         [
             InlineKeyboardButton(
-                text="➕ 15 мин",
-                callback_data=f"br:{request_id}:15",
-                style=SUCCESS,
+                text=time_notices.ADD_15, callback_data=f"br:{request_id}:15", style=SUCCESS
             ),
             InlineKeyboardButton(
-                text="➕ 30 мин",
-                callback_data=f"br:{request_id}:30",
-                style=SUCCESS,
+                text=time_notices.ADD_30, callback_data=f"br:{request_id}:30", style=SUCCESS
             ),
         ],
         [
-            whole,
-            InlineKeyboardButton(
-                text="🚫 Отказать",
-                callback_data=f"br:{request_id}:no",
-                style=DANGER,
-            ),
+            InlineKeyboardButton(text=whole, callback_data=f"br:{request_id}:day", style=SUCCESS),
+            deny,
         ],
     ])
 
 
-def _resolve_bonus_request(request_id: int, choice: str) -> str:
-    """Одобряет (add_bonus_time) или отклоняет заявку и помечает её. Одноразово:
-    повторное нажатие по обработанной заявке вернёт пометку об этом."""
+class Answer(NamedTuple):
+    text: str
+    final: bool  # the request is closed: the text goes under the notice and the buttons go
+
+
+def _resolve_bonus_request(request_id: int, choice: str) -> Answer:
+    """Give the time (time_grants.grant) or refuse, and close the request. Once only: a second
+    press, by the same or the other parent, says it is already answered. When the time cannot
+    be given now, the request stays open and the buttons stay, so the parent can still refuse."""
     from ..models import BonusRequest
     from ..services import bonus
 
@@ -117,23 +117,32 @@ def _resolve_bonus_request(request_id: int, choice: str) -> str:
     try:
         req = s.get(BonusRequest, request_id)
         if req is None:
-            return "Заявка не найдена."
+            return Answer("Этой просьбы больше нет.", True)
         if req.status != "pending":
-            return f"На эту просьбу уже ответили: {STATUS_WORDS.get(req.status, req.status)}."
+            return Answer(
+                f"На эту просьбу уже ответили: {STATUS_WORDS.get(req.status, 'закрыта')}.", True
+            )
+        dev = s.get(Device, req.device_id)
+        person = dev.person if dev is not None else None
         if choice == "no":
             bonus.resolve(s, req, "denied")
-            return "Отказано. Ребёнок узнает об этом от Luna."
-        dev = s.get(Device, req.device_id)
-        if dev is None or dev.person_id is None:
-            return "Устройство без владельца, время добавить некому."
+            if person is None:
+                return Answer("🚫 Отказано.", True)
+            return Answer(f"🚫 {person.name}: отказано, Luna скажет об этом.", True)
+        if person is None:
+            return Answer(
+                f"Устройство без владельца, время добавить некому. {time_notices.OWNER_HINT}",
+                False,
+            )
         minutes = time_grants.WHOLE_DAY if choice == "day" else BONUS_PRESETS.get(choice, 30)
         try:
-            done = time_grants.grant(s, dev.person_id, minutes, "Одобрено родителем")
+            done = time_grants.grant(s, person.id, minutes, "Одобрено родителем")
         except time_grants.GrantError as exc:
-            return f"⚠️ {exc} Просьба осталась открытой."
+            still_open = "Просьба ждёт ответа: можно отказать или ответить позже."
+            return Answer(f"⚠️ {exc} {still_open}", False)
         given = minutes if minutes is not None else time_grants.DAY_MINUTES
         bonus.resolve(s, req, "approved", given)
-        return f"✅ Одобрено: {done}."
+        return Answer(f"✅ {person.name}: {done}.", True)
     finally:
         s.close()
 
@@ -142,13 +151,15 @@ async def cb_bonus_request(cb: CallbackQuery) -> None:
     parts = (cb.data or "").split(":")
     request_id, choice = int(parts[1]), parts[2]
     try:
-        result = await asyncio.to_thread(_resolve_bonus_request, request_id, choice)
+        answer = await asyncio.to_thread(_resolve_bonus_request, request_id, choice)
     except Exception:
-        log.exception("обработка заявки на бонус упала")
-        result = "Ошибка при обработке заявки, подробности в журнале."
+        log.exception("answering a time request failed")
+        answer = Answer("⚠️ Не получилось ответить на просьбу, попробуйте ещё раз.", False)
+    if not answer.final or not isinstance(cb.message, Message):
+        await cb.answer(answer.text[:200], show_alert=True)
+        return
     await cb.answer()
-    if isinstance(cb.message, Message):
-        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
+    await cb.message.edit_text(f"{cb.message.text}\n\n➡ {answer.text}", reply_markup=None)
 
 
 def merge_keyboard(duplicate_id: int, target_id: int) -> InlineKeyboardMarkup:

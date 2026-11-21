@@ -302,6 +302,8 @@ def check_quota_warnings(
                 kv_set(db, guard_key, "1")
                 remaining = limit - used
                 pct = int((used / limit) * 100)
+                # A journal line: the bot finds the device by the MAC and the limit by the label
+                # at the start; parents read time_notices.quota_notice instead.
                 msg = (
                     f"Квота «{cat_label}» использована на {pct}%: "
                     f"{dev.name} ({dev.mac}, {dev.ip}) — осталось {remaining} мин."

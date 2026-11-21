@@ -8,7 +8,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from ..models import BonusRequest, Device, EventLog, kv_get, kv_set, log_event
-from . import bonus, quota
+from . import bonus, time_notices
 
 REMIND_AFTER = timedelta(hours=1)
 REMINDED_PREFIX = "bonus_reminded:"
@@ -28,14 +28,11 @@ def _who(db: Session, req: BonusRequest) -> str:
     return device.name
 
 
-def _what(req: BonusRequest) -> str:
-    if req.category == bonus.PAUSE_CATEGORY:
-        return bonus.PAUSE_LABEL
-    return quota.QUOTA_CATEGORY_LABELS.get(req.category, req.category)
-
-
-def due_reminders(db: Session, now: datetime | None = None) -> list[tuple[BonusRequest, str]]:
-    """Requests waiting longer than an hour that were not reminded yet, with the reminder text.
+def due_reminders(
+    db: Session, now: datetime | None = None
+) -> list[tuple[BonusRequest, time_notices.Notice]]:
+    """Requests waiting longer than an hour that were not reminded yet, with the reminder for the
+    parents: who waits, why, what holds them back now and what the buttons will do.
 
     Each is marked before it is returned, so a failed send never turns into a stream of repeats.
     """
@@ -54,7 +51,7 @@ def due_reminders(db: Session, now: datetime | None = None) -> list[tuple[BonusR
             continue
         kv_set(db, key, now.isoformat(timespec="seconds"))
         waited = int((now - req.created).total_seconds() // 60)
-        due.append((req, f"⏰ {_who(db, req)} ждёт ответа {waited} мин: «{_what(req)}»"))
+        due.append((req, time_notices.request_notice(db, req, now, waited=waited)))
     return due
 
 
