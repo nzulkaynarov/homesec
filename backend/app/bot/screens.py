@@ -4,6 +4,7 @@ The plain-text versions in texts.py and services stay: AI tools and tests read t
 rich.send falls back to text when Telegram refuses a rich message.
 """
 
+from collections.abc import Sequence
 from datetime import datetime
 from typing import Any
 
@@ -35,27 +36,31 @@ def quota_html(items: list[dict]) -> str:
     return "".join(parts)
 
 
-def status_html(s: dict) -> str:
+def _works(ok: bool) -> str:
+    return "✅ работает" if ok else "❌ не отвечает"
+
+
+def status_html(s: dict, paused: Sequence[tuple[str, datetime]] = ()) -> str:
+    """The network in plain words; paused is pauses.active(): who is off the internet, by name."""
     rows = [
-        ("Роутер MikroTik", texts.yes_no(s["router_ok"])),
-        ("AdGuard Home", texts.yes_no(s["adguard_ok"])),
-        ("Устройств", f"{s['devices_total']}, онлайн {s['devices_online']}"),
+        ("Роутер", _works(s["router_ok"])),
+        ("Фильтр сайтов", _works(s["adguard_ok"])),
+        ("Устройств", f"{s['devices_total']}, в сети {s['devices_online']}"),
         ("Заблокировано вручную", str(s["devices_blocked"])),
-        ("Неизвестных", str(s["devices_unknown"])),
+        ("Незнакомых", str(s["devices_unknown"])),
     ]
     if s.get("dns_queries_today") is not None:
         rows.append(
             (
-                "DNS сегодня",
-                f"{s['dns_queries_today']} запросов, {s.get('dns_blocked_today', 0)} заблокировано",
+                "Обращений к сайтам сегодня",
+                f"{s['dns_queries_today']}, заблокировано {s.get('dns_blocked_today', 0)}",
             )
         )
-    parts = [heading("🛡 Состояние HomeSec"), table(rows)]
-    pauses = s.get("active_pauses", [])
-    if pauses:
+    parts = [heading("🛡 Состояние сети"), table(rows)]
+    if paused:
         parts.append(
             table(
-                ((p["target"], p["until"][11:16] or p["until"]) for p in pauses),
+                ((name, f"{until:%H:%M}") for name, until in paused),
                 header=("Кто", "до"),
                 caption="⏸ Паузы",
             )
@@ -80,39 +85,30 @@ def status_html(s: dict) -> str:
 
 
 def usage_html(
-    today: dict,
-    week_tokens: int,
-    budget_left: int | None,
-    gateway: str,
-    spend: list[tuple[str, float, int, dict]],
-    week_usd: float,
+    spend: list[tuple[str, float, int, dict]], week_usd: float, used_pct: int | None = None
 ) -> str:
-    in_tok, out_tok = today.get("input", 0), today.get("output", 0)
-    tokens = [
-        ("Запросов", f"{today.get('requests', 0)}"),
-        ("Токенов на входе", f"{in_tok:,}"),
-        ("Токенов на выходе", f"{out_tok:,}"),
-        ("Всего сегодня", f"{in_tok + out_tok:,}"),
-        (
-            "Остаток бюджета",
-            f"{budget_left:,}" if budget_left is not None else "без ограничений",
-        ),
-        ("За 7 дней", f"{week_tokens:,}"),
-    ]
-    parts = [heading("🤖 Расход ИИ сегодня"), table(tokens, caption="Токены")]
+    """The AI spend in money: who and on what today, the week, and how much of the daily limit
+    is used (None when there is no limit)."""
+    parts = [heading("🤖 Расходы на ИИ сегодня")]
     rows = []
     for name, usd, requests, features in spend:
         top = sorted(features.items(), key=lambda item: item[1], reverse=True)
         detail = ", ".join(f"{texts.FEATURE_LABELS.get(k, k)} ${v:.2f}" for k, v in top)
         rows.append((name, f"${usd:.2f}", str(requests), detail))
     if rows:
-        rows.append(("Итого", f"${sum(r[1] for r in spend):.2f}", "", ""))
+        total_usd = sum(r[1] for r in spend)
+        rows.append(("Итого", f"${total_usd:.2f}", str(sum(r[2] for r in spend)), ""))
         parts.append(
             table(rows, header=("Кто", "$", "Запросов", "На что"), caption="💵 Деньги (оценка)")
         )
+    else:
+        parts.append(paragraph("Сегодня ИИ ещё ничего не потратил."))
+    if used_pct is not None:
+        limit = (
+            "исчерпан до конца дня" if used_pct >= 100 else f"израсходовано {used_pct}%"
+        )
+        parts.append(paragraph(f"Дневной лимит ИИ: {limit}"))
     parts.append(paragraph(f"За 7 дней: ${week_usd:.2f}"))
-    if gateway:
-        parts.append(f"<footer>Шлюз: {esc(gateway)}</footer>")
     return "".join(parts)
 
 
@@ -153,13 +149,17 @@ def presence_html(status: dict[str, Any]) -> str:
     return "".join(parts)
 
 
-def notes_html(notes: list[FamilyNote]) -> str:
+def notes_html(notes: list[FamilyNote], total: int | None = None) -> str:
     if not notes:
         return paragraph(
-            "📝 В семейной памяти пока пусто. Напишите боту: «Запомни: размер ноги Миши 36»."
+            "📝 В семейной памяти пока пусто. Нажмите «➕ Добавить» "
+            "или напишите боту: «Запомни: размер ноги Миши 36»."
         )
     items = []
     for n in notes:
         author = f" ({esc(n.author)})" if n.author else ""
         items.append(f"<li>{esc(n.content)}{author} — <i>{n.created:%d.%m %H:%M}</i></li>")
-    return heading("📝 Семейная память") + "<ol>" + "".join(items) + "</ol>"
+    parts = [heading("📝 Семейная память"), "<ol>", *items, "</ol>"]
+    if total is not None and total > len(notes):
+        parts.append(f"<footer>Показаны последние {len(notes)} из {total}.</footer>")
+    return "".join(parts)

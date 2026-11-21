@@ -25,40 +25,78 @@ def db():
 
 
 def test_bot_commands_menu():
+    """The "/" menu only brings the buttons back and explains them; nothing else lives there."""
     commands = [c for c, _ in texts.BOT_COMMANDS]
-    assert len(commands) == len(set(commands))  # без дублей
+    assert commands == ["start", "help"]
     for cmd, desc in texts.BOT_COMMANDS:
         assert re.fullmatch(r"[a-z0-9_]{1,32}", cmd)  # формат Telegram
         assert 1 <= len(desc) <= 256 and desc[0].isupper()  # описания по-русски
-        if cmd != "help":
-            assert f"/{cmd}" in texts.HELP  # меню не расходится со справкой
 
 
-def test_start_is_short_greeting():
-    # /start — короткое приветствие с главными командами, а не простыня /help
-    assert len(texts.START) < len(texts.HELP)
-    for cmd in ("/status", "/devices", "/help"):
-        assert cmd in texts.START
+def _keyboard_buttons(role: str) -> list[str]:
+    from app.bot.common import keyboard_for_role
+
+    keyboard = keyboard_for_role(role)
+    assert keyboard is not None
+    return [button.text for row in keyboard.keyboard for button in row]
+
+
+@pytest.mark.parametrize("role", ["owner", "admin"])
+def test_start_and_help_explain_every_button_without_commands(role):
+    """Button-first: each button of this parent's keyboard in one line, then words and voice;
+    a slash command appears only on the help's last line, for those used to them."""
+    start, help_ = texts.start_text(role), texts.help_text(role)
+    assert len(start) < len(help_)
+    for text in (start, help_):
+        lines = text.splitlines()
+        for button in _keyboard_buttons(role):
+            assert sum(line.startswith(f"{button} — ") for line in lines) == 1, button
+        assert "голосов" in text and "«запомни:" in text
+    assert "/" not in start
+    *main, last = help_.splitlines()
+    assert "/" not in "\n".join(main) and last == texts.COMMANDS
+    assert ("🖥 Сервер" in start) == (role == "owner")
+
+
+def test_power_user_commands_in_the_help_still_work():
+    from app.bot import handlers
+
+    registered = {
+        command
+        for handler in handlers.router.message.handlers
+        for flt in handler.filters or []
+        for command in getattr(flt.callback, "commands", ())
+    }
+    named = set(re.findall(r"/([a-z]+)", texts.COMMANDS))
+    assert named and named <= registered
+    # The old commands keep working even though the help no longer lists them.
+    assert {"status", "usage", "digest", "notes", "who", "quota", "movie"} <= registered
 
 
 def test_format_status_and_devices():
-    html = screens.status_html({
-        "router_ok": True, "adguard_ok": False,
-        "devices_total": 5, "devices_online": 3,
-        "devices_blocked": 1, "devices_unknown": 2,
-        "dns_queries_today": 1000, "dns_blocked_today": 50,
-        "active_pauses": [{"target_type": "group", "target": "kid",
-                           "until": "2026-07-14T21:30", "reason": ""}],
-        "screen_time": [{"device": "Планшет", "category": "games", "label": "Игры",
-                         "used_minutes": 80, "limit_minutes": 120}],
-    })
+    from datetime import datetime
+
+    html = screens.status_html(
+        {
+            "router_ok": True, "adguard_ok": False,
+            "devices_total": 5, "devices_online": 3,
+            "devices_blocked": 1, "devices_unknown": 2,
+            "dns_queries_today": 1000, "dns_blocked_today": 50,
+            "active_pauses": [{"target_type": "group", "target": "kid",
+                               "until": "2026-07-14T21:30", "reason": ""}],
+            "screen_time": [{"device": "Планшет", "category": "games", "label": "Игры",
+                             "used_minutes": 80, "limit_minutes": 120}],
+        },
+        [("Все дети", datetime(2026, 7, 14, 21, 30))],
+    )
     text = to_plain(html)
-    assert "Роутер MikroTik · ✅" in text and "AdGuard Home · ❌" in text
-    assert "kid · 21:30" in text
+    assert "Роутер · ✅ работает" in text and "Фильтр сайтов · ❌ не отвечает" in text
+    assert "Обращений к сайтам сегодня · 1000, заблокировано 50" in text
+    assert "Все дети · 21:30" in text and "kid" not in text  # who by name, not a code
     assert "Планшет · игры · 1:20/2:00" in text  # прогресс квоты экранного времени
+    assert not re.search(r"MikroTik|AdGuard|DNS", text)
     assert "<table" in html
     assert texts.hhmm(0) == "0:00" and texts.hhmm(65) == "1:05"
-
 
 
 def test_health_debounce():
@@ -666,15 +704,17 @@ def test_format_quota_and_keyboard():
 
 
 def test_format_usage():
-    today = {"input": 1000, "output": 500, "requests": 5}
-    spend = [("Миша", 0.25, 12, {"tutor": 0.2, "quiz": 0.05})]
-    text = to_plain(screens.usage_html(today, 15000, 285000, "LunaGPT", spend, 1.5))
-    assert "Запросов · 5" in text
-    assert "Токенов на входе · 1,000" in text
-    assert "Остаток бюджета · 285,000" in text
-    assert "За 7 дней · 15,000" in text
+    """The AI spend in money and plain words: no tokens, no gateway, no addresses."""
+    spend = [("Миша", 0.25, 12, {"tutor": 0.2, "quiz": 0.05}), ("Папа", 0.5, 3, {})]
+    text = to_plain(screens.usage_html(spend, 1.5, 40))
     assert "Миша · $0.25 · 12 · репетитор $0.20, викторина $0.05" in text
-    assert "За 7 дней: $1.50" in text and "Шлюз: LunaGPT" in text
+    assert "Итого · $0.75 · 15" in text
+    assert "Дневной лимит ИИ: израсходовано 40%" in text
+    assert "За 7 дней: $1.50" in text
+    assert not re.search(r"[Тт]окен|[Шш]люз|\d+\.\d+\.\d+\.\d+", text)
+    assert "исчерпан" in to_plain(screens.usage_html([], 0.0, 100))
+    empty = to_plain(screens.usage_html([], 0.0))
+    assert "ещё ничего не потратил" in empty and "лимит" not in empty
 
 
 def test_keyboards_for_roles():

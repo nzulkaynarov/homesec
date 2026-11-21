@@ -1,8 +1,7 @@
-"""Reports for the family: time left on quotas with quick +15/+30 buttons, the AI spend and the
-daily digest."""
+"""Reports for the family: time left on quotas with quick +15/+30 buttons, the AI spend (shown
+under «🖥 Сервер») and the daily digest."""
 
 import asyncio
-import json
 from datetime import datetime, timedelta
 
 from aiogram import F, Router
@@ -13,7 +12,7 @@ from sqlalchemy import select
 from .. import db as dbmod
 from ..ai import client as ai_client
 from ..config import settings
-from ..models import Device, Person, kv_get
+from ..models import Device, Person
 from ..services import time_grants
 from . import charts_menu, common, rich, screens, texts
 
@@ -134,31 +133,8 @@ async def cb_grant(cb: CallbackQuery) -> None:
     await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
 
 
-def _collect_usage_sync() -> tuple[dict, int, int | None, str]:
-    s = dbmod.session()
-    try:
-        today = ai_client.usage_today(s)
-        left = ai_client.budget_left(s)
-        now = datetime.now()
-        week_tokens = 0
-        for i in range(7):
-            d_key = ai_client._usage_key(now - timedelta(days=i))
-            raw = kv_get(s, d_key, "")
-            if raw:
-                try:
-                    data = json.loads(raw)
-                    week_tokens += data.get("input", 0) + data.get("output", 0)
-                except ValueError:
-                    pass
-        gw = settings.ai_base_url or "Anthropic Cloud"
-        if "192.168.88.241" in gw:
-            gw = "LunaGPT Gateway (192.168.88.241:4000)"
-        return today, week_tokens, left, gw
-    finally:
-        s.close()
-
-
-def _spend_by_person_sync() -> tuple[list[tuple[str, float, int, dict]], float]:
+def _spend_sync() -> str:
+    """The AI spend in money, per person and per feature; the owner pays, so only he sees it."""
     s = dbmod.session()
     try:
         names = {f"person:{p.id}": p.name for p in s.scalars(select(Person))}
@@ -178,17 +154,18 @@ def _spend_by_person_sync() -> tuple[list[tuple[str, float, int, dict]], float]:
             for i in range(7)
             for entry in ai_client.ledger_for_day(s, now - timedelta(days=i)).values()
         )
-        return rows, week_usd
+        used_pct = None
+        if settings.ai_daily_token_budget:
+            today = ai_client.usage_today(s)
+            spent = today.get("input", 0) + today.get("output", 0)
+            used_pct = round(100 * spent / settings.ai_daily_token_budget)
+        return screens.usage_html(rows, week_usd, used_pct)
     finally:
         s.close()
 
 
-async def cmd_usage(message: Message) -> None:
-    today, week_tokens, left, gw = await asyncio.to_thread(_collect_usage_sync)
-    rows, week_usd = await asyncio.to_thread(_spend_by_person_sync)
-    keyboard = InlineKeyboardMarkup(inline_keyboard=[[charts_menu.button(charts_menu.SPEND)]])
-    screen = screens.usage_html(today, week_tokens, left, gw, rows, week_usd)
-    await rich.answer(message, screen, keyboard)
+async def spend_screen() -> str:
+    return await asyncio.to_thread(_spend_sync)
 
 
 def register(router: Router) -> None:
@@ -197,4 +174,3 @@ def register(router: Router) -> None:
     router.message.register(cmd_digest, Command("digest"))
     router.message.register(cmd_quota, Command("quota"))
     router.callback_query.register(cb_grant, F.data.startswith(f"{GRANT}:"))
-    router.message.register(cmd_usage, Command("usage"))

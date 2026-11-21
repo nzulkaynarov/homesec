@@ -327,7 +327,7 @@ async def main() -> None:
 
     bot = Bot(token=settings.telegram_bot_token)
     try:
-        # Меню команд по «/» — обнаруживаемость команд без чтения /help
+        # The "/" menu: every feature is a button, so it only brings the buttons back and the help
         await bot.set_my_commands(
             [BotCommand(command=c, description=d) for c, d in texts.BOT_COMMANDS]
         )

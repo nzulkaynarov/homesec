@@ -192,6 +192,22 @@ def get_family_notes(db: Session, limit: int = 10) -> list[FamilyNote]:
     )
 
 
+def count_family_notes(db: Session) -> int:
+    return db.query(FamilyNote).count()
+
+
+def delete_family_note(db: Session, note_id: int, by: str = "") -> str:
+    """Remove one note from the family memory and return its text; LookupError if it is gone."""
+    note = db.get(FamilyNote, note_id)
+    if note is None:
+        raise LookupError(note_id)
+    content = note.content
+    db.delete(note)
+    db.commit()
+    log_event(db, "family_note_deleted", f"{by or 'Семья'}: {content}")
+    return content
+
+
 def can_take_quiz_today(db: Session, person_id: int, now: datetime | None = None) -> bool:
     """Проверяет, не получал ли ребёнок уже бонус за викторину сегодня."""
     now = now or datetime.now()

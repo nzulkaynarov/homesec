@@ -29,12 +29,12 @@ from . import (
     charts_menu,
     common,
     device_menu,
+    home_menu,
+    notes_menu,
     onboarding,
     pause_menu,
     reports,
-    rich,
     rules_menu,
-    screens,
     server_menu,
     shared_menu,
     texts,
@@ -92,15 +92,6 @@ async def _do_tool(message: Message, name: str, args: dict) -> None:
 # ---------- семейные мелочи ----------
 
 
-def _who_sync() -> str:
-    s = dbmod.session()
-    try:
-        st = family_svc.get_presence_status(s)
-        return screens.presence_html(st)
-    finally:
-        s.close()
-
-
 def _movie_sync() -> str:
     s = dbmod.session()
     try:
@@ -109,27 +100,10 @@ def _movie_sync() -> str:
         s.close()
 
 
-def _save_note_sync(author: str, content: str) -> str:
-    s = dbmod.session()
-    try:
-        n = family_svc.save_family_note(s, author, content)
-        return f"✅ Заметка сохранена: «{n.content}»"
-    finally:
-        s.close()
-
-
-def _get_notes_sync() -> str:
-    s = dbmod.session()
-    try:
-        notes = family_svc.get_family_notes(s)
-        return screens.notes_html(notes)
-    finally:
-        s.close()
-
-
 _access = AccessMiddleware(onboarding.notify_owner_about_access_request, texts.START_UNAUTHORIZED)
 router.message.outer_middleware(_access)
 router.callback_query.outer_middleware(_access)
+notes_menu.register(router)  # first: its wait for a typed note ends on any other button
 triage.register(router)
 device_menu.register(router)
 pause_menu.register(router)
@@ -140,6 +114,7 @@ onboarding.register(router)
 reports.register(router)
 server_menu.register(router)
 charts_menu.register(router)
+home_menu.register(router)
 
 
 # ---------- выбор устройства кнопками ----------
@@ -173,7 +148,7 @@ async def _pick_device(message: Message, query: str, tool: str, extra: str = "")
     ложного «не нашёл»."""
     candidates = await asyncio.to_thread(_find_candidates, query)
     if not candidates:
-        await message.answer(f"Не нашёл устройство «{query}». /devices покажет список.")
+        await message.answer(f"Не нашёл устройство «{query}». Все устройства — в «📱 Устройства».")
         return
     text = (f"Нашлось несколько устройств по «{query}» — выберите:" if query
             else "Выберите устройство:")
@@ -239,7 +214,7 @@ async def cmd_start(message: Message) -> None:
         await message.answer(texts.START_UNAUTHORIZED)
         await onboarding.notify_owner_about_access_request(message)
         return
-    await message.answer(texts.START, reply_markup=kb)
+    await message.answer(texts.start_text(role), reply_markup=kb)
 
 
 @router.message(Command("help"))
@@ -247,13 +222,7 @@ async def cmd_start(message: Message) -> None:
 async def cmd_help(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
     role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
-    await message.answer(texts.HELP, reply_markup=common.keyboard_for_role(role))
-
-
-@router.message(Command("status"))
-async def cmd_status(message: Message) -> None:
-    status = await asyncio.to_thread(common.run_tool_sync, "get_status", {})
-    await rich.answer(message, screens.status_html(status))
+    await message.answer(texts.help_text(role), reply_markup=common.keyboard_for_role(role))
 
 
 @router.message(Command("devices"))
@@ -261,35 +230,9 @@ async def cmd_devices(message: Message) -> None:
     await device_menu.btn_devices(message)
 
 
-@router.message(Command("who"))
-@router.message(F.text == "🏠 Кто дома")
-async def cmd_who(message: Message) -> None:
-    await rich.answer(message, await asyncio.to_thread(_who_sync))
-
-
 @router.message(Command("movie"))
 async def cmd_movie(message: Message) -> None:
     await message.answer(await asyncio.to_thread(_movie_sync))
-
-
-@router.message(Command("note"))
-async def cmd_note(message: Message, command: CommandObject) -> None:
-    content = (command.args or "").strip()
-    if not content:
-        await message.answer(
-            "Использование: /note <текст заметки>\n"
-            "Например: /note размер ноги Миши 36"
-        )
-        return
-    author = message.from_user.first_name if message.from_user else "Семья"
-    res = await asyncio.to_thread(_save_note_sync, author, content)
-    await message.answer(res)
-
-
-@router.message(Command("notes"))
-@router.message(F.text == "📝 Заметки")
-async def cmd_notes(message: Message) -> None:
-    await rich.answer(message, await asyncio.to_thread(_get_notes_sync))
 
 
 async def _device_command(message: Message, command: CommandObject, tool_name: str) -> None:
@@ -408,8 +351,8 @@ async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
 
     if not ai_client.is_configured():
         await message.answer(
-            "Свободный текст понимает ИИ, а он не настроен "
-            "(HS_ANTHROPIC_API_KEY в .env). Пока доступны команды — /help."
+            "Свободный текст понимает ИИ, а он сейчас не настроен. "
+            "Всё работает кнопками внизу, подсказка — «❓ Помощь»."
         )
         return
     try:
@@ -420,7 +363,9 @@ async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
         return
     except Exception:
         log.exception("оркестратор упал")
-        await message.answer("ИИ споткнулся, подробности в журнале бота. Команды /help работают.")
+        await message.answer(
+            "ИИ споткнулся, подробности в журнале бота. Кнопки внизу работают как обычно."
+        )
         return
 
     common.CHAT_HISTORY[message.chat.id].append({"role": "user", "content": user_text})

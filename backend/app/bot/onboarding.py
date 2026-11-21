@@ -157,7 +157,7 @@ async def cb_access_request(cb: CallbackQuery) -> None:
         try:
             await cb.bot.send_message(
                 requester_id,
-                f"🎉 Доступ открыт.\n\n{texts.START}",
+                f"🎉 Доступ открыт.\n\n{texts.start_text(role)}",
                 reply_markup=common.keyboard_for_role(role),
             )
         except Exception:

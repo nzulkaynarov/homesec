@@ -21,7 +21,8 @@ log = logging.getLogger("homesec.bot.access")
 
 ADULT_ROLES = ("owner", "admin")
 
-OWNER_CALLBACKS = {"acc", "chs"}  # granting roles and the server chart are the owner's
+# Granting roles, the server screen and its chart, and the AI spend (the owner pays for it).
+OWNER_CALLBACKS = {"acc", "chs", "srv", "srvm", "chm"}
 ADULT_BUTTONS = {  # the parents' menu; a tap on one of these ends any "type your answer" wait
     "🖥 Сервер",
     "🏠 Кто дома",
