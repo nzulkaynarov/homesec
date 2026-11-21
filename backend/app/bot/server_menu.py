@@ -9,17 +9,29 @@ from aiogram.types import Message
 
 from .. import db as dbmod
 from ..services import hosts
-from . import common, texts
+from . import common, rich, texts
 
 log = logging.getLogger("homesec.bot.server")
 
 INTERVAL_SECONDS = 60
 
 
+def status_html(blocks: list[tuple[str, list[hosts.Row]]]) -> str:
+    """Each machine as a heading and a two-column table; note lines become paragraphs."""
+    parts = []
+    for title, rows in blocks:
+        parts.append(rich.heading(title))
+        cells = [(label, value) for label, value in rows if value]
+        if cells:
+            parts.append(rich.table(cells))
+        parts += [rich.paragraph(label) for label, value in rows if not value]
+    return "".join(parts)
+
+
 def _status_sync() -> str:
     s = dbmod.session()
     try:
-        return hosts.status_text(s)
+        return status_html(hosts.status_blocks(s))
     finally:
         s.close()
 
@@ -30,7 +42,7 @@ async def btn_server(message: Message) -> None:
     if role != "owner":
         await message.answer("Состояние серверов видит только владелец.")
         return
-    await message.answer(await asyncio.to_thread(_status_sync))
+    await rich.answer(message, await asyncio.to_thread(_status_sync))
 
 
 def _sample_and_judge() -> list[hosts.Change]:

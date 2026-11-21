@@ -77,12 +77,6 @@ def test_escape_markdown():
     assert texts.escape_markdown("a_b*c`d[e") == "a\\_b\\*c\\`d\\[e"
 
 
-def test_spend_report_names_people():
-    rows = [("Миша", 0.25, 12, {"tutor": 0.2, "quiz": 0.05})]
-    report = texts.format_spend_by_person(rows, 1.5)
-    assert "Миша: $0.25" in report and "репетитор $0.20" in report and "За 7 дней: $1.50" in report
-
-
 def test_wrong_quiz_answer_spends_daily_attempt(db):
     assert family.can_take_quiz_today(db, 1)
     family.mark_quiz_attempted(db, 1)

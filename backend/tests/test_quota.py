@@ -273,9 +273,10 @@ def test_get_status_includes_screen_time(db, kid_device, no_reconcile):
         "used_minutes": 80, "limit_minutes": 120,
     }]
 
-    from app.bot.texts import format_status
+    from app.bot.rich import to_plain
+    from app.bot.screens import status_html
 
-    assert "⏳ Планшет: игры 1:20/2:00" in format_status(status)
+    assert "Планшет · игры · 1:20/2:00" in to_plain(status_html(status))
 
 
 def test_multi_device_quota_aggregation_by_person(db, kid_device):

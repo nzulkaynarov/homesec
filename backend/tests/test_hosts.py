@@ -210,7 +210,7 @@ def test_status_shows_both_machines(db):
         "ещё 165 дн.",
         "ошибки ядра: нет",
         "Raspberry Pi — работает 1 дн. 23 ч",
-        "питание в норме",
+        "Питание: в норме",
     ):
         assert part in text, part
 

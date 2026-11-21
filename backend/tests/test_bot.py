@@ -5,9 +5,10 @@ import re
 
 import pytest
 
-from app.bot import texts
+from app.bot import screens, texts
 from app.bot.health import HealthMonitor
 from app.bot.notify import CURSOR_KEY, collect_notifications
+from app.bot.rich import to_plain
 from app.db import Base, engine, session
 from app.models import Device, EventLog, KVState, kv_get, log_event
 
@@ -41,7 +42,7 @@ def test_start_is_short_greeting():
 
 
 def test_format_status_and_devices():
-    text = texts.format_status({
+    html = screens.status_html({
         "router_ok": True, "adguard_ok": False,
         "devices_total": 5, "devices_online": 3,
         "devices_blocked": 1, "devices_unknown": 2,
@@ -51,9 +52,11 @@ def test_format_status_and_devices():
         "screen_time": [{"device": "Планшет", "category": "games", "label": "Игры",
                          "used_minutes": 80, "limit_minutes": 120}],
     })
-    assert "✅ роутер" in text and "❌ AdGuard" in text
-    assert "kid до 21:30" in text
-    assert "⏳ Планшет: игры 1:20/2:00" in text  # прогресс квоты экранного времени
+    text = to_plain(html)
+    assert "Роутер MikroTik · ✅" in text and "AdGuard Home · ❌" in text
+    assert "kid · 21:30" in text
+    assert "Планшет · игры · 1:20/2:00" in text  # прогресс квоты экранного времени
+    assert "<table" in html
     assert texts.hhmm(0) == "0:00" and texts.hhmm(65) == "1:05"
 
 
@@ -348,7 +351,6 @@ def test_handle_voice_transcription_success(monkeypatch):
 
 
 def test_format_quota_and_keyboard():
-    from app.bot import texts
     from app.bot.reports import quota_buttons_keyboard
 
     items = [{
@@ -360,12 +362,10 @@ def test_format_quota_and_keyboard():
             {"category": "internet", "label": "Интернет", "used": 150, "limit": 150},
         ],
     }]
-    text = texts.format_quota(items)
-    assert "Миша (Планшет)" in text
-    assert "Игры:" in text
-    assert "осталось 60 мин" in text
-    assert "лимит исчерпан ⛔" in text
-    assert "█" in text and "░" in text
+    text = to_plain(screens.quota_html(items))
+    assert "📱 Миша (Планшет)" in text
+    assert "Игры · [████░░░░] 1:00/2:00 · 60 мин" in text
+    assert "Интернет · [████████] 2:30/2:30 · ⛔ всё" in text
 
     kb = quota_buttons_keyboard(items)
     assert kb is not None
@@ -375,16 +375,15 @@ def test_format_quota_and_keyboard():
 
 
 def test_format_usage():
-    from app.bot import texts
-
     today = {"input": 1000, "output": 500, "requests": 5}
-    text = texts.format_usage(today, week_tokens=15000, budget_left=285000, gateway="LunaGPT")
-    assert "Запросов: 5" in text
-    assert "Входных токенов: 1,000" in text
-    assert "Выходных токенов: 500" in text
-    assert "285,000" in text
-    assert "15,000" in text
-    assert "LunaGPT" in text
+    spend = [("Миша", 0.25, 12, {"tutor": 0.2, "quiz": 0.05})]
+    text = to_plain(screens.usage_html(today, 15000, 285000, "LunaGPT", spend, 1.5))
+    assert "Запросов · 5" in text
+    assert "Токенов на входе · 1,000" in text
+    assert "Остаток бюджета · 285,000" in text
+    assert "За 7 дней · 15,000" in text
+    assert "Миша · $0.25 · 12 · репетитор $0.20, викторина $0.05" in text
+    assert "За 7 дней: $1.50" in text and "Шлюз: LunaGPT" in text
 
 
 def test_keyboards_for_roles():
@@ -603,3 +602,12 @@ def test_a_notice_nobody_received_is_sent_again(db, monkeypatch):
     asyncio.run(one_round(delivered))
     delivered.assert_awaited()
     assert notify.collect_notifications(db, advance=False) == []
+
+
+def test_rich_html_escapes_what_people_type():
+    from app.bot.rich import table
+
+    assert "<p>" in screens.notes_html([])
+    cell = table([("<b>Ваня & Co</b>", "*x*")])
+    assert "&lt;b&gt;Ваня &amp; Co&lt;/b&gt;" in cell
+    assert to_plain(cell) == "<b>Ваня & Co</b> · *x*"

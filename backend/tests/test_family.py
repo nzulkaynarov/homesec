@@ -6,6 +6,8 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
+from app.bot.rich import to_plain
+from app.bot.screens import notes_html, presence_html
 from app.config import settings
 from app.db import Base, engine, session
 from app.models import Device, FamilyNote, Person, QuotaBonus, Rule, kv_get
@@ -107,12 +109,12 @@ def test_presence_status_and_formatting(db):
     assert status["iot_total"] == 1
     assert status["iot_online"] == 0
 
-    text = family_svc.format_presence(status)
-    assert "🟢 👤 *Папа* — дома" in text
-    assert "⚪ 🎒 *Аня* — не в сети" in text
-    assert "🟢 *Гостиная ТВ* — онлайн" in text
-    assert "🕐 Проверено в" in text
-    assert "0 из 1 устройств в сети" in text
+    text = to_plain(presence_html(status))
+    assert "👤 Папа · 🟢 дома" in text
+    assert "🎒 Аня · ⚪ не в сети" in text
+    assert "Гостиная ТВ · 🟢 онлайн" in text
+    assert "Проверено в" in text
+    assert "0 из 1 в сети" in text
 
 
 def test_set_movie_mode(db):
@@ -141,7 +143,7 @@ def test_set_movie_mode_no_shared_devices(db):
 
 
 def test_family_notes_crud(db):
-    assert "пока пусто" in family_svc.format_family_notes([])
+    assert "пока пусто" in notes_html([])
 
     note1 = family_svc.save_family_note(db, author="Папа", content="Размер ноги Миши: 36")
     note2 = family_svc.save_family_note(db, author="Мама", content="Код домофона: 4589")
@@ -151,7 +153,7 @@ def test_family_notes_crud(db):
     assert notes[0].id == note2.id
     assert notes[1].id == note1.id
 
-    formatted = family_svc.format_family_notes(notes)
+    formatted = to_plain(notes_html(notes))
     assert "Размер ноги Миши: 36" in formatted
     assert "Код домофона: 4589" in formatted
     assert "(Папа)" in formatted and "(Мама)" in formatted
@@ -184,5 +186,5 @@ def test_quiz_lifecycle(db):
 def test_presence_says_so_when_the_router_is_silent(db):
     with patch("app.services.mikrotik.api_session", side_effect=OSError("no route")):
         status = family_svc.get_presence_status(db)
-    text = family_svc.format_presence(status)
+    text = to_plain(presence_html(status))
     assert "Роутер не ответил" in text and "не в сети" not in text

@@ -14,7 +14,7 @@ from .. import db as dbmod
 from ..ai import client as ai_client
 from ..config import settings
 from ..models import Device, Person, kv_get
-from . import common, texts
+from . import common, rich, screens
 
 
 async def btn_quota(message: Message) -> None:
@@ -88,8 +88,12 @@ def quota_buttons_keyboard(items: list[dict]) -> InlineKeyboardMarkup | None:
 
 async def cmd_quota(message: Message) -> None:
     items = await asyncio.to_thread(_collect_quota_sync)
-    kb = quota_buttons_keyboard(items)
-    await message.answer(texts.format_quota(items), reply_markup=kb)
+    await rich.answer(message, screens.quota_html(items), quota_buttons_keyboard(items))
+
+
+async def redraw_quota(message: Message) -> None:
+    items = await asyncio.to_thread(_collect_quota_sync)
+    await rich.edit(message, screens.quota_html(items), quota_buttons_keyboard(items))
 
 
 def _collect_usage_sync() -> tuple[dict, int, int | None, str]:
@@ -149,11 +153,7 @@ async def cmd_usage(message: Message) -> None:
         return
     today, week_tokens, left, gw = await asyncio.to_thread(_collect_usage_sync)
     rows, week_usd = await asyncio.to_thread(_spend_by_person_sync)
-    await message.answer(
-        texts.format_usage(today, week_tokens, left, gw)
-        + "\n\n"
-        + texts.format_spend_by_person(rows, week_usd)
-    )
+    await rich.answer(message, screens.usage_html(today, week_tokens, left, gw, rows, week_usd))
 
 
 def register(router: Router) -> None:

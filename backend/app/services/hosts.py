@@ -475,53 +475,62 @@ def _disks(data: dict[str, Any]) -> str:
     return ", ".join(f"{mount} {pct:.0f}%" for mount, pct in disks.items()) or "нет данных"
 
 
-def _pc_block(db: Session, now: datetime) -> list[str]:
+Row = tuple[str, str]  # (label, value); an empty value makes a note line
+
+
+def _pc_block(db: Session, now: datetime) -> tuple[str, list[Row]]:
     last = latest(db, PC)
     if last is None:
-        return ["🖥 ПК: данных ещё не было. Сборщик на ПК не запущен?"]
+        return "🖥 ПК: данных ещё не было. Сборщик на ПК не запущен?", []
     received, data = last
     day = [d for _, d in samples(db, PC, since=now - timedelta(days=1)) if not d.get("stopping")]
     if now - received > SILENT_AFTER:
-        lines = [f"🖥 ПК — 🔴 молчит с {_when(received, now)} ({_span(now - received)})"]
+        title = f"🖥 ПК — 🔴 молчит с {_when(received, now)} ({_span(now - received)})"
         if data.get("stopping"):
-            lines.append("Выключен штатно.")
-        elif day:
-            lines.append(f"Последние показания: {readings(day[-1])}")
-        return lines
+            return title, [("Выключен штатно.", "")]
+        return title, [("Последние показания", readings(day[-1]))] if day else []
     boot = data.get("boot") or {}
     started = _parse(boot.get("started"))
-    lines = ["🖥 ПК — на связи" + (f", работает {_span(now - started)}" if started else "")]
+    title = "🖥 ПК — на связи" + (f", работает {_span(now - started)}" if started else "")
+    rows: list[Row] = []
     cpu, peak = _num(data.get("cpu_max_c")), _peak(day, "cpu_max_c")
     if cpu is not None:
         busy = _num(data.get("cpu_busy_pct"))
-        line = f"Процессор: {cpu:.0f} °C"
-        line += f" (за сутки макс. {peak:.0f})" if peak is not None else ""
-        line += f", загрузка {busy:.0f}%" if busy is not None else ""
+        value = f"{cpu:.0f} °C"
+        value += f" (за сутки макс. {peak:.0f})" if peak is not None else ""
+        value += f", загрузка {busy:.0f}%" if busy is not None else ""
         if (load := _num(data.get("load1"))) is not None:
-            line += f", очередь {comma(load)}"
-        lines.append(line)
+            value += f", очередь {comma(load)}"
+        rows.append(("Процессор", value))
     if data.get("top_process"):
-        lines.append(f"Тяжелее всех: {data['top_process']}")
+        rows.append(("Тяжелее всех", str(data["top_process"])))
     gpu, gpu_peak = _num(data.get("gpu_c")), _peak(day, "gpu_c")
-    gpu_line = f"Видеокарта: {gpu:.0f} °C" if gpu is not None else "Видеокарта: спит"
-    lines.append(gpu_line + (f" (за сутки макс. {gpu_peak:.0f})" if gpu_peak is not None else ""))
+    value = f"{gpu:.0f} °C" if gpu is not None else "спит"
+    rows.append(
+        (
+            "Видеокарта",
+            value + (f" (за сутки макс. {gpu_peak:.0f})" if gpu_peak is not None else ""),
+        )
+    )
     if (nvme := _num(data.get("nvme_c"))) is not None:
-        lines.append(f"Системный диск: {nvme:.0f} °C · свободно места: {_disks(data)}")
-    else:
-        lines.append(f"Свободно места: {_disks(data)}")
+        rows.append(("Системный диск", f"{nvme:.0f} °C"))
+    rows.append(("Свободно места", _disks(data)))
     memory = _num(data.get("mem_avail_mb"))
     if memory is not None:
         low = [v for d in day if (v := _num(d.get("mem_avail_mb"))) is not None]
-        line = f"Память: свободно {comma(memory / 1024)} ГБ"
-        line += f" (за сутки мин. {comma(min(low) / 1024)})" if low else ""
+        value = f"свободно {comma(memory / 1024)} ГБ"
+        value += f" (за сутки мин. {comma(min(low) / 1024)})" if low else ""
         if (swap := _num(data.get("swap_used_mb"))) is not None:
-            line += f", подкачка {comma(swap / 1024)} ГБ"
-        lines.append(line)
+            value += f", подкачка {comma(swap / 1024)} ГБ"
+        rows.append(("Память", value))
     down = data.get("services_down") or []
-    lines.append(
-        "Сервисы: все работают"
-        if not down
-        else "Сервисы: ⚠️ не работает " + ", ".join(SERVICE_NAMES.get(s, s) for s in down)
+    rows.append(
+        (
+            "Сервисы",
+            "все работают"
+            if not down
+            else "⚠️ не работает " + ", ".join(SERVICE_NAMES.get(s, s) for s in down),
+        )
     )
     ages = data.get("backup_age_h") or {}
     if ages:
@@ -529,47 +538,54 @@ def _pc_block(db: Session, now: datetime) -> list[str]:
             f"{BACKUP_NAMES.get(n, n)} {'нет' if a is None else f'{a:.0f} ч назад'}"
             for n, a in ages.items()
         ]
-        lines.append("Резервные копии: " + ", ".join(parts))
+        rows.append(("Резервные копии", ", ".join(parts)))
     if (days := _num(data.get("tailscale_days"))) is not None:
-        lines.append(f"Ключ Tailscale: ещё {days:.0f} дн.")
+        rows.append(("Ключ Tailscale", f"ещё {days:.0f} дн."))
     errors = data.get("kernel_errors")
     if isinstance(errors, int):
-        lines.append(
-            "Аппаратные ошибки ядра: нет"
-            if errors == 0
-            else f"Аппаратные ошибки ядра: ⚠️ {errors} с загрузки"
-        )
+        rows.append(("Аппаратные ошибки ядра", "нет" if errors == 0 else f"⚠️ {errors} с загрузки"))
     kills = data.get("oom_kills")
     if isinstance(kills, int) and kills:
-        lines.append(f"Остановлено из-за нехватки памяти: ⚠️ {kills} с загрузки")
-    return lines
+        rows.append(("Остановлено из-за нехватки памяти", f"⚠️ {kills} с загрузки"))
+    return title, rows
 
 
-def _pi_block(db: Session, now: datetime) -> list[str]:
+def _pi_block(db: Session, now: datetime) -> tuple[str, list[Row]]:
     last = latest(db, PI)
     if last is None:
-        return ["🍓 Raspberry Pi: данных ещё нет."]
+        return "🍓 Raspberry Pi: данных ещё нет.", []
     _, data = last
     day = [d for _, d in samples(db, PI, since=now - timedelta(days=1))]
-    parts = []
+    rows: list[Row] = []
     if (cpu := _num(data.get("cpu_c"))) is not None:
         peak = _peak(day, "cpu_c")
-        parts.append(
-            f"{cpu:.0f} °C" + (f" (за сутки макс. {peak:.0f})" if peak is not None else "")
-        )
+        value = f"{cpu:.0f} °C" + (f" (за сутки макс. {peak:.0f})" if peak is not None else "")
+        rows.append(("Температура", value))
     if "undervoltage_since_boot" in data:
-        parts.append(
-            "⚠️ была просадка питания" if data["undervoltage_since_boot"] else "питание в норме"
+        rows.append(
+            (
+                "Питание",
+                "⚠️ была просадка" if data["undervoltage_since_boot"] else "в норме",
+            )
         )
-    parts.append(f"карта: свободно {_disks(data)}")
+    rows.append(("Карта", f"свободно {_disks(data)}"))
     if (memory := _num(data.get("mem_avail_mb"))) is not None:
-        parts.append(f"память: {memory:.0f} МБ свободно")
-    line = "🍓 Raspberry Pi"
+        rows.append(("Память", f"{memory:.0f} МБ свободно"))
+    title = "🍓 Raspberry Pi"
     if (uptime := _num(data.get("uptime_s"))) is not None:
-        line += f" — работает {_uptime(uptime)}"
-    return [line, ", ".join(parts)]
+        title += f" — работает {_uptime(uptime)}"
+    return title, rows
+
+
+def status_blocks(db: Session, now: datetime | None = None) -> list[tuple[str, list[Row]]]:
+    """Both machines as (title, rows): the bot draws them as tables, tests read them as text."""
+    now = now or datetime.now()
+    return [_pc_block(db, now), _pi_block(db, now)]
 
 
 def status_text(db: Session, now: datetime | None = None) -> str:
-    now = now or datetime.now()
-    return "\n".join([*_pc_block(db, now), "", *_pi_block(db, now)])
+    blocks = []
+    for title, rows in status_blocks(db, now):
+        lines = [title] + [f"{label}: {value}" if value else label for label, value in rows]
+        blocks.append("\n".join(lines))
+    return "\n\n".join(blocks)

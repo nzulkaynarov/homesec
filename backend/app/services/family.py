@@ -119,48 +119,6 @@ def get_presence_status(db: Session) -> dict[str, Any]:
     }
 
 
-def format_presence(status: dict[str, Any]) -> str:
-    """Форматирует радар присутствия для Telegram."""
-    lines = ["🏠 *Радар «Кто дома»*:\n"]
-    if not status.get("router_answered", True):
-        return lines[0] + "⚠️ Роутер не ответил, сейчас не могу сказать, кто дома."
-
-    people = status.get("people", [])
-    if people:
-        lines.append("👥 *Семья:*")
-        for p in people:
-            person = p["person"]
-            role_icon = "🎒" if person.role == "kid" else "👤"
-            if p["is_home"]:
-                dev_str = f" ({', '.join(p['active_devices'])})" if p["active_devices"] else ""
-                lines.append(f"🟢 {role_icon} *{person.name}* — дома{dev_str}")
-            else:
-                lines.append(f"⚪ {role_icon} *{person.name}* — не в сети")
-        lines.append("")
-
-    shared = status.get("shared", [])
-    if shared:
-        lines.append("📺 *Общие устройства (ТВ и медиа):*")
-        for s in shared:
-            dev = s["device"]
-            status_icon = "🟢" if s["is_online"] else "⚪"
-            state = "онлайн" if s["is_online"] else "выкл"
-            if s["blocked"]:
-                state += ", ⛔ заблокирован"
-            lines.append(f"{status_icon} *{dev.name}* — {state}")
-        lines.append("")
-
-    iot_total = status.get("iot_total", 0)
-    if iot_total > 0:
-        iot_online = status.get("iot_online", 0)
-        lines.append(f"🤖 *Умный дом (IoT):* {iot_online} из {iot_total} устройств в сети.")
-
-    checked_at = status.get("checked_at")
-    if checked_at is not None:
-        lines.append(f"🕐 Проверено в {checked_at:%H:%M:%S}")
-    return "\n".join(lines).rstrip()
-
-
 MORNING_HOUR = 7
 SHARED_STATES = ("kid", "off", "adult")
 
@@ -211,7 +169,7 @@ def set_movie_mode(db: Session, hours: float | None = None) -> str:
         set_shared_state(db, dev, "adult", duration)
     until = datetime.now() + timedelta(hours=duration)
     names = ", ".join(d.name for d in shared_devs)
-    return f"🍿 *Режим для взрослых включён* до {until:%H:%M}.\n\nУстройства: {names}."
+    return f"🍿 Режим для взрослых включён до {until:%H:%M}.\n\nУстройства: {names}."
 
 
 def save_family_note(db: Session, author: str, content: str) -> FamilyNote:
@@ -232,19 +190,6 @@ def get_family_notes(db: Session, limit: int = 10) -> list[FamilyNote]:
             .limit(limit)
         )
     )
-
-
-def format_family_notes(notes: list[FamilyNote]) -> str:
-    """Форматирует список заметок для Telegram."""
-    if not notes:
-        return "📝 В семейной памяти пока пусто.\n\nНапишите боту: «Запомни: размер ноги Миши 36»."
-
-    lines = ["📝 *Семейная память и заметки:*\n"]
-    for i, n in enumerate(notes, 1):
-        dt = n.created.strftime("%d.%m %H:%M")
-        auth = f" ({n.author})" if n.author else ""
-        lines.append(f"{i}. {n.content}{auth} — _{dt}_")
-    return "\n".join(lines)
 
 
 def can_take_quiz_today(db: Session, person_id: int, now: datetime | None = None) -> bool:

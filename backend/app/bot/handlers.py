@@ -4,6 +4,7 @@
 мутации исполняются сразу; подтверждение кнопкой нужно только действиям ИИ."""
 
 import asyncio
+import html
 import logging
 from typing import Any
 
@@ -31,7 +32,9 @@ from . import (
     onboarding,
     pause_menu,
     reports,
+    rich,
     rules_menu,
+    screens,
     server_menu,
     shared_menu,
     texts,
@@ -92,7 +95,7 @@ def _who_sync() -> str:
     s = dbmod.session()
     try:
         st = family_svc.get_presence_status(s)
-        return family_svc.format_presence(st)
+        return screens.presence_html(st)
     finally:
         s.close()
 
@@ -118,7 +121,7 @@ def _get_notes_sync() -> str:
     s = dbmod.session()
     try:
         notes = family_svc.get_family_notes(s)
-        return family_svc.format_family_notes(notes)
+        return screens.notes_html(notes)
     finally:
         s.close()
 
@@ -221,6 +224,12 @@ async def cb_pick(cb: CallbackQuery) -> None:
     except Exception:
         log.exception("инструмент %s упал", tool_name)
         result = "Ошибка при выполнении, подробности в журнале."
+    if isinstance(cb.message, Message) and cb.message.text is None:
+        # a rich report (quotas): redraw it with fresh numbers, keep the buttons, toast the result
+        await cb.answer(str(result)[:200])
+        if tool_name == "add_bonus_time":
+            await reports.redraw_quota(cb.message)
+        return
     await cb.answer()
     if isinstance(cb.message, Message):
         await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
@@ -255,7 +264,7 @@ async def cmd_help(message: Message) -> None:
 @router.message(Command("status"))
 async def cmd_status(message: Message) -> None:
     status = await asyncio.to_thread(common.run_tool_sync, "get_status", {})
-    await message.answer(texts.format_status(status))
+    await rich.answer(message, screens.status_html(status))
 
 
 @router.message(Command("devices"))
@@ -266,8 +275,7 @@ async def cmd_devices(message: Message) -> None:
 @router.message(Command("who"))
 @router.message(F.text == "🏠 Кто дома")
 async def cmd_who(message: Message) -> None:
-    text = await asyncio.to_thread(_who_sync)
-    await message.answer(text, parse_mode="Markdown")
+    await rich.answer(message, await asyncio.to_thread(_who_sync))
 
 
 @router.message(Command("movie"))
@@ -277,8 +285,7 @@ async def cmd_movie(message: Message) -> None:
     if role == "kid":
         await message.answer("Эта команда доступна только родителям 🍿")
         return
-    text = await asyncio.to_thread(_movie_sync)
-    await message.answer(text, parse_mode="Markdown")
+    await message.answer(await asyncio.to_thread(_movie_sync))
 
 
 @router.message(Command("note"))
@@ -298,8 +305,7 @@ async def cmd_note(message: Message, command: CommandObject) -> None:
 @router.message(Command("notes"))
 @router.message(F.text == "📝 Заметки")
 async def cmd_notes(message: Message) -> None:
-    text = await asyncio.to_thread(_get_notes_sync)
-    await message.answer(text, parse_mode="Markdown")
+    await rich.answer(message, await asyncio.to_thread(_get_notes_sync))
 
 
 @router.message(F.text == "📶 Wi-Fi")
@@ -535,7 +541,7 @@ async def handle_voice(message: Message) -> None:
         await message.answer("Не удалось разобрать речь. Попробуйте сказать четче.")
         return
 
-    await message.answer(f"🗣 <i>«{transcribed_text}»</i>", parse_mode="HTML")
+    await message.answer(f"🗣 <i>«{html.escape(transcribed_text)}»</i>", parse_mode="HTML")
     await _process_user_nl_prompt(message, transcribed_text)
 
 
