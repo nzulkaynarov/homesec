@@ -10,7 +10,7 @@ import logging
 from datetime import datetime, timedelta
 
 from aiogram import Bot, Dispatcher
-from aiogram.types import BotCommand
+from aiogram.types import BotCommand, InlineKeyboardMarkup, ReplyKeyboardRemove
 
 from .. import db as dbmod
 from ..ai import analyst, watchdog
@@ -19,7 +19,7 @@ from ..db import Base, engine
 from ..migrations import ensure_schema
 from ..services import family as family_svc
 from ..services import followups, uptime
-from . import alerts, handlers, luna_watch, notify, server_menu, texts
+from . import access, alerts, handlers, luna_watch, notify, server_menu, texts
 from .health import default_monitor
 
 log = logging.getLogger("homesec.bot")
@@ -74,7 +74,8 @@ def _collect_notifications() -> tuple[int, list[PendingNotice]]:
         return latest, [
             (n.kind,
              {"id": n.device.id, "name": n.device.name, "mac": n.device.mac,
-              "ip": n.device.ip, "random_mac": n.device.mac_is_random},
+              "ip": n.device.ip, "random_mac": n.device.mac_is_random,
+              "person_id": n.device.person_id},
              n.message,
              n.extra_device.id if n.extra_device else None,
              people,
@@ -102,6 +103,7 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
             latest, items = await asyncio.to_thread(_collect_notifications)
             done_until = latest
             for kind, dev, message, extra_id, people, request_id, event_id in items:
+                kb: InlineKeyboardMarkup | None
                 if kind == "device_maybe_same" and extra_id is not None:
                     text = f"🔁 {message}"
                     kb = alerts.merge_keyboard(dev["id"], extra_id)
@@ -110,10 +112,10 @@ async def notify_loop(bot: Bot, chat_ids: set[int]) -> None:
                     kb = alerts.new_device_keyboard(dev["id"], people)
                 elif kind == "quota_block":
                     text = f"⏳ {message}\nМожно добавить время кнопкой:"
-                    kb = alerts.bonus_keyboard(dev["id"])
+                    kb = alerts.bonus_keyboard(dev)
                 elif kind == "quota_warn":
                     text = f"⚠️ {message}\nМожно добавить время заранее:"
-                    kb = alerts.bonus_keyboard(dev["id"])
+                    kb = alerts.bonus_keyboard(dev)
                 elif kind == "bonus_request" and request_id is not None:
                     text = f"🙏 {message}"
                     category = await asyncio.to_thread(_request_category, request_id)
@@ -247,6 +249,47 @@ async def digest_loop(bot: Bot, chat_ids: set[int]) -> None:
             log.exception("digest_loop")
 
 
+MOVED_TOLD_KEY = "moved_to_luna:"  # per person: the one-time "your place is Luna" was delivered
+
+
+def _children_to_tell() -> list[tuple[int, int]]:
+    from ..models import Person, kv_get
+
+    s = dbmod.session()
+    try:
+        linked = s.query(Person).filter(
+            Person.telegram_id.isnot(None), Person.bot_role.in_(access.NOT_SERVED)
+        )
+        return [
+            (p.id, int(p.telegram_id or 0))
+            for p in linked
+            if not kv_get(s, f"{MOVED_TOLD_KEY}{p.id}", "")
+        ]
+    finally:
+        s.close()
+
+
+def _child_told(person_id: int) -> None:
+    from ..models import kv_set
+
+    s = dbmod.session()
+    try:
+        kv_set(s, f"{MOVED_TOLD_KEY}{person_id}", "1")
+    finally:
+        s.close()
+
+
+async def _tell_children_they_moved(bot: Bot) -> None:
+    """Children and guests who used this bot hear once that their menu now lives in Luna."""
+    for person_id, chat_id in await asyncio.to_thread(_children_to_tell):
+        try:
+            await bot.send_message(chat_id, access.MOVED, reply_markup=ReplyKeyboardRemove())
+        except Exception:
+            log.warning("could not tell person %s about the move to Luna", person_id, exc_info=True)
+            continue
+        await asyncio.to_thread(_child_told, person_id)
+
+
 async def main() -> None:
     logging.basicConfig(
         level=logging.INFO, format="%(asctime)s %(name)s %(levelname)s %(message)s"
@@ -270,6 +313,7 @@ async def main() -> None:
         )
     except Exception:
         log.warning("не удалось зарегистрировать меню команд", exc_info=True)
+    await _tell_children_they_moved(bot)
     dp = Dispatcher()
     # Ролевой доступ и онбординг новых членов семьи контролируются внутри handlers.router
     dp.include_router(handlers.router)

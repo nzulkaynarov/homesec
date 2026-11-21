@@ -3,7 +3,6 @@ for more time and a device that looks like a known one with a new MAC."""
 
 import asyncio
 import logging
-from datetime import datetime
 
 from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
@@ -11,7 +10,7 @@ from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMar
 from .. import db as dbmod
 from ..ai import tools
 from ..models import GROUP_LABELS, Device, Person
-from ..services import house_rules
+from ..services import time_grants
 from . import common
 from .texts import DANGER, SUCCESS
 
@@ -44,16 +43,20 @@ def new_device_keyboard(dev_id: int, people: list[tuple[int, str, str]]) -> Inli
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
-def bonus_keyboard(dev_id: int, minutes: int = 30) -> InlineKeyboardMarkup:
-    """Кнопка «+30 мин» под уведомлением о блокировке по квоте. Callback
-    обрабатывает cb_pick — тот же путь, что и выбор устройства для /bonus."""
-    return InlineKeyboardMarkup(inline_keyboard=[[
-        InlineKeyboardButton(
-            text=f"➕ {minutes} мин",
-            callback_data=f"pick:add_bonus_time:{dev_id}:{minutes}:internet",
-        ),
-    ]])
+def bonus_keyboard(dev: dict) -> InlineKeyboardMarkup | None:
+    """«+15» and «+30» under a "time is running out" alert: the same rule as everywhere a parent
+    gives time. A device without an owner has nobody to give time to, so it gets no buttons."""
+    from .reports import grant_button
 
+    person_id = dev.get("person_id")
+    if person_id is None:
+        return None
+    return InlineKeyboardMarkup(
+        inline_keyboard=[[grant_button(person_id, 15), grant_button(person_id, 30)]]
+    )
+
+
+STATUS_WORDS = {"approved": "одобрено", "denied": "отказано", "expired": "срок вышел"}
 
 # ---------- запрос ребёнка «попросить ещё времени» ----------
 
@@ -109,7 +112,6 @@ def _resolve_bonus_request(request_id: int, choice: str) -> str:
     повторное нажатие по обработанной заявке вернёт пометку об этом."""
     from ..models import BonusRequest
     from ..services import bonus
-    from ..services.quota import QUOTA_CATEGORY_LABELS
 
     s = dbmod.session()
     try:
@@ -117,45 +119,23 @@ def _resolve_bonus_request(request_id: int, choice: str) -> str:
         if req is None:
             return "Заявка не найдена."
         if req.status != "pending":
-            return f"Заявка уже обработана ({req.status})."
+            return f"На эту просьбу уже ответили: {STATUS_WORDS.get(req.status, req.status)}."
         if choice == "no":
             bonus.resolve(s, req, "denied")
-            return "Отказано. Ребёнок увидит это на своей странице."
-        if req.category == bonus.PAUSE_CATEGORY:
-            return _open_through_pause(s, req, choice)
-        minutes = BONUS_PRESETS.get(choice, 30)
-        cat_label = QUOTA_CATEGORY_LABELS.get(req.category, req.category)
+            return "Отказано. Ребёнок узнает об этом от Luna."
+        dev = s.get(Device, req.device_id)
+        if dev is None or dev.person_id is None:
+            return "Устройство без владельца, время добавить некому."
+        minutes = time_grants.WHOLE_DAY if choice == "day" else BONUS_PRESETS.get(choice, 30)
         try:
-            tools.run_tool(s, "add_bonus_time",
-                           {"target": str(req.device_id), "minutes": minutes,
-                            "category": req.category, "comment": "одобрено из Telegram"},
-                           source="bot")
-        except tools.ToolError as e:
-            return f"Не получилось добавить время: {e}"
-        bonus.resolve(s, req, "approved", minutes)
-        label = "до конца дня" if choice == "day" else f"+{minutes} мин"
-        return f"✅ Одобрено ({label}, {cat_label}). Время добавлено."
+            done = time_grants.grant(s, dev.person_id, minutes, "Одобрено родителем")
+        except time_grants.GrantError as exc:
+            return f"⚠️ {exc} Просьба осталась открытой."
+        given = minutes if minutes is not None else time_grants.DAY_MINUTES
+        bonus.resolve(s, req, "approved", given)
+        return f"✅ Одобрено: {done}."
     finally:
         s.close()
-
-
-def _open_through_pause(s, req, choice: str) -> str:
-    """Approve a request sent during a pause: open the child's internet for a
-    while; the pause itself stays and takes over again afterwards."""
-    from ..services import bonus
-
-    dev = s.get(Device, req.device_id)
-    if dev is None or dev.person_id is None:
-        return "Устройство без владельца, открыть интернет некому."
-    minutes = None if choice == "day" else BONUS_PRESETS.get(choice, 30)
-    try:
-        until = house_rules.open_through_pause(s, dev.person_id, minutes)
-    except house_rules.RuleError as e:
-        bonus.resolve(s, req, "approved", 0)
-        return str(e)
-    opened = max(1, round((until - datetime.now()).total_seconds() / 60))
-    bonus.resolve(s, req, "approved", opened)
-    return f"✅ Интернет открыт до {until:%H:%M}, потом пауза продолжится."
 
 
 async def cb_bonus_request(cb: CallbackQuery) -> None:
@@ -247,8 +227,16 @@ async def cb_new_device(cb: CallbackQuery) -> None:
         await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
 
 
+async def cb_old_direct_request(cb: CallbackQuery) -> None:
+    """Buttons under a child's request sent through this bot before children moved to Luna."""
+    await cb.answer("Эта просьба устарела. Теперь дети просят время через Luna.", show_alert=True)
+    if isinstance(cb.message, Message):
+        await cb.message.edit_reply_markup(reply_markup=None)
+
+
 def register(router: Router) -> None:
     """Attach to the router that carries the access middleware."""
+    router.callback_query.register(cb_old_direct_request, F.data.startswith("bdir:"))
     router.callback_query.register(cb_bonus_request, F.data.startswith("br:"))
     router.callback_query.register(cb_merge, F.data.startswith("mg:"))
     router.callback_query.register(cb_new_device, F.data.startswith("nd:"))

@@ -34,27 +34,6 @@ def keyboard_for_role(role: str) -> ReplyKeyboardMarkup | None:
         if role == "owner":
             rows.append([KeyboardButton(text=BTN_SERVER)])
         return ReplyKeyboardMarkup(keyboard=rows, resize_keyboard=True)
-    if role == "kid":
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [
-                    KeyboardButton(text="⏳ Моё время"),
-                    KeyboardButton(text="🙏 Попросить время"),
-                ],
-                [
-                    KeyboardButton(text="✅ Сделал дело"),
-                    KeyboardButton(text="❓ Помощь"),
-                ],
-            ],
-            resize_keyboard=True,
-        )
-    if role == "guest":
-        return ReplyKeyboardMarkup(
-            keyboard=[
-                [KeyboardButton(text="📶 Wi-Fi"), KeyboardButton(text="❓ Помощь")],
-            ],
-            resize_keyboard=True,
-        )
     return None
 
 

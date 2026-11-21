@@ -7,14 +7,15 @@ from datetime import datetime, timedelta
 
 from aiogram import F, Router
 from aiogram.filters import Command
-from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, Message
+from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 from sqlalchemy import select
 
 from .. import db as dbmod
 from ..ai import client as ai_client
 from ..config import settings
 from ..models import Device, Person, kv_get
-from . import access, charts_menu, common, rich, screens
+from ..services import time_grants
+from . import charts_menu, common, rich, screens, texts
 
 
 async def btn_quota(message: Message) -> None:
@@ -32,11 +33,6 @@ def _digest_sync() -> str:
 
 
 async def cmd_digest(message: Message) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
-    if role == "kid":
-        await message.answer("Эта функция доступна только родителям 🛡")
-        return
     await common.send_long(message, await asyncio.to_thread(_digest_sync))
 
 
@@ -57,6 +53,7 @@ def _collect_quota_sync() -> list[dict]:
                 "device": dev.name,
                 "device_id": dev.id,
                 "owner": people.get(dev.person_id) if dev.person_id else None,
+                "owner_id": dev.person_id,
                 "rows": rows,
             })
         return out
@@ -64,41 +61,68 @@ def _collect_quota_sync() -> list[dict]:
         s.close()
 
 
+GRANT = "gt"  # gt:<person id>:<minutes>: more time for a child, the same rule everywhere
+
+
+def grant_button(person_id: int, minutes: int, label: str = "") -> InlineKeyboardButton:
+    text = f"➕ {minutes} мин" + (f" · {label}" if label else "")
+    return InlineKeyboardButton(
+        text=text[:40], callback_data=f"{GRANT}:{person_id}:{minutes}", style=texts.SUCCESS
+    )
+
+
 def quota_buttons_keyboard(items: list[dict]) -> InlineKeyboardMarkup | None:
-    """Кнопки '+15м' и '+30м' под отчётом квот для каждого детского устройства и график недели."""
-    rows = []
-    for item in items:
-        dev_id = item["device_id"]
-        dev_name = item["device"]
-        short_name = dev_name if len(dev_name) <= 12 else dev_name[:11] + "…"
-        rows.append([
-            InlineKeyboardButton(
-                text=f"➕ 15м {short_name}",
-                callback_data=f"pick:add_bonus_time:{dev_id}:15:internet",
-            ),
-            InlineKeyboardButton(
-                text=f"➕ 30м {short_name}",
-                callback_data=f"pick:add_bonus_time:{dev_id}:30:internet",
-            ),
-        ])
-    if not rows:
+    """«+15» and «+30» for each child in the report, and the week's chart."""
+    if not items:
         return None
+    children: dict[int, str] = {}
+    for item in items:
+        if item.get("owner_id") is not None:
+            children.setdefault(item["owner_id"], item["owner"])
+    rows = [
+        [grant_button(pid, 15, name), grant_button(pid, 30, name)]
+        for pid, name in children.items()
+    ]
     rows.append([charts_menu.button(charts_menu.SCREEN)])
     return InlineKeyboardMarkup(inline_keyboard=rows)
 
 
 async def cmd_quota(message: Message) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
     items = await asyncio.to_thread(_collect_quota_sync)
-    # a child cannot press these buttons, so a child does not see them
-    keyboard = quota_buttons_keyboard(items) if role in access.ADULT_ROLES else None
-    await rich.answer(message, screens.quota_html(items), keyboard)
+    await rich.answer(message, screens.quota_html(items), quota_buttons_keyboard(items))
 
 
 async def redraw_quota(message: Message) -> None:
     items = await asyncio.to_thread(_collect_quota_sync)
     await rich.edit(message, screens.quota_html(items), quota_buttons_keyboard(items))
+
+
+def _grant_sync(person_id: int, minutes: int) -> str:
+    s = dbmod.session()
+    try:
+        person = s.get(Person, person_id)
+        name = person.name if person else "Ребёнок"
+        try:
+            return f"✅ {name}: {time_grants.grant(s, person_id, minutes, 'Добавлено родителем')}."
+        except time_grants.GrantError as exc:
+            return f"⚠️ {exc}"
+    finally:
+        s.close()
+
+
+async def cb_grant(cb: CallbackQuery) -> None:
+    """A parent gives a child time from the quota report or from a "time is up" alert."""
+    _, person_id, minutes = (cb.data or "").split(":")
+    result = await asyncio.to_thread(_grant_sync, int(person_id), int(minutes))
+    if not isinstance(cb.message, Message):
+        await cb.answer(result[:200], show_alert=True)
+        return
+    if cb.message.text is None:  # the rich quota report: fresh numbers, the buttons stay
+        await cb.answer(result[:200], show_alert=True)
+        await redraw_quota(cb.message)
+        return
+    await cb.answer()
+    await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
 
 
 def _collect_usage_sync() -> tuple[dict, int, int | None, str]:
@@ -151,11 +175,6 @@ def _spend_by_person_sync() -> tuple[list[tuple[str, float, int, dict]], float]:
 
 
 async def cmd_usage(message: Message) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
-    if role == "kid":
-        await message.answer("Эта функция доступна только родителям 🛡")
-        return
     today, week_tokens, left, gw = await asyncio.to_thread(_collect_usage_sync)
     rows, week_usd = await asyncio.to_thread(_spend_by_person_sync)
     keyboard = InlineKeyboardMarkup(inline_keyboard=[[charts_menu.button(charts_menu.SPEND)]])
@@ -165,8 +184,8 @@ async def cmd_usage(message: Message) -> None:
 
 def register(router: Router) -> None:
     """Attach to the router that carries the access middleware, before catch-all text handlers."""
-    router.message.register(btn_quota, F.text == "⏳ Моё время")
     router.message.register(btn_quota, F.text == "⏳ Квоты")
     router.message.register(cmd_digest, Command("digest"))
     router.message.register(cmd_quota, Command("quota"))
+    router.callback_query.register(cb_grant, F.data.startswith(f"{GRANT}:"))
     router.message.register(cmd_usage, Command("usage"))

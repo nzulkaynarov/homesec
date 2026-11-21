@@ -17,6 +17,11 @@ from .texts import DANGER
 
 log = logging.getLogger("homesec.bot.onboarding")
 
+REFUSED = (
+    "Доступ к боту HomeSec не открыт: он только для родителей.\n"
+    "Если ты из семьи или гость, напиши Luna 🐾"
+)
+
 
 def access_request_keyboard(
     requester_id: int, unlinked: list[tuple[int, str]] | None = None
@@ -32,10 +37,6 @@ def access_request_keyboard(
     return InlineKeyboardMarkup(inline_keyboard=linked + [
         [
             InlineKeyboardButton(text="🛡 Родитель", callback_data=f"acc:{requester_id}:admin"),
-            InlineKeyboardButton(text="🎒 Ребёнок", callback_data=f"acc:{requester_id}:kid"),
-        ],
-        [
-            InlineKeyboardButton(text="🏡 Гость", callback_data=f"acc:{requester_id}:guest"),
             InlineKeyboardButton(
                 text="⛔ Отклонить",
                 callback_data=f"acc:{requester_id}:deny",
@@ -48,7 +49,12 @@ def access_request_keyboard(
 def _unlinked_people_sync() -> list[tuple[int, str]]:
     s = dbmod.session()
     try:
-        query = select(Person).where(Person.telegram_id.is_(None)).order_by(Person.name)
+        # Only adults: this bot is the parents', children and guests use Luna.
+        query = (
+            select(Person)
+            .where(Person.telegram_id.is_(None), Person.role == "adult")
+            .order_by(Person.name)
+        )
         return [(p.id, p.name) for p in s.scalars(query)]
     finally:
         s.close()
@@ -63,7 +69,9 @@ def _link_telegram_sync(requester_id: int, person_id: int) -> tuple[str, str]:
             return "Этого человека уже нет в списке.", "deny"
         if s.scalar(select(Person).where(Person.telegram_id == requester_id)) is not None:
             return "Этот Telegram уже привязан к другому человеку.", "deny"
-        role = "kid" if person.role == "kid" else "admin"
+        if person.role != "adult":
+            return "В этом боте только родители. Детям и гостям нужна Luna.", "deny"
+        role = "admin"
         person.telegram_id, person.bot_role = requester_id, role
         s.commit()
         label = family_svc.ROLE_LABELS.get(role, role)
@@ -75,28 +83,20 @@ def _link_telegram_sync(requester_id: int, person_id: int) -> tuple[str, str]:
 def _assign_telegram_access_sync(requester_id: int, role: str, requester_name: str) -> str:
     s = dbmod.session()
     try:
-        if role == "deny":
+        if role != "admin":  # "deny", or a button from an old message offering child or guest
             return "Запрос доступа отклонён."
         person = s.scalar(select(Person).where(Person.telegram_id == requester_id))
         if person is None:
             person = s.scalar(select(Person).where(Person.name == requester_name))
         if person is None:
-            db_role = "adult" if role in ("owner", "admin") else (
-                "kid" if role == "kid" else "guest"
-            )
             person = Person(
-                name=requester_name, role=db_role, telegram_id=requester_id, bot_role=role
+                name=requester_name, role="adult", telegram_id=requester_id, bot_role=role
             )
             s.add(person)
         else:
             person.telegram_id = requester_id
             person.bot_role = role
-            if role in ("owner", "admin"):
-                person.role = "adult"
-            elif role == "kid":
-                person.role = "kid"
-            elif role == "guest":
-                person.role = "guest"
+            person.role = "adult"
         s.commit()
         role_label = family_svc.ROLE_LABELS.get(role, role)
         return f"Пользователю {requester_name} назначена роль: {role_label}."
@@ -112,10 +112,11 @@ async def notify_owner_about_access_request(message: Message) -> None:
         return
     uname = f"@{user.username}" if user.username else user.full_name
     text = (
-        f"🔔 *Новый запрос доступа в семейный бот!*\n\n"
+        f"🔔 *Кто-то просит доступ к боту HomeSec*\n\n"
         f"Пользователь: {texts.escape_markdown(user.full_name)} "
         f"({texts.escape_markdown(uname)}, ID: `{user.id}`)\n\n"
-        f"Выберите роль для нового участника семьи:"
+        f"Этот бот только для родителей. Детям и гостям нужна Luna.\n"
+        f"Открыть этому человеку управление домашней сетью?"
     )
     unlinked = await asyncio.to_thread(_unlinked_people_sync)
     for owner_id in settings.telegram_allowed_ids:
@@ -150,19 +151,24 @@ async def cb_access_request(cb: CallbackQuery) -> None:
     if isinstance(cb.message, Message):
         await cb.message.edit_text(f"{cb.message.text}\n\n➡ {msg}", reply_markup=None)
 
-    if role != "deny" and cb.bot:
-        start_text = texts.START_KID if role == "kid" else texts.START
-        role_label = family_svc.ROLE_LABELS.get(role, role)
+    if not cb.bot:
+        return
+    if role == "admin":
         try:
             await cb.bot.send_message(
                 requester_id,
-                f"🎉 Доступ подтверждён! Ваша роль: {role_label}.\n\n{start_text}",
+                f"🎉 Доступ открыт.\n\n{texts.START}",
                 reply_markup=common.keyboard_for_role(role),
             )
         except Exception:
             log.exception(
                 "не удалось уведомить пользователя %s о предоставлении доступа", requester_id
             )
+    else:
+        try:  # a refusal is said too: silence would leave the person waiting for nothing
+            await cb.bot.send_message(requester_id, REFUSED)
+        except Exception:
+            log.exception("could not tell %s about the refusal", requester_id)
 
 
 def register(router: Router) -> None:

@@ -24,51 +24,20 @@ def test_stranger_cannot_press_buttons(data):
     assert not access.check_callback("unauthorized", data).allowed
 
 
+@pytest.mark.parametrize("role", ["kid", "guest"])
 @pytest.mark.parametrize(
-    "text",
-    ["/status", "/who", "/notes", "/block tv", "/digest", "/usage", "🏠 Кто дома", "как дела"],
+    "text", ["/start", "/help", "/quota", "/ask", "📶 Wi-Fi", "🙏 Попросить время", "как дела"]
 )
-def test_guest_gets_only_wifi_and_help(text):
-    assert not access.check_message("guest", text).allowed
+def test_children_and_guests_are_sent_to_luna(role, text):
+    decision = access.check_message(role, text)
+    assert not decision.allowed and "Luna" in decision.reply
+    assert not access.check_message(role, None, is_voice=True).allowed
 
 
-@pytest.mark.parametrize("text", ["/start", "/help", "📶 Wi-Fi", "❓ Помощь"])
-def test_guest_allowed_items(text):
-    assert access.check_message("guest", text).allowed
-
-
-def test_guest_voice_is_denied_and_buttons_closed():
-    assert not access.check_message("guest", None, is_voice=True).allowed
-    assert not access.check_callback("guest", "act:1:yes").allowed
-
-
-@pytest.mark.parametrize(
-    "text", ["/status", "/block tv", "/digest", "/notes", "📝 Заметки", "⏸ Пауза"]
-)
-def test_kid_denied_parent_items(text):
-    assert not access.check_message("kid", text).allowed
-
-
-@pytest.mark.parametrize(
-    "text",
-    ["/start", "/quota", "/ask", "/help@homesec_bot", "помоги с уроками", "🙏 Попросить время"],
-)
-def test_kid_allowed_items(text):
-    assert access.check_message("kid", text).allowed
-
-
-@pytest.mark.parametrize("text", ["/quiz", "/explore"])
-def test_tutor_and_quiz_commands_left_for_luna(text):
-    assert not access.check_message("kid", text).allowed
-
-
-@pytest.mark.parametrize("data", ["qz:1:0", "kexp:quest", "act:1:yes", "bdir:1:15"])
-def test_kid_presses_no_inline_buttons(data):
-    assert not access.check_callback("kid", data).allowed
-
-
-def test_kid_voice_allowed():
-    assert access.check_message("kid", None, is_voice=True).allowed
+@pytest.mark.parametrize("role", ["kid", "guest"])
+@pytest.mark.parametrize("data", ["qz:1:0", "act:1:yes", "bdir:1:15", "gt:1:15"])
+def test_children_and_guests_press_no_buttons(role, data):
+    assert not access.check_callback(role, data).allowed
 
 
 def test_only_owner_grants_roles():
@@ -136,3 +105,16 @@ def test_middleware_blocks_callback_from_guest(monkeypatch):
     asyncio.run(middleware(handler, callback, {}))
     handler.assert_not_awaited()
     callback.answer.assert_awaited_once()
+
+
+def test_a_child_is_pointed_to_luna_once_and_no_parent_is_bothered(monkeypatch):
+    middleware, notify = _middleware(monkeypatch, "kid")
+    handler = AsyncMock()
+    message = _message("🙏 Попросить время")
+    asyncio.run(middleware(handler, message, {}))
+    asyncio.run(middleware(handler, message, {}))
+    handler.assert_not_awaited()
+    notify.assert_not_awaited()
+    message.answer.assert_awaited_once()
+    assert message.answer.await_args.args[0] == access.MOVED
+    assert type(message.answer.await_args.kwargs["reply_markup"]).__name__ == "ReplyKeyboardRemove"

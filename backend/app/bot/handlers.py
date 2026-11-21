@@ -29,7 +29,6 @@ from . import (
     charts_menu,
     common,
     device_menu,
-    kid_menu,
     onboarding,
     pause_menu,
     reports,
@@ -135,7 +134,6 @@ triage.register(router)
 device_menu.register(router)
 pause_menu.register(router)
 rules_menu.register(router)
-kid_menu.register(router)
 shared_menu.register(router)
 alerts.register(router)
 onboarding.register(router)
@@ -227,12 +225,6 @@ async def cb_pick(cb: CallbackQuery) -> None:
     except Exception:
         log.exception("инструмент %s упал", tool_name)
         result = "Ошибка при выполнении, подробности в журнале."
-    if isinstance(cb.message, Message) and cb.message.text is None:
-        # a rich report (quotas): redraw it with fresh numbers, keep the buttons, toast the result
-        await cb.answer(str(result)[:200])
-        if tool_name == "add_bonus_time":
-            await reports.redraw_quota(cb.message)
-        return
     await cb.answer()
     if isinstance(cb.message, Message):
         await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
@@ -247,9 +239,6 @@ async def cmd_start(message: Message) -> None:
         await message.answer(texts.START_UNAUTHORIZED)
         await onboarding.notify_owner_about_access_request(message)
         return
-    if role == "kid":
-        await message.answer(texts.START_KID, reply_markup=kb)
-        return
     await message.answer(texts.START, reply_markup=kb)
 
 
@@ -258,9 +247,6 @@ async def cmd_start(message: Message) -> None:
 async def cmd_help(message: Message) -> None:
     user_id = message.from_user.id if message.from_user else 0
     role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
-    if role == "kid":
-        await message.answer(texts.START_KID, reply_markup=common.keyboard_for_role("kid"))
-        return
     await message.answer(texts.HELP, reply_markup=common.keyboard_for_role(role))
 
 
@@ -283,11 +269,6 @@ async def cmd_who(message: Message) -> None:
 
 @router.message(Command("movie"))
 async def cmd_movie(message: Message) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
-    if role == "kid":
-        await message.answer("Эта команда доступна только родителям 🍿")
-        return
     await message.answer(await asyncio.to_thread(_movie_sync))
 
 
@@ -311,11 +292,6 @@ async def cmd_notes(message: Message) -> None:
     await rich.answer(message, await asyncio.to_thread(_get_notes_sync))
 
 
-@router.message(F.text == "📶 Wi-Fi")
-async def btn_wifi(message: Message) -> None:
-    await message.answer("📶 Данные домашней Wi-Fi сети для гостей уточните у хозяев дома.")
-
-
 async def _device_command(message: Message, command: CommandObject, tool_name: str) -> None:
     query = (command.args or "").strip()
     if not query:  # без аргумента — выбор из всех устройств кнопками
@@ -330,21 +306,11 @@ async def _device_command(message: Message, command: CommandObject, tool_name: s
 
 @router.message(Command("block"))
 async def cmd_block(message: Message, command: CommandObject) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
-    if role == "kid":
-        await message.answer("Эта функция доступна только родителям 🛡")
-        return
     await _device_command(message, command, "block_device")
 
 
 @router.message(Command("unblock"))
 async def cmd_unblock(message: Message, command: CommandObject) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
-    if role == "kid":
-        await message.answer("Эта функция доступна только родителям 🛡")
-        return
     await _device_command(message, command, "unblock_device")
 
 
@@ -358,11 +324,6 @@ def _resume_all_sync() -> int:
 
 @router.message(Command("pause"))
 async def cmd_pause(message: Message, command: CommandObject) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
-    if role == "kid":
-        await message.answer("Эта функция доступна только родителям 🛡")
-        return
     raw = (command.args or "").strip()
     if not raw:
         text, markup = await pause_menu.overview()
@@ -387,11 +348,6 @@ async def cmd_pause(message: Message, command: CommandObject) -> None:
 
 @router.message(Command("resume"))
 async def cmd_resume(message: Message, command: CommandObject) -> None:
-    user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
-    if role == "kid":
-        await message.answer("Эта функция доступна только родителям 🛡")
-        return
     target = (command.args or "").strip()
     await _target_command(message, "resume_internet", target, {})
 
@@ -399,12 +355,6 @@ async def cmd_resume(message: Message, command: CommandObject) -> None:
 @router.message(Command("bonus"))
 async def cmd_bonus(message: Message, command: CommandObject) -> None:
     from ..services.quota import QUOTA_CATEGORIES
-
-    user_id = message.from_user.id if message.from_user else 0
-    role, _ = await asyncio.to_thread(common.get_user_role_sync, user_id)
-    if role == "kid":
-        await message.answer("Эта функция доступна только родителям 🛡")
-        return
 
     parts = (command.args or "").split()
     usage = ("Использование: /bonus [кто] <минут> [категория]\n"
@@ -452,16 +402,8 @@ async def _process_user_nl_prompt(message: Message, user_text: str) -> None:
         await onboarding.notify_owner_about_access_request(message)
         return
 
-    if role == "guest":
-        await message.answer("Гостям доступны только Wi-Fi и справка.")
-        return
-
     if not common.allow_ai_request(user_id):
         await message.answer("Слишком много сообщений подряд. Подождите минуту 🙂")
-        return
-
-    if role == "kid":
-        await kid_menu.handle_text(message, person, user_text)
         return
 
     if not ai_client.is_configured():

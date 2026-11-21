@@ -107,8 +107,8 @@ def test_notification_cursor(db):
 
 
 def test_quota_block_notification_with_bonus_button(db):
-    """Блокировка по квоте не молчит: событие с MAC доходит до бота,
-    кнопка «+30 мин» ведёт в тот же callback, что и /bonus."""
+    """A quota block reaches the bot, and its buttons give time to the device's owner by the
+    same rule as every other "give time" button; an ownerless device gets none."""
     from app.bot.alerts import bonus_keyboard
 
     dev = Device(mac="AA:00:00:00:00:09", ip="192.168.88.79", name="Планшет")
@@ -122,10 +122,9 @@ def test_quota_block_notification_with_bonus_button(db):
     found = collect_notifications(db)
     assert [(n.kind, n.device.id) for n in found] == [("quota_block", dev.id)]
 
-    kb = bonus_keyboard(dev.id)
-    assert kb.inline_keyboard[0][0].callback_data == (
-        f"pick:add_bonus_time:{dev.id}:30:internet"
-    )
+    assert bonus_keyboard({"id": dev.id, "person_id": None}) is None
+    kb = bonus_keyboard({"id": dev.id, "person_id": 7})
+    assert [b.callback_data for b in kb.inline_keyboard[0]] == ["gt:7:15", "gt:7:30"]
 
 
 def test_new_device_keyboard():
@@ -225,7 +224,7 @@ def test_bonus_request_approve_deny_idempotent(db):
     d = Device(mac="AA:00:00:00:00:21", ip="192.168.88.91", name="Димин-пк",
                person_id=kid.id)
     db.add(d)
-    db.add(Quota(target_type="group", target="kid", category="games", minutes_per_day=120))
+    db.add(Quota(target_type="person", target=str(kid.id), category="games", minutes_per_day=120))
     db.commit()  # чтобы у d появился id до создания заявки
     req = BonusRequest(device_id=d.id, category="games", reason="доиграть", status="pending")
     db.add(req)
@@ -242,11 +241,12 @@ def test_bonus_request_approve_deny_idempotent(db):
     db.expire_all()
     assert db.get(BonusRequest, req_id).status == "approved"
     assert db.get(BonusRequest, req_id).minutes == 30
-    bonus_row = db.query(QuotaBonus).filter_by(target=str(d.id), category="games").one()
-    assert bonus_row.minutes == 30
+    bonus_row = db.query(QuotaBonus).filter_by(target=str(kid.id), category="games").one()
+    assert (bonus_row.target_type, bonus_row.minutes) == ("person", 30)
 
-    # повторное нажатие по обработанной — идемпотентно
-    assert "обработана" in _resolve_bonus_request(req_id, "15")
+    # a second press, by the same or the other parent, adds nothing
+    assert "уже ответили: одобрено" in _resolve_bonus_request(req_id, "15")
+    assert db.query(QuotaBonus).count() == 1
 
     # отказ по новой заявке
     req2 = BonusRequest(device_id=d.id, category="games", status="pending")
@@ -357,6 +357,7 @@ def test_format_quota_and_keyboard():
         "device": "Планшет",
         "device_id": 42,
         "owner": "Миша",
+        "owner_id": 7,
         "rows": [
             {"category": "games", "label": "Игры", "used": 60, "limit": 120},
             {"category": "internet", "label": "Интернет", "used": 150, "limit": 150},
@@ -369,9 +370,8 @@ def test_format_quota_and_keyboard():
 
     kb = quota_buttons_keyboard(items)
     assert kb is not None
-    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-    assert "pick:add_bonus_time:42:15:internet" in callbacks
-    assert "pick:add_bonus_time:42:30:internet" in callbacks
+    buttons = {btn.callback_data: btn.text for row in kb.inline_keyboard for btn in row}
+    assert buttons["gt:7:15"] == "➕ 15 мин · Миша" and "gt:7:30" in buttons  # per child
 
 
 def test_format_usage():
@@ -396,18 +396,8 @@ def test_keyboards_for_roles():
     assert "📺 Общие устройства" in owner_buttons
     assert "📝 Заметки" in owner_buttons
 
-    kb_kid = keyboard_for_role("kid")
-    assert kb_kid is not None
-    kid_buttons = [btn.text for row in kb_kid.keyboard for btn in row]
-    assert "⏳ Моё время" in kid_buttons
-    assert "🙏 Попросить время" in kid_buttons
-    assert "✅ Сделал дело" in kid_buttons
-    assert "🧠 Заработать +15м" not in kid_buttons and "🚀 Чем заняться?" not in kid_buttons
-
-    kb_guest = keyboard_for_role("guest")
-    assert kb_guest is not None
-    guest_buttons = [btn.text for row in kb_guest.keyboard for btn in row]
-    assert "📶 Wi-Fi" in guest_buttons
+    # children and guests have no menu here: their place is Luna
+    assert keyboard_for_role("kid") is None and keyboard_for_role("guest") is None
 
     assert keyboard_for_role("unauthorized") is None
 
@@ -424,13 +414,10 @@ def test_access_request_flow(db):
 
     kb = access_request_keyboard(123456)
     callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-    assert "acc:123456:admin" in callbacks
-    assert "acc:123456:kid" in callbacks
-    assert "acc:123456:guest" in callbacks
-    assert "acc:123456:deny" in callbacks
+    assert callbacks == ["acc:123456:admin", "acc:123456:deny"]  # parents only
 
     cb = MagicMock()
-    cb.data = "acc:123456:kid"
+    cb.data = "acc:123456:admin"
     cb.answer = AsyncMock()
     msg = MagicMock(spec=Message)
     msg.text = "Пользователь: Ваня (@vanya, ID: 123456)"
@@ -444,12 +431,19 @@ def test_access_request_flow(db):
     person = db.scalar(select(Person).where(Person.telegram_id == 123456))
     assert person is not None
     assert person.name == "Ваня"
-    assert person.role == "kid"
-    assert person.bot_role == "kid"
+    assert person.role == "adult"
+    assert person.bot_role == "admin"
 
     msg.edit_text.assert_called_once()
-    assert "Ребёнок" in msg.edit_text.call_args[0][0]
+    assert "Родитель" in msg.edit_text.call_args[0][0]
     cb.bot.send_message.assert_called_once()
+
+    # a button from an old message offering "child" opens nothing, and the person is told
+    cb.data = "acc:777:kid"
+    cb.bot.send_message.reset_mock()
+    asyncio.run(cb_access_request(cb))
+    assert db.scalar(select(Person).where(Person.telegram_id == 777)) is None
+    assert "только для родителей" in cb.bot.send_message.call_args[0][1]
 
 
 def test_new_device_kind_assignment(db):
@@ -487,85 +481,47 @@ def test_new_device_kind_assignment(db):
     assert "Общее (ТВ/Колонка)" in msg.edit_text.call_args[0][0]
 
 
-def test_kid_guards_parent_commands(db):
-    import asyncio
-    from unittest.mock import AsyncMock, MagicMock
-
-    from aiogram.filters import CommandObject
-
-    from app.bot.handlers import cmd_block, cmd_movie, cmd_pause
-    from app.models import Person
-
-    kid = Person(name="Лена", role="kid", telegram_id=8888, bot_role="kid")
-    db.add(kid)
-    db.commit()
-
-    msg = MagicMock()
-    msg.from_user.id = 8888
-    msg.answer = AsyncMock()
-
-    cmd_obj = CommandObject(prefix="/", command="pause", args="30")
-    asyncio.run(cmd_pause(msg, cmd_obj))
-    msg.answer.assert_called_once()
-    assert "доступна только родителям" in msg.answer.call_args[0][0]
-
-    msg.answer.reset_mock()
-    cmd_block_obj = CommandObject(prefix="/", command="block", args="1")
-    asyncio.run(cmd_block(msg, cmd_block_obj))
-    msg.answer.assert_called_once()
-    assert "доступна только родителям" in msg.answer.call_args[0][0]
-
-    msg.answer.reset_mock()
-    asyncio.run(cmd_movie(msg))
-    msg.answer.assert_called_once()
-    assert "доступна только родителям" in msg.answer.call_args[0][0]
-
-
-def test_bonus_direct_approval(db):
+def test_a_parent_gives_time_from_the_quota_report(db):
     import asyncio
     from unittest.mock import AsyncMock, MagicMock
 
     from aiogram.types import Message
     from sqlalchemy import select
 
-    from app.bot.kid_menu import bonus_request_direct_keyboard, cb_bonus_direct
-    from app.models import Person, QuotaBonus
+    from app.bot import reports
+    from app.models import Person, Quota, QuotaBonus
 
-    kid = Person(name="Коля", role="kid", telegram_id=9999, bot_role="kid")
+    kid = Person(name="Коля", role="kid")
     db.add(kid)
     db.commit()
-    from app.models import Quota as _Quota
-
-    db.add(_Quota(name="Игры", target_type="person", target=str(kid.id), category="games",
-                  minutes_per_day=60, days="0,1,2,3,4,5,6", enabled=True))
+    db.add(Quota(name="Игры", target_type="person", target=str(kid.id), category="games",
+                 minutes_per_day=60, days="0,1,2,3,4,5,6", enabled=True))
     db.commit()
 
-    kb = bonus_request_direct_keyboard(kid.id)
-    callbacks = [btn.callback_data for row in kb.inline_keyboard for btn in row]
-    assert f"bdir:{kid.id}:15" in callbacks
-    assert f"bdir:{kid.id}:30" in callbacks
-    assert f"bdir:{kid.id}:day" in callbacks
-    assert f"bdir:{kid.id}:deny" in callbacks
-
     cb = MagicMock()
-    cb.data = f"bdir:{kid.id}:30"
+    cb.data = f"gt:{kid.id}:30"
     cb.answer = AsyncMock()
     msg = MagicMock(spec=Message)
-    msg.text = "Запрос дополнительного времени: Коля"
+    msg.text = "⏳ Квота «Игры» использована на 80%"
     msg.edit_text = AsyncMock()
-    msg.photo = None
     cb.message = msg
-    cb.bot = MagicMock()
-    cb.bot.send_message = AsyncMock()
 
-    asyncio.run(cb_bonus_direct(cb))
+    asyncio.run(reports.cb_grant(cb))
 
     qb = db.scalar(select(QuotaBonus).where(QuotaBonus.target == str(kid.id)))
-    assert qb is not None
     assert (qb.minutes, qb.category) == (30, "games")  # the limit that exists, not "internet"
+    assert "✅ Коля: +30 мин к лимитам: игры." in msg.edit_text.call_args[0][0]
 
-    cb.bot.send_message.assert_called_once()
-    assert "+30 мин к лимитам: игры" in cb.bot.send_message.call_args[0][1]
+
+def test_old_direct_request_buttons_say_they_are_outdated():
+    import asyncio
+    from unittest.mock import AsyncMock, MagicMock
+
+    from app.bot.alerts import cb_old_direct_request
+
+    cb = MagicMock(data="bdir:1:30", answer=AsyncMock(), message=None)
+    asyncio.run(cb_old_direct_request(cb))
+    assert "Luna" in cb.answer.call_args[0][0]
 
 
 def test_a_notice_nobody_received_is_sent_again(db, monkeypatch):
@@ -614,13 +570,12 @@ def test_rich_html_escapes_what_people_type():
 
 
 def test_button_colours_mean_the_same_everywhere():
-    from app.bot import alerts, kid_menu
+    from app.bot import alerts, reports
 
     def styles(markup):
         return {b.text: b.style for row in markup.inline_keyboard for b in row}
 
     request = styles(alerts.bonus_request_keyboard(1))
     assert request["🚫 Отказать"] == texts.DANGER and request["➕ 15 мин"] == texts.SUCCESS
-    direct = styles(kid_menu.bonus_request_direct_keyboard(1))
-    assert direct["🚫 Отказать"] == texts.DANGER and direct["➕ 1 час"] == texts.SUCCESS
+    assert reports.grant_button(1, 15).style == texts.SUCCESS
     assert styles(alerts.new_device_keyboard(1, []))["⛔ Блокировать"] == texts.DANGER

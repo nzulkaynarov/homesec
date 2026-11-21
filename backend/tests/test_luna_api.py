@@ -245,7 +245,7 @@ def test_pause_request_opens_a_window_and_the_pause_returns(db, client, kid):
     assert buttons[1][0].text == "▶️ До конца паузы"
 
     result = alerts._resolve_bonus_request(request_id, "30")
-    assert "Интернет открыт до" in result
+    assert "интернет открыт до" in result
     assert "192.168.88.50" not in _blocked(db)
     status = client.get(f"/api/luna/v1/time-requests/{request_id}", headers=AUTH).json()
     assert status["status"] == "approved" and status["category"] == "pause"

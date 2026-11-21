@@ -11,7 +11,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from aiogram import BaseMiddleware
-from aiogram.types import CallbackQuery, Message, TelegramObject
+from aiogram.types import CallbackQuery, Message, ReplyKeyboardRemove, TelegramObject
 
 from .. import db as dbmod
 from ..config import settings
@@ -21,12 +21,8 @@ log = logging.getLogger("homesec.bot.access")
 
 ADULT_ROLES = ("owner", "admin")
 
-KID_COMMANDS = {"start", "help", "quota", "ask"}
-KID_CALLBACKS: set[str] = set()  # a child has no inline buttons of its own
 OWNER_CALLBACKS = {"acc", "chs"}  # granting roles and the server chart are the owner's
-GUEST_COMMANDS = {"start", "help"}
-GUEST_BUTTONS = {"📶 Wi-Fi", "❓ Помощь"}
-ADULT_BUTTONS = {
+ADULT_BUTTONS = {  # the parents' menu; a tap on one of these ends any "type your answer" wait
     "🖥 Сервер",
     "🏠 Кто дома",
     "⏳ Квоты",
@@ -37,11 +33,16 @@ ADULT_BUTTONS = {
     "📋 Правила",
     "📝 Заметки",
 }
+NOT_SERVED = ("kid", "guest")  # known people without parent rights: their place is Luna
 
-DENIED_KID = "Эта функция доступна только родителям 🛡"
-DENIED_GUEST = "Гостям доступны только Wi-Fi и справка."
+MOVED = (
+    "Этот бот теперь только для родителей 🛡\n\n"
+    "Сколько осталось времени, попросить ещё, викторина и всё остальное — у Luna 🐾 "
+    "Открой чат с Luna и нажми «⏳ Интернет»."
+)
 DENIED_CALLBACK = "Нет доступа к этому действию"
 ACCESS_REQUEST_INTERVAL = 3600  # seconds between owner notifications per requester
+MOVED_INTERVAL = 3600  # seconds between "go to Luna" replies to one child or guest
 
 
 @dataclass(frozen=True)
@@ -50,27 +51,11 @@ class Decision:
     reply: str = ""
 
 
-def _command_name(text: str) -> str | None:
-    if not text.startswith("/"):
-        return None
-    return text.split()[0][1:].split("@")[0].lower()
-
-
-def check_message(role: str, text: str | None, is_voice: bool = False) -> Decision:
-    """Decide whether a user with this role may send this message."""
+def check_message(role: str, text: str | None = None, is_voice: bool = False) -> Decision:
+    """Only parents use this bot; children and guests are sent to Luna."""
     if role in ADULT_ROLES:
         return Decision(True)
-    content = text or ""
-    command = _command_name(content)
-    if role == "kid":
-        if command is not None:
-            return Decision(command in KID_COMMANDS, DENIED_KID)
-        return Decision(is_voice or content not in ADULT_BUTTONS, DENIED_KID)
-    if role == "guest":
-        if command is not None:
-            return Decision(command in GUEST_COMMANDS, DENIED_GUEST)
-        return Decision(content in GUEST_BUTTONS, DENIED_GUEST)
-    return Decision(False)
+    return Decision(False, MOVED if role in NOT_SERVED else "")
 
 
 def check_callback(role: str, data: str | None) -> Decision:
@@ -80,8 +65,6 @@ def check_callback(role: str, data: str | None) -> Decision:
         return Decision(True)
     if role == "admin":
         return Decision(prefix not in OWNER_CALLBACKS, DENIED_CALLBACK)
-    if role == "kid":
-        return Decision(prefix in KID_CALLBACKS, DENIED_CALLBACK)
     return Decision(False, DENIED_CALLBACK)
 
 
@@ -114,6 +97,7 @@ class AccessMiddleware(BaseMiddleware):
         self._on_unauthorized = on_unauthorized
         self._unauthorized_text = unauthorized_text
         self._last_request: dict[int, float] = {}
+        self._last_moved: dict[int, float] = {}
 
     async def __call__(
         self,
@@ -143,11 +127,19 @@ class AccessMiddleware(BaseMiddleware):
         if role == "unauthorized":
             await self._reject_unauthorized(event, sender.id)
             return None
-        decision = check_message(role, event.text, is_voice=event.voice is not None)
-        if not decision.allowed:
-            await event.answer(decision.reply)
+        if role in NOT_SERVED:
+            await self._send_to_luna(event, sender.id)
             return None
         return await handler(event, data)
+
+    async def _send_to_luna(self, message: Message, user_id: int) -> None:
+        """One calm pointer an hour, and the old menu goes away; no parent is bothered."""
+        now = time.monotonic()
+        last = self._last_moved.get(user_id)
+        if last is not None and now - last < MOVED_INTERVAL:
+            return
+        self._last_moved[user_id] = now
+        await message.answer(MOVED, reply_markup=ReplyKeyboardRemove())
 
     async def _reject_unauthorized(self, message: Message, user_id: int) -> None:
         log.warning("rejected update from unauthorized telegram user %s", user_id)
