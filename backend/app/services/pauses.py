@@ -176,10 +176,12 @@ def pause(
         raise PauseError("Это время уже прошло.")
     if until - now > MAX_PAUSE:
         raise PauseError("Отключить можно не больше чем на сутки.")
+    affected: list[Person] = []
     if target.kind == "kids":
         children = kids(db)
         if not children:
             raise PauseError("В HomeSec пока нет детей.")
+        affected = list(children)
         # The new time replaces a pause left on the whole group, as it does a child's own.
         db.execute(
             delete(Pause).where(
@@ -191,14 +193,32 @@ def pause(
             unlock.close_window(db, kid.id)  # a pause the parent sets now wins over an open window
         name = ALL_KIDS_NAME
     elif target.kind == "person":
-        name = _person(db, target.id).name
+        person = _person(db, target.id)
+        affected = [person]
+        name = person.name
         _replace(db, "person", target.id, until, reason)
         unlock.close_window(db, target.id)
     else:
         name = _device(db, target.id).name
         _replace(db, "device", target.id, until, reason)
     _applied(db, f"Пауза: {name} до {until:%d.%m %H:%M}")
-    return f"⏸ {name}: без интернета до {until:%H:%M}"
+    return f"⏸ {name}: без интернета до {until:%H:%M}" + _asleep_note(db, affected, until, now)
+
+
+def _asleep_note(db: Session, people: list[Person], until: datetime, now: datetime) -> str:
+    """A pause inside a bedtime changes nothing; the parent should know instead of guessing."""
+    asleep: dict[str, datetime] = {}
+    for person in people:
+        end = house_rules.bedtime_until(db, person.id, now)
+        if end is not None and until <= end:
+            asleep[person.name] = end
+    if not asleep:
+        return ""
+    wake = max(asleep.values())
+    if len(asleep) == len(people):
+        return f"\n😴 Сейчас и так отбой до {wake:%H:%M}, пауза ничего не меняет."
+    names = ", ".join(asleep)
+    return f"\n😴 {names} и так спят до {wake:%H:%M}, для них пауза ничего не меняет."
 
 
 def own_pauses(db: Session, target: Target) -> list[Pause]:

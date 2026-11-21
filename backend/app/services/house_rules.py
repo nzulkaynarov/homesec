@@ -307,9 +307,14 @@ def summary(db: Session, person: Person, now: datetime | None = None) -> list[st
         if c in current
     )
     lines = [f"🌙 Отбой: {'; '.join(nights)}", f"⏳ Лимиты: {limit_text or 'нет'}"]
+    asleep = bedtime_until(db, person.id, now)
+    if asleep is not None:  # what holds the child now comes first: the schedule alone does not say
+        lines.insert(0, f"😴 Сейчас отбой, интернет включится в {asleep:%H:%M}")
     until = paused_until(db, person.id, now)
     if until is not None:
-        lines.append(f"⏸ Пауза до {until:%H:%M}")
+        inside = asleep is not None and until <= asleep
+        during = " (внутри отбоя, ничего не меняет)" if inside else ""
+        lines.append(f"⏸ Пауза до {until:%H:%M}{during}")
         opened = unlock.open_until(db, person.id, now)
         if opened is not None:
             lines.append(f"🔓 Открыто родителем до {opened:%H:%M}")

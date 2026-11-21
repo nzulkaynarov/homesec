@@ -337,3 +337,35 @@ def test_a_childs_pause_here_replaces_the_one_before_as_on_the_pause_screen(db):
         "pause": _run(pause_menu.cb_set, f"pzs:p{kid.id}:60")[0].split("\n")[0],
     }
     assert screens["rules"] == screens["pause"], screens  # one action, one wording
+
+
+def test_a_pause_inside_bedtime_says_it_changes_nothing(db):
+    from datetime import timedelta
+
+    from app.services import pauses
+
+    kid = _kid(db)
+    house_rules.set_bedtime(db, kid.id, "school", "22:00", "08:00")
+    house_rules.set_bedtime(db, kid.id, "weekend", "22:00", "08:00")
+    night = datetime(2026, 11, 21, 23, 10)
+    said = pauses.pause(db, pauses.Target("kids"), night + timedelta(hours=1), now=night)
+    assert "без интернета до 00:10" in said
+    assert "Сейчас и так отбой до 08:00, пауза ничего не меняет." in said
+
+    lines = house_rules.summary(db, kid, night)
+    assert lines[0] == "😴 Сейчас отбой, интернет включится в 08:00"
+    assert "⏸ Пауза до 00:10 (внутри отбоя, ничего не меняет)" in lines
+
+
+def test_a_daytime_pause_has_no_bedtime_note(db):
+    from datetime import timedelta
+
+    from app.services import pauses
+
+    kid = _kid(db)
+    house_rules.set_bedtime(db, kid.id, "weekend", "22:00", "08:00")
+    day = datetime(2026, 11, 21, 15, 0)
+    said = pauses.pause(db, pauses.Target("person", kid.id), day + timedelta(hours=1), now=day)
+    assert said == "⏸ Алимбек: без интернета до 16:00"
+    lines = house_rules.summary(db, kid, day)
+    assert not lines[0].startswith("😴") and "⏸ Пауза до 16:00" in lines
