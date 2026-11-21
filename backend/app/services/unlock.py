@@ -1,10 +1,13 @@
 """Short windows a parent opens through a pause: internet for one person until a
 moment, while the pause itself stays in place and resumes when the window ends.
 
-A window never overrides bedtime, a manual block or a spent internet quota;
-it only lets the person's devices through pauses (their own, a device's or
-their group's) that existed when it opened. A pause a parent sets later wins.
-Stored in KVState so no schema change is needed: "<until>;<opened>"."""
+A window never overrides bedtime or a manual block. It lets the person's devices
+through pauses (their own, a device's or their group's) that existed when it
+opened, and through their limits used up today (enforcement reads the windows):
+a parent's "+15 min" during a pause opens the internet for 15 minutes whatever
+else ran out. A pause a parent sets later wins. Windows open only through
+time_grants.grant. Stored in KVState so no schema change is needed:
+"<until>;<opened>"."""
 
 from dataclasses import dataclass
 from datetime import datetime, timedelta

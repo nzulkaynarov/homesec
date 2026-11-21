@@ -16,7 +16,7 @@ from app.models import (
     QuotaUsage,
     Rule,
 )
-from app.services import quota, time_grants, unlock
+from app.services import enforcement, quota, restrictions, time_grants, unlock
 
 NOON = datetime(2026, 11, 13, 12, 0)
 EVERY_DAY = "0,1,2,3,4,5,6"
@@ -187,3 +187,111 @@ def test_a_device_switched_off_by_hand_is_not_called_open(db):
     said = time_grants.grant(db, kid.id, 30, "тест", NOON)
     assert said.minutes == 0
     assert "выключено вручную: «Телефон»" in said.text and "открыт" not in said.text
+
+
+PHONE_CLIENT = "hs-001122334451"  # the phone's AdGuard client
+
+
+def _state(db, now: datetime) -> dict:
+    """What the router and AdGuard would get at `now`: the real enforcement answer."""
+    return enforcement._desired_state(db, list(db.query(Device)), now, self_ips=set())
+
+
+def _spent(db, kid: Person, phone: Device, category: str, *days: datetime) -> None:
+    db.add(Quota(target_type="person", target=str(kid.id), category=category,
+                 minutes_per_day=60, days=EVERY_DAY))
+    db.commit()
+    for day in {f"{d:%Y-%m-%d}": d for d in days}.values():  # each date the test looks at
+        _used(db, phone, category, 70, day)
+
+
+def test_a_grant_during_a_pause_opens_a_used_up_internet_limit_for_its_minutes(db):
+    """The hole: «➕ 15 мин» opened a window through the pause, the used-up internet limit still
+    held the child, and the parent read that it opened."""
+    kid = _kid(db)
+    phone = _phone(db, kid)
+    now = datetime.now()
+    db.add(Pause(target_type="person", target=str(kid.id), until=now + timedelta(hours=2)))
+    db.commit()
+    _spent(db, kid, phone, "internet", now, now + timedelta(minutes=16))
+    before = _state(db, now)
+    assert phone.ip in before["lists"]["hs-blocked"]
+    assert before["quota_blocked"] == {}  # under a pause the pause is the reason
+
+    said = time_grants.grant(db, kid.id, 15, "тест")
+    assert said.minutes == 15 and said.text.startswith("интернет открыт до ")
+    assert said.text.endswith(
+        ", исчерпанные лимиты (интернет целиком) до этого времени тоже не мешают; "
+        "потом пауза продолжится"
+    )
+    assert phone.ip not in _state(db, datetime.now())["lists"]["hs-blocked"]
+    assert restrictions.restriction_for_ip(db, phone.ip) is None
+    assert db.query(QuotaBonus).count() == 0  # the window opens them, nothing is added
+
+    closed = _state(db, datetime.now() + timedelta(minutes=16))
+    assert phone.ip in closed["lists"]["hs-blocked"]  # the pause holds again
+    assert closed["quota_blocked"] == {}  # and the parent hears no "the limit ran out"
+
+
+def test_a_grant_during_a_pause_opens_a_used_up_category_limit_too(db):
+    kid = _kid(db)
+    phone = _phone(db, kid)
+    now = datetime.now()
+    db.add(Pause(target_type="person", target=str(kid.id), until=now + timedelta(hours=2)))
+    db.commit()
+    _spent(db, kid, phone, "games", now)
+    assert "roblox" in _state(db, now)["ag_clients"][PHONE_CLIENT]["blocked_services"]
+
+    said = time_grants.grant(db, kid.id, 30, "тест")
+    assert "исчерпанные лимиты (игры) до этого времени тоже не мешают" in said.text
+    after = _state(db, datetime.now())
+    assert phone.ip not in after["lists"]["hs-blocked"] and PHONE_CLIENT not in after["ag_clients"]
+
+
+def test_until_the_end_of_the_pause_says_the_used_up_limit_holds_after_it(db):
+    kid = _kid(db)
+    phone = _phone(db, kid)
+    now = datetime.now()
+    until = now + timedelta(minutes=40)
+    db.add(Pause(target_type="person", target=str(kid.id), until=until))
+    db.commit()
+    later = until + timedelta(minutes=1)
+    _spent(db, kid, phone, "internet", now, later)
+
+    said = time_grants.grant(db, kid.id, time_grants.WHOLE_DAY, "тест")
+    assert said.text == (
+        f"интернет открыт до {until:%H:%M}, до конца паузы, исчерпанные лимиты (интернет "
+        "целиком) до этого времени тоже не мешают; потом лимиты снова действуют"
+    )
+    assert phone.ip not in _state(db, datetime.now())["lists"]["hs-blocked"]
+    after = _state(db, later)
+    assert phone.ip in after["lists"]["hs-blocked"]
+    assert after["quota_blocked"] == {phone.ip: phone}  # now the limit is the reason, and told
+
+
+def test_a_grant_during_a_pause_says_a_device_switched_off_by_hand_stays_off(db):
+    kid = _kid(db)
+    phone = _phone(db, kid)
+    phone.blocked_manual = True
+    db.add(Pause(target_type="person", target=str(kid.id),
+                 until=datetime.now() + timedelta(hours=1)))
+    db.commit()
+    said = time_grants.grant(db, kid.id, 15, "тест")
+    assert said.text.endswith("; выключено вручную: «Телефон», время это не изменит")
+    assert phone.ip in _state(db, datetime.now())["lists"]["hs-blocked"]
+
+
+def test_a_window_does_not_open_bedtime(db):
+    kid = _kid(db)
+    phone = _phone(db, kid)
+    now = datetime.now()
+    db.add(Pause(target_type="person", target=str(kid.id), until=now + timedelta(hours=2)))
+    db.commit()
+    _spent(db, kid, phone, "internet", now)
+    time_grants.grant(db, kid.id, 30, "тест")
+    start = (now - timedelta(minutes=5)).strftime("%H:%M")
+    end = (now + timedelta(hours=1)).strftime("%H:%M")
+    db.add(Rule(name="Отбой", target_type="person", target=str(kid.id), days=EVERY_DAY,
+                start_time=start, end_time=end, enabled=True))
+    db.commit()
+    assert phone.ip in _state(db, datetime.now())["lists"]["hs-blocked"]

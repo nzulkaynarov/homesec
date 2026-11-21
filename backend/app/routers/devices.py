@@ -249,7 +249,12 @@ async def pause_group(
     redirect_to: str = Form("/"),
     db: Session = Depends(get_db),
 ):
-    if group in GROUP_LABELS:
+    if group == "kid":  # all children: one pause per child, as in the bot and the AI
+        try:
+            pauses.pause(db, pauses.ALL_KIDS, _pause_until(preset), reason="пауза с дашборда")
+        except pauses.PauseError as exc:
+            log.warning("no pause for all children: %s", exc)
+    elif group in GROUP_LABELS:
         until = _pause_until(preset)
         db.add(Pause(target_type="group", target=group, until=until,
                      reason="пауза группы с дашборда"))
@@ -267,12 +272,15 @@ async def unpause_group(
     redirect_to: str = Form("/"),
     db: Session = Depends(get_db),
 ):
-    for p in list(db.scalars(select(Pause).where(
-            Pause.target_type == "group", Pause.target == group))):
-        db.delete(p)
-    db.commit()
-    if group in GROUP_LABELS:
-        log_event(db, "unpause", f"Пауза группы «{GROUP_LABELS[group]}» снята")
+    if group == "kid":  # every child's pause, the group one left from before included
+        pauses.resume(db, pauses.ALL_KIDS)
+    else:
+        for p in list(db.scalars(select(Pause).where(
+                Pause.target_type == "group", Pause.target == group))):
+            db.delete(p)
+        db.commit()
+        if group in GROUP_LABELS:
+            log_event(db, "unpause", f"Пауза группы «{GROUP_LABELS[group]}» снята")
     tasks.add_task(_reconcile_bg)
     return RedirectResponse(_safe_redirect(redirect_to), status_code=302)
 

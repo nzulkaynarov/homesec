@@ -99,7 +99,9 @@ def test_self_ip_protected(db, dev, no_reconcile, monkeypatch):
 
 def test_pause_group_blocks_in_desired_state(db, dev, no_reconcile):
     msg = tools.run_tool(db, "pause_internet", {"target": "kid", "minutes": 30, "reason": "обед"})
-    assert "Дети" in msg
+    assert msg.startswith("⏸ Все дети: без интернета до")  # the «⏸ Пауза» screen's words
+    rows = [(p.target_type, p.target, p.reason) for p in active_pauses(db)]
+    assert rows == [("person", str(dev.person_id), "обед")]  # all children: one pause per child
     st = _desired_state(db, [dev])
     assert dev.ip in st["lists"]["hs-blocked"]
 
@@ -229,7 +231,7 @@ def test_pause_until_a_clock_time_does_the_arithmetic():
         tools.minutes_until("9 утра", night)
 
 
-def test_pause_tool_accepts_until(db, monkeypatch):
+def test_pause_tool_accepts_until(db, dev, monkeypatch):
     monkeypatch.setattr(tools.enforcement, "reconcile", lambda s: None)
     result = tools.run_tool(db, "pause_internet", {"target": "kid", "until": "23:59"})
     assert "до 23:59" in result

@@ -129,8 +129,8 @@ def test_pause_all_kids_skips_adults(db):
     db.add(Person(name="Камила", role="adult"))
     db.commit()
     text, _ = _run(rules_menu.cb_pause_all, "hrza")
-    assert "детей 1" in text
-    assert [p.target for p in db.query(Pause)] == [str(kid.id)]
+    assert text.startswith("⏸ Все дети: без интернета до 07:00")  # the «⏸ Пауза» words
+    assert [(p.target_type, p.target) for p in db.query(Pause)] == [("person", str(kid.id))]
 
 
 def test_people_are_added_renamed_and_removed_from_the_bot(db):
@@ -223,21 +223,53 @@ def test_callback_data_fits_telegram_limit():
     assert len(f"dmvs:{10**9}:3:p{10**9}:999".encode()) <= 64
 
 
-def test_group_pause_from_the_ai_shows_up_and_can_be_lifted(db):
+def test_a_group_pause_left_from_before_shows_up_and_lets_one_child_out(db):
+    """The AI and /pause used to pause the whole children group. Such a pause keeps working
+    until it ends; lifting it for one child keeps the others paused until the same time."""
     from datetime import timedelta
 
-    kid = _kid(db)
+    kid, sister = _kid(db), _kid(db, "Аня")
     until = datetime.now() + timedelta(hours=8)
-    db.add(Pause(target_type="group", target="kid", until=until, reason="Ночной сон"))
+    started = datetime.now() - timedelta(minutes=5)
+    db.add(Pause(target_type="group", target="kid", until=until, reason="Ночной сон",
+                 created=started))
     db.commit()
     text, actions = _run(rules_menu.cb_overview, "hr")
     assert f"пауза всем детям до {until:%H:%M}" in text and "hrra" in actions
     assert f"⏸ Пауза до {until:%H:%M}" in text  # the child's own summary shows it too
-    text, _ = _run(rules_menu.cb_resume, f"hrr:{kid.id}")
-    assert "пауза всем детям" in text  # a group pause is not lifted for one child
-    text, actions = _run(rules_menu.cb_resume_kids, "hrra")
-    assert "Снято пауз: 1" in text and "hrra" not in actions
+
+    text, actions = _run(rules_menu.cb_resume, f"hrr:{kid.id}")
+    assert "▶️ Пауза снята" in text and "всем детям" not in text
     assert house_rules.paused_until(db, kid.id) is None
+    assert house_rules.paused_until(db, sister.id) == until
+    rows = [(p.target_type, p.target, p.created) for p in db.query(Pause)]
+    assert rows == [("person", str(sister.id), started)]  # the same start, for an open window
+
+    text, actions = _run(rules_menu.cb_overview, "hr")
+    assert "пауза всем детям" not in text and "hrra" not in actions
+
+
+def test_all_children_banner_and_button_follow_the_pause_for_all(db):
+    """«Пауза всем детям» is one pause per child; the banner and «Снять» work for it."""
+    kid, sister = _kid(db), _kid(db, "Аня")
+    text, actions = _run(rules_menu.cb_pause_all, "hrza")
+    assert "⏸ Сейчас пауза всем детям до 07:00" in text and "hrra" in actions
+    rows = {(p.target_type, p.target) for p in db.query(Pause)}
+    assert rows == {("person", str(kid.id)), ("person", str(sister.id))}
+
+    text, actions = _run(rules_menu.cb_resume_kids, "hrra")
+    assert text.startswith("▶️ Все дети: интернет снова включён")
+    assert "hrra" not in actions and db.query(Pause).count() == 0
+    text, _ = _run(rules_menu.cb_resume_kids, "hrra")
+    assert text.startswith("У детей паузы не было")
+
+
+def test_a_pause_on_one_child_is_not_a_pause_for_all(db):
+    kid = _kid(db)
+    _kid(db, "Аня")
+    _run(rules_menu.cb_pause, f"hrz:{kid.id}:30")
+    text, actions = _run(rules_menu.cb_overview, "hr")
+    assert "пауза всем детям" not in text and "hrra" not in actions
 
 
 def test_device_pause_counts_for_its_owner(db):

@@ -438,7 +438,8 @@ def minutes_until(clock: str, now: datetime) -> int:
 def pause_internet(
     db: Session,
     target: Annotated[
-        str, "группа (kid/guest/unknown), имя ребёнка или устройство: id, имя или MAC"
+        str,
+        "kid — все дети; группа guest/unknown; имя ребёнка или устройство: id, имя или MAC",
     ],
     minutes: Annotated[int, "длительность паузы в минутах (1–1440); 0, если задано until"] = 0,
     reason: Annotated[str, "короткая причина, попадает в журнал"] = "",
@@ -446,8 +447,10 @@ def pause_internet(
         str, "до какого времени ЧЧ:ММ, например 09:00; ближайшее такое время, минуты не считай"
     ] = "",
 ) -> str:
-    """Временно выключает интернет группе, ребёнку (всем его устройствам) или
-    устройству («пауза до …»). Если человек назвал время окончания, передай
+    """Временно выключает интернет всем детям (каждому ребёнку своя пауза, как
+    кнопка «⏸ Пауза» → «👶 Все дети»), группе гостей или незнакомых, одному
+    ребёнку (всем его устройствам) или устройству («пауза до …»). Новая пауза
+    той же цели заменяет старую. Если человек назвал время окончания, передай
     until, а не minutes. Снимается автоматически по истечении времени или через
     resume_internet."""
     now = datetime.now()
@@ -460,29 +463,30 @@ def pause_internet(
     if not 1 <= minutes <= 1440:
         raise ToolError("Длительность паузы — от 1 до 1440 минут")
     t = target.strip()
-    if t in GROUPS:
+    why = reason.strip() or "бот"
+    chosen: pauses.Target
+    if t.casefold() in pauses.KIDS_WORDS:
+        chosen = pauses.ALL_KIDS
+    elif t in GROUPS:
         if t == "adult":
             raise ToolError("Группу взрослых ставить на паузу нельзя")
-        db.add(Pause(target_type="group", target=t, until=until_at, reason=reason))
+        db.add(Pause(target_type="group", target=t, until=until_at, reason=why))
         db.commit()
-        label = GROUP_LABELS[t]
+        return f"⏸ {GROUP_LABELS[t]}: без интернета до {until_at:%H:%M}"
     elif (person := _find_person(db, t)) is not None:
         if person.role == "adult":
             raise ToolError("Взрослых ставить на паузу нельзя")
-        try:
-            pauses.pause(db, pauses.Target("person", person.id), until_at, now)
-        except pauses.PauseError as exc:
-            raise ToolError(str(exc)) from exc
-        label = f"{person.name} (все устройства)"
+        chosen = pauses.Target("person", person.id)
     else:
         dev = find_device(db, t)
         if dev is None:
             raise ToolError(f"Не нашёл ребёнка или устройство «{target}» — уточните имя или id")
         _guard_self(dev)
-        db.add(Pause(target_type="device", target=str(dev.id), until=until_at, reason=reason))
-        db.commit()
-        label = f"{dev.name} ({dev.ip or dev.mac})"
-    return f"Пауза для {label} до {until_at:%H:%M} ({minutes} мин)"
+        chosen = pauses.Target("device", dev.id)
+    try:  # the same words as the «⏸ Пауза» screen
+        return pauses.pause(db, chosen, until_at, now, why)
+    except pauses.PauseError as exc:
+        raise ToolError(str(exc)) from exc
 
 
 @tool(mutating=True)
@@ -525,14 +529,14 @@ def resume_internet(
     ],
 ) -> str:
     """Досрочно снимает паузы. kid — все паузы детей (группы, каждого ребёнка и
-    их устройств); имя ребёнка — его паузы и паузы его устройств; устройство —
-    паузу самого устройства (если устройство держит пауза ребёнка или группы,
-    ответ скажет, что снять)."""
+    их устройств); имя ребёнка — его паузы и паузы его устройств, остальные
+    дети остаются на паузе; устройство — паузу самого устройства (если
+    устройство держит пауза ребёнка или группы, ответ скажет, что снять)."""
     t = target.strip()
-    if t == "kid":
+    if t.casefold() in pauses.KIDS_WORDS:
         if not house_rules.resume_kids(db):
             raise ToolError("Активных пауз у детей нет")
-        return "Паузы детей сняты"
+        return pauses.KIDS_RESUMED
     if t in GROUPS:
         removed = _delete_pauses(db, "group", t)
         if not removed:

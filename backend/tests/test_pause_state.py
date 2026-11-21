@@ -130,3 +130,18 @@ def test_panel_lifts_a_childs_pause(db, family):
     assert moved.status_code == 302
     db.expire_all()
     assert not _blocked(db, phone, tablet)
+
+
+def test_the_panel_pauses_all_children_one_pause_per_child(db, family):
+    misha, phone, tablet = family
+    with TestClient(app) as client:
+        client.post("/login", data={"username": "admin", "password": "testpass"})
+        paused = client.post("/groups/kid/pause", data={"preset": "60"}, follow_redirects=False)
+        assert paused.status_code == 302
+        db.expire_all()
+        assert [(p.target_type, p.target) for p in db.query(Pause)] == [("person", str(misha.id))]
+        assert {phone.ip, tablet.ip} <= _blocked(db, phone, tablet)
+        assert "kid" in dashboard._group_paused(db)  # the header offers to lift it
+        client.post("/groups/kid/unpause", follow_redirects=False)
+    db.expire_all()
+    assert db.query(Pause).count() == 0 and not _blocked(db, phone, tablet)

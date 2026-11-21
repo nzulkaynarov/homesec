@@ -7,7 +7,7 @@ from sqlalchemy.orm import Session
 
 from ..db import get_db
 from ..models import Device, EventLog, Person, active_pauses
-from ..services import adguard, mikrotik, pause_state, quota
+from ..services import adguard, house_rules, mikrotik, pause_state, quota
 from ..templates_env import templates
 
 log = logging.getLogger("homesec.dashboard")
@@ -19,7 +19,10 @@ _ROLE_ORDER = {"kid": 0, "adult": 1, "guest": 2}
 
 
 def _group_paused(db: Session) -> set[str]:
-    return {p.target for p in active_pauses(db) if p.target_type == "group"}
+    paused = {p.target for p in active_pauses(db) if p.target_type == "group"}
+    if house_rules.kids_paused_until(db) is not None:  # all children, one pause per child
+        paused.add(house_rules.KIDS_GROUP)
+    return paused
 
 
 def _console(db: Session, devices: list[Device], online_ips: set[str]) -> list[dict]:

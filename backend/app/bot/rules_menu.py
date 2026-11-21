@@ -11,7 +11,7 @@ from aiogram import F, Router
 from aiogram.types import CallbackQuery, InlineKeyboardButton, InlineKeyboardMarkup, Message
 
 from .. import db as dbmod
-from ..services import house_rules
+from ..services import house_rules, pauses
 from ..services.quota import QUOTA_CATEGORY_LABELS
 from . import access
 from .texts import DANGER
@@ -64,14 +64,14 @@ def _overview_data(db: Any) -> tuple[list[tuple[int, str, list[str]]], Any]:
 
 
 async def _overview(notice: str = "") -> Card:
-    kids, group_until = await _call(_overview_data)
+    kids, all_until = await _call(_overview_data)
     blocks = [f"🎒 {name}\n" + "\n".join(lines) for _, name, lines in kids]
     body = "\n\n".join(blocks) or "Детей в списке нет. Добавьте их в «👥 Люди»."
-    if group_until is not None:
-        body = f"⏸ Сейчас пауза всем детям до {group_until:%H:%M}\n\n{body}"
+    if all_until is not None:  # every child is paused, however the pause was set
+        body = f"⏸ Сейчас пауза всем детям до {all_until:%H:%M}\n\n{body}"
     text = (f"{notice}\n\n" if notice else "") + f"📋 Правила для детей\n\n{body}"
     rows = [[_button(f"🎒 {name}", f"hrp:{pid}")] for pid, name, _ in kids]
-    if group_until is not None:
+    if all_until is not None:
         rows.append([_button("▶️ Снять паузу всем детям", "hrra")])
     rows.append([_button("⏸ Пауза всем детям до утра", "hrza")])
     rows.append([_button("👥 Люди", "hrl")])
@@ -157,11 +157,12 @@ async def _apply(person_id: int, work: Any, *args: Any) -> Card:
     return await _person(person_id, f"✅ {result}")
 
 
-def _pause_all_kids(db: Any) -> int:
-    kids = [p for p in house_rules.people(db) if p.role == "kid"]
-    for kid in kids:
-        house_rules.pause(db, kid.id, None)
-    return len(kids)
+def _pause_all_kids(db: Any) -> str:
+    """The same pause for all children as «⏸ Пауза» → «👶 Все дети» → «🌙 До утра»."""
+    try:
+        return pauses.pause(db, pauses.ALL_KIDS, pauses.morning(db, pauses.ALL_KIDS))
+    except pauses.PauseError as exc:
+        return f"⚠️ {exc}"
 
 
 # ---------- people ----------
@@ -350,13 +351,11 @@ async def cb_resume(cb: CallbackQuery) -> None:
 
 
 async def cb_pause_all(cb: CallbackQuery) -> None:
-    count = await _call(_pause_all_kids)
-    await _show(cb, await _overview(f"⏸ Пауза до утра: детей {count}"))
+    await _show(cb, await _overview(await _call(_pause_all_kids)))
 
 
 async def cb_resume_kids(cb: CallbackQuery) -> None:
-    count = await _call(house_rules.resume_kids)
-    await _show(cb, await _overview(f"▶️ Снято пауз: {count}" if count else "Пауз не было."))
+    await _show(cb, await _overview(await _call(pauses.resume, pauses.ALL_KIDS)))
 
 
 async def cb_people(cb: CallbackQuery) -> None:

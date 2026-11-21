@@ -27,7 +27,7 @@ from ..models import (
     kv_set,
     log_event,
 )
-from . import adguard, mikrotik, pause_state, quota
+from . import adguard, mikrotik, pause_state, quota, unlock
 from .adguard import SERVICE_CATEGORIES
 from .safetext import clean_label
 
@@ -445,12 +445,15 @@ def _desired_state(
     ag_client_ips: set[str] = set()
 
     quota_spent = quota.exhausted(db, devices, now)  # {device_id: категории}
+    # A parent's grant during a pause opens a window (services/time_grants.py): for its minutes
+    # the person's used-up limits let them through as well, or "+15 min" would open nothing.
+    granted = set(unlock.open_windows(db, now))
     self_ips = get_self_ips() if self_ips is None else self_ips
     for dev in devices:
         if not dev.ip or dev.ip in self_ips or dev.kind == "infra":
             continue  # the network's own equipment is never a client, whatever its flags say
         group = dev.group
-        spent = quota_spent.get(dev.id, set())
+        spent = set() if dev.person_id in granted else quota_spent.get(dev.id, set())
         if group in GROUP_ADDRESS_LISTS:
             lists[GROUP_ADDRESS_LISTS[group]].add(dev.ip)
         paused = dev.id in pauses and pauses[dev.id].holds
@@ -465,8 +468,10 @@ def _desired_state(
         )
         if blocked:
             lists["hs-blocked"].add(dev.ip)
-            if "internet" in spent:  # причина известна: квота — reconcile
-                quota_blocked[dev.ip] = dev  # оформит отдельное событие для бота
+            # Причина известна: квота — reconcile оформит отдельное событие для бота. Under a
+            # pause the pause is the reason: a grant's window closing is not "the limit ran out".
+            if "internet" in spent and not paused:
+                quota_blocked[dev.ip] = dev
         # Управляемые: все, кроме взрослых без ограничений (им — fasttrack)
         if group != "adult" or dev.speed_limit or blocked:
             lists["hs-managed"].add(dev.ip)

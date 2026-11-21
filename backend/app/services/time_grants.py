@@ -2,9 +2,11 @@
 
 "More time" used to mean "+N minutes of the internet quota" everywhere, but nobody has an internet
 quota, so a child read "approved" and nothing changed. Now the grant acts on what actually holds
-the child back: a pause opens for the minutes, every limit on the child's devices grows by them
-(their own, their group's or a device's: a person's bonus counts toward each of them), and at
-night nothing is added (the owner decided on 2026-11-11 that bedtime is not opened).
+the child back: a pause opens for the minutes, and the limits used up today open with it for the
+same minutes (enforcement lets a parent's window through them, services/unlock.py), every limit
+on the child's devices grows by them (their own, their group's or a device's: a person's bonus
+counts toward each of them), and at night nothing is added (the owner decided on 2026-11-11 that
+bedtime is not opened).
 """
 
 from dataclasses import dataclass
@@ -41,6 +43,14 @@ def limit_categories(db: Session, person_id: int, now: datetime) -> list[str]:
     found = set(house_rules.limits(db, person_id))
     for rows in quota.progress(db, devices_of(db, person_id), now).values():
         found.update(row["category"] for row in rows)
+    return [category for category in quota.QUOTA_CATEGORIES if category in found]
+
+
+def spent_categories(db: Session, person_id: int, now: datetime) -> list[str]:
+    """The limits used up today on any of the person's devices, in the panel's order."""
+    found: set[str] = set()
+    for categories in quota.exhausted(db, devices_of(db, person_id), now).values():
+        found |= categories
     return [category for category in quota.QUOTA_CATEGORIES if category in found]
 
 
@@ -90,6 +100,29 @@ def _add_to_limits(
     return Granted(f"+{added} мин к лимитам: {labels}", added)
 
 
+def _through_pause(
+    db: Session, person_id: int, minutes: int | None, paused: datetime, now: datetime
+) -> str:
+    """Open a window through the pause; the used-up limits let the child through for the same
+    minutes, and the text says so, and what holds the child again once the window closes."""
+    spent = spent_categories(db, person_id, now)
+    until = house_rules.open_through_pause(db, person_id, minutes)
+    ends_with_pause = until >= paused  # then only a used-up limit holds the child again
+    text = f"интернет открыт до {until:%H:%M}" + (", до конца паузы" if ends_with_pause else "")
+    if spent:
+        labels = ", ".join(QUOTA_CATEGORY_LABELS.get(c, c).lower() for c in spent)
+        text += f", исчерпанные лимиты ({labels}) до этого времени тоже не мешают"
+    if not ends_with_pause:
+        text += ("; " if spent else ", ") + "потом пауза продолжится"
+    elif spent:
+        text += "; потом лимиты снова действуют"
+    blocked = blocked_names(db, person_id)
+    if blocked:
+        names = ", ".join(f"«{name}»" for name in blocked)
+        text += f"; выключено вручную: {names}, время это не изменит"
+    return text
+
+
 def grant(
     db: Session, person_id: int, minutes: int | None, comment: str, now: datetime | None = None
 ) -> Granted:
@@ -100,10 +133,7 @@ def grant(
     paused = house_rules.paused_until(db, person_id, now)
     given = DAY_MINUTES if minutes is None else minutes
     if paused is not None:
-        until = house_rules.open_through_pause(db, person_id, minutes)
-        if until >= paused:  # the pause is over then: nothing continues after the window
-            return Granted(f"интернет открыт до {until:%H:%M}, до конца паузы", given)
-        return Granted(f"интернет открыт до {until:%H:%M}, потом пауза продолжится", given)
+        return Granted(_through_pause(db, person_id, minutes, paused, now), given)
     granted = _add_to_limits(db, person, minutes, comment, now)
     if granted is not None:
         return granted

@@ -23,7 +23,7 @@ from ..ai import orchestrator, tools
 from ..config import settings
 from ..models import GROUPS
 from ..services import family as family_svc
-from ..services import house_rules
+from ..services import house_rules, pauses
 from . import (
     alerts,
     charts_menu,
@@ -279,19 +279,24 @@ async def cmd_pause(message: Message, command: CommandObject) -> None:
         return
     if not parts[-1].isdigit():
         await message.answer(
-            "Использование: /pause [имя|группа] <минут>\n"
-            "Например: /pause kid 60 или /pause 30 — выбор кнопками\n"
+            "Использование: /pause [кто] <минут>\n"
+            "Например: /pause дети 60 или /pause 30 — выбор кнопками\n"
             "Либо просто /pause — быстрые кнопки пресетов."
         )
         return
-    target, minutes = " ".join(parts[:-1]), int(parts[-1])
+    target, minutes = _kids_word(" ".join(parts[:-1])), int(parts[-1])
     await _target_command(message, "pause_internet", target,
                           {"minutes": minutes}, extra=f":{minutes}")
 
 
+def _kids_word(target: str) -> str:
+    """«дети», «всем детям» and the like mean every child, as the «👶 Все дети» button does."""
+    return "kid" if target.casefold() in pauses.KIDS_WORDS else target
+
+
 @router.message(Command("resume"))
 async def cmd_resume(message: Message, command: CommandObject) -> None:
-    target = (command.args or "").strip()
+    target = _kids_word((command.args or "").strip())
     await _target_command(message, "resume_internet", target, {})
 
 

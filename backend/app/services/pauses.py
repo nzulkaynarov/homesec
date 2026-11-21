@@ -1,15 +1,17 @@
 """Switch children or shared devices off the internet for a while: one service for every screen.
 
-A target is all children, one child (every device they own) or one device. A new pause on a
-target replaces the old one, so "change the time" and "pause again" mean the same thing. Pauses
-end by themselves; reconcile applies them within seconds through the reconcile_asap flag.
+A target is all children, one child (every device they own) or one device. "All children" is one
+pause per child with the same end, whichever screen, command or AI tool sets it, so one child can
+be let out and a grant works per child. A new pause on a target replaces the old one, so "change
+the time" and "pause again" mean the same thing. Pauses end by themselves; reconcile applies them
+within seconds through the reconcile_asap flag.
 """
 
 import re
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.orm import Session
 
 from ..models import Device, Pause, Person, kv_set, log_event
@@ -18,6 +20,10 @@ from . import house_rules, pause_state, unlock
 MAX_PAUSE = timedelta(hours=24)
 PRESET_MINUTES = (15, 30, 60, 120, 180)
 MORNING = "m"
+ALL_KIDS_NAME = "Все дети"
+# What a parent may type after /pause or say to the AI for every child at once.
+KIDS_WORDS = frozenset({"kid", "kids", "дети", "все дети", "детям", "всем детям"})
+KIDS_RESUMED = f"▶️ {ALL_KIDS_NAME}: интернет снова включён"
 
 
 class PauseError(ValueError):
@@ -83,7 +89,7 @@ def _device(db: Session, device_id: int) -> Device:
 
 def label(db: Session, target: Target) -> str:
     if target.kind == "kids":
-        return "Все дети"
+        return ALL_KIDS_NAME
     if target.kind == "person":
         return _person(db, target.id).name
     return _device(db, target.id).name
@@ -140,12 +146,14 @@ def parse_until(text: str, now: datetime | None = None) -> datetime | None:
     return None
 
 
-def _replace(db: Session, target_type: str, target_id: int, until: datetime) -> None:
+def _replace(
+    db: Session, target_type: str, target_id: int, until: datetime, reason: str
+) -> None:
     for row in db.scalars(
         select(Pause).where(Pause.target_type == target_type, Pause.target == str(target_id))
     ):
         db.delete(row)
-    db.add(Pause(target_type=target_type, target=str(target_id), until=until, reason="бот"))
+    db.add(Pause(target_type=target_type, target=str(target_id), until=until, reason=reason))
 
 
 def _applied(db: Session, message: str) -> None:
@@ -154,8 +162,15 @@ def _applied(db: Session, message: str) -> None:
     kv_set(db, "reconcile_asap", "1")
 
 
-def pause(db: Session, target: Target, until: datetime, now: datetime | None = None) -> str:
-    """Switch the target off until `until`; returns the confirmation for the parent."""
+def pause(
+    db: Session,
+    target: Target,
+    until: datetime,
+    now: datetime | None = None,
+    reason: str = "бот",
+) -> str:
+    """Switch the target off until `until`; returns the confirmation for the parent, the same
+    words from the «⏸ Пауза» and «📋 Правила» screens, /pause and the AI."""
     now = now or datetime.now()
     if until <= now:
         raise PauseError("Это время уже прошло.")
@@ -165,28 +180,36 @@ def pause(db: Session, target: Target, until: datetime, now: datetime | None = N
         children = kids(db)
         if not children:
             raise PauseError("В HomeSec пока нет детей.")
+        # The new time replaces a pause left on the whole group, as it does a child's own.
+        db.execute(
+            delete(Pause).where(
+                Pause.target_type == "group", Pause.target == house_rules.KIDS_GROUP
+            )
+        )
         for kid in children:
-            _replace(db, "person", kid.id, until)
+            _replace(db, "person", kid.id, until, reason)
             unlock.close_window(db, kid.id)  # a pause the parent sets now wins over an open window
-        name = "Все дети"
+        name = ALL_KIDS_NAME
     elif target.kind == "person":
         name = _person(db, target.id).name
-        _replace(db, "person", target.id, until)
+        _replace(db, "person", target.id, until, reason)
         unlock.close_window(db, target.id)
     else:
         name = _device(db, target.id).name
-        _replace(db, "device", target.id, until)
+        _replace(db, "device", target.id, until, reason)
     _applied(db, f"Пауза: {name} до {until:%d.%m %H:%M}")
     return f"⏸ {name}: без интернета до {until:%H:%M}"
 
 
 def own_pauses(db: Session, target: Target) -> list[Pause]:
-    """The pauses that resume() lifts for a person or a device: a person's own and the ones
-    on their devices; a device's own. A group pause stays; it belongs to the whole group."""
+    """The pauses that resume() lifts for a person or a device: a person's own, the ones on
+    their devices and, for a child, a pause left on the whole children group (resume() keeps
+    it for the other children); a device's own."""
     if target.kind == "person":
-        _person(db, target.id)
+        person = _person(db, target.id)
         device_ids = {str(d.id) for d in kid_devices(db, target.id)}
-        return [
+        group = house_rules.group_pauses(db) if person.role == "kid" else []
+        return group + [
             row
             for row in db.scalars(select(Pause))
             if (row.target_type == "person" and row.target == str(target.id))
@@ -202,8 +225,10 @@ def resume(db: Session, target: Target) -> str:
     if target.kind == "kids":
         removed = house_rules.resume_kids(db)
         kv_set(db, "reconcile_asap", "1")
-        return "▶️ Дети снова в интернете" if removed else "У детей паузы не было"
+        return KIDS_RESUMED if removed else "У детей паузы не было"
     name = label(db, target)
+    if target.kind == "person" and _person(db, target.id).role == "kid":
+        house_rules.split_group_pause(db)  # the other children stay paused
     rows = own_pauses(db, target)
     for row in rows:
         db.delete(row)
@@ -217,29 +242,44 @@ def paused_until(db: Session, target: Target, now: datetime | None = None) -> da
     """End of the pause that switches the target off right now, whoever set it."""
     now = now or datetime.now()
     if target.kind == "kids":
-        children = kids(db)
-        ends = [house_rules.paused_until(db, kid.id, now) for kid in children]
-        if not children or any(end is None for end in ends):
-            return None
-        return min(end for end in ends if end is not None)
+        return house_rules.kids_paused_until(db, now)
     if target.kind == "person":
         return house_rules.paused_until(db, target.id, now)
     return pause_state.held_until(db, _device(db, target.id), now)
 
 
+def _together(db: Session, now: datetime) -> set[str]:
+    """The children (person ids as stored in a pause) shown as one «Все дети» line: every child
+    is paused until the same minute, as a pause for all of them leaves it. An only child keeps
+    their name."""
+    until = house_rules.kids_paused_until(db, now)
+    children = kids(db)
+    if until is None or len(children) < 2:
+        return set()
+    minute = until.replace(second=0, microsecond=0)
+    for kid in children:
+        end = paused_until(db, Target("person", kid.id), now)
+        if end is None or end.replace(second=0, microsecond=0) != minute:
+            return set()
+    return {str(kid.id) for kid in children}
+
+
 def active(db: Session, now: datetime | None = None) -> list[tuple[str, datetime]]:
     """Every pause in force, as (who, until), for the overview."""
     now = now or datetime.now()
+    together = _together(db, now)
     found: dict[str, datetime] = {}
     for row in db.scalars(select(Pause).where(Pause.until > now)):
-        if row.target_type == "person":
+        if row.target_type == "person" and row.target in together:
+            name: str | None = ALL_KIDS_NAME
+        elif row.target_type == "person":
             person = db.get(Person, int(row.target)) if row.target.isdigit() else None
             name = person.name if person else None
         elif row.target_type == "device":
             device = db.get(Device, int(row.target)) if row.target.isdigit() else None
             name = device.name if device else None
         else:
-            name = {"kid": "Все дети", "guest": "Гости", "unknown": "Незнакомые"}.get(row.target)
+            name = {"kid": ALL_KIDS_NAME, "guest": "Гости", "unknown": "Незнакомые"}.get(row.target)
         if name:
             found[name] = max(found.get(name, row.until), row.until)
     return sorted(found.items(), key=lambda item: item[1])

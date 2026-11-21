@@ -5,10 +5,11 @@ from datetime import datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiogram.filters import CommandObject
 from aiogram.types import Message
 
 from app.ai import tools
-from app.bot import access, device_menu, pause_menu
+from app.bot import access, device_menu, handlers, pause_menu, rules_menu
 from app.db import Base, engine, session
 from app.models import Device, EventLog, KVState, Pause, Person, Rule, kv_get
 from app.services import enforcement, pauses, unlock
@@ -231,3 +232,86 @@ def test_children_cannot_pause(db):
     for data in ("pzm", "pzt:a", "pzs:a:30", "pzr:a", "pzra"):
         assert not access.check_callback("kid", data).allowed
     assert not access.check_message("kid", pause_menu.BTN_PAUSE).allowed
+
+
+def _pause_command(args: str) -> str:
+    message = _typed(f"/pause {args}")
+    asyncio.run(handlers.cmd_pause(message, CommandObject(command="pause", args=args)))
+    return message.answer.await_args.args[0]
+
+
+def test_all_children_is_one_pause_with_one_wording_everywhere(db):
+    """«⏸ Пауза» → «👶 Все дети», «📋 Правила» → «⏸ Пауза всем детям до утра», /pause and the AI
+    tool used to make three different pauses; now each sets one pause per child, says the same
+    words and switches off the same devices."""
+    misha, anya, phone, tablet, anya_phone, *_ = _family(db)
+    ways = {
+        "pause screen": lambda: _run(pause_menu.cb_set, "pzs:a:60")[0],
+        "rules screen": lambda: _run(rules_menu.cb_pause_all, "hrza")[0],
+        "/pause": lambda: _pause_command("дети 30"),
+        "/pause kid": lambda: _pause_command("kid 45"),
+        "AI": lambda: tools.run_tool(
+            db, "pause_internet", {"target": "kid", "minutes": 20}, source="bot"
+        ),
+    }
+    for way, act in ways.items():
+        text = act()
+        db.expire_all()
+        assert text.startswith("⏸ Все дети: без интернета до "), way
+        rows = {(p.target_type, p.target) for p in db.query(Pause)}
+        assert rows == {("person", str(misha.id)), ("person", str(anya.id))}, way
+        assert _blocked_ips(db) == {phone.ip, tablet.ip, anya_phone.ip}, way
+
+
+def test_the_pause_screen_names_all_children_as_one_until_one_is_let_out(db):
+    misha, *_ = _family(db)
+    _run(pause_menu.cb_set, "pzs:a:60")
+    text, _ = asyncio.run(pause_menu.overview())
+    assert "• Все дети — до" in text and "Миша" not in text
+    text, actions = _run(pause_menu.cb_picker, "pzt:a")
+    assert "Сейчас без интернета до" in text and "pzr:a" in actions
+
+    _run(pause_menu.cb_resume, f"pzr:p{misha.id}")
+    text, _ = asyncio.run(pause_menu.overview())
+    assert "• Аня — до" in text and "Все дети" not in text
+    text, actions = _run(pause_menu.cb_picker, "pzt:a")
+    assert "Сейчас интернет есть." in text and "pzr:a" not in actions
+
+
+def test_a_group_pause_left_from_before_works_and_lets_one_child_out(db):
+    """Pauses the AI and /pause set on the whole group keep working until they end. Lifting one
+    child keeps the others paused; a new pause for all children replaces what is left."""
+    misha, anya, phone, tablet, anya_phone, *_ = _family(db)
+    until = datetime.now() + timedelta(hours=2)
+    db.add(Pause(target_type="group", target="kid", until=until, reason="Ужин"))
+    db.commit()
+    assert _blocked_ips(db) == {phone.ip, tablet.ip, anya_phone.ip}
+    assert pauses.paused_until(db, pauses.ALL_KIDS) == until
+    text, _ = asyncio.run(pause_menu.overview())
+    assert f"• Все дети — до {until:%H:%M}" in text
+
+    text, _ = _run(pause_menu.cb_resume, f"pzr:p{misha.id}")
+    assert "▶️ Миша: интернет снова включён" in text
+    db.expire_all()
+    assert _blocked_ips(db) == {anya_phone.ip}
+    assert [(p.target_type, p.target, p.until) for p in db.query(Pause)] == [
+        ("person", str(anya.id), until)
+    ]
+
+    db.add(Pause(target_type="group", target="kid", until=until))
+    db.commit()
+    _run(pause_menu.cb_set, "pzs:a:15")
+    rows = {(p.target_type, p.target) for p in db.query(Pause)}
+    assert rows == {("person", str(misha.id)), ("person", str(anya.id))}
+    assert all(p.until < datetime.now() + timedelta(minutes=16) for p in db.query(Pause))
+
+
+def test_the_ai_lets_one_child_out_of_a_group_pause_left_from_before(db):
+    misha, _anya, phone, tablet, anya_phone, *_ = _family(db)
+    db.add(Pause(target_type="group", target="kid", until=datetime.now() + timedelta(hours=1)))
+    db.commit()
+    result = tools.run_tool(db, "resume_internet", {"target": "Миша"}, source="bot")
+    assert result == "▶️ Миша: интернет снова включён"
+    assert _blocked_ips(db) == {anya_phone.ip}
+    result = tools.run_tool(db, "resume_internet", {"target": "дети"}, source="bot")
+    assert result == pauses.KIDS_RESUMED and _blocked_ips(db) == set()

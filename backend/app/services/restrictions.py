@@ -9,7 +9,7 @@ from sqlalchemy.orm import Session
 
 from ..config import settings
 from ..models import Device, Rule
-from . import pause_state, quota
+from . import pause_state, quota, unlock
 from .enforcement import rule_is_active
 
 
@@ -44,7 +44,9 @@ def restriction_for_ip(db: Session, ip: str) -> dict | None:
     if paused is not None:
         return {"kind": "pause", "until": paused, **base}
 
-    if any(r["category"] == "internet" and r["used"] >= r["limit"] for r in quota_rows):
+    opened = dev.person_id is not None and unlock.open_until(db, dev.person_id, now) is not None
+    spent = any(r["category"] == "internet" and r["used"] >= r["limit"] for r in quota_rows)
+    if spent and not opened:  # a parent's open window lets used-up limits through
         return {"kind": "quota", **base}
 
     for rule in db.scalars(select(Rule)):
