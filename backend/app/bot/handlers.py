@@ -29,6 +29,7 @@ from . import (
     charts_menu,
     common,
     device_menu,
+    digest,
     home_menu,
     notes_menu,
     onboarding,
@@ -124,6 +125,7 @@ shared_menu.register(router)
 alerts.register(router)
 onboarding.register(router)
 reports.register(router)
+digest.register(router)
 server_menu.register(router)
 charts_menu.register(router)
 home_menu.register(router)
@@ -228,7 +230,9 @@ async def cb_pick(cb: CallbackQuery) -> None:
         result = "Ошибка при выполнении, подробности в журнале."
     await cb.answer()
     if isinstance(cb.message, Message):
-        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
+        await cb.message.edit_text(
+            texts.with_result(cb.message, f"➡ {result}"), parse_mode="HTML", reply_markup=None
+        )
 
 
 @router.message(Command("start"))
@@ -540,4 +544,6 @@ async def cb_confirm_action(cb: CallbackQuery) -> None:
             result = "Ошибка при выполнении, подробности в журнале."
     await cb.answer()
     if isinstance(cb.message, Message):
-        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
+        await cb.message.edit_text(
+            texts.with_result(cb.message, f"➡ {result}"), parse_mode="HTML", reply_markup=None
+        )

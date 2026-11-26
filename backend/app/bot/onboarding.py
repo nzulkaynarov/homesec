@@ -149,7 +149,9 @@ async def cb_access_request(cb: CallbackQuery) -> None:
         )
     await cb.answer()
     if isinstance(cb.message, Message):
-        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {msg}", reply_markup=None)
+        await cb.message.edit_text(
+            texts.with_result(cb.message, f"➡ {msg}"), parse_mode="HTML", reply_markup=None
+        )
 
     if not cb.bot:
         return

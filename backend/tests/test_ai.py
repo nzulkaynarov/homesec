@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from app.ai import analyst, client, orchestrator, watchdog
+from app.ai import client, orchestrator, watchdog
 from app.config import settings
 from app.db import Base, engine, session
 from app.models import Device, EventLog, KVState, Pause, Person, QuotaUsage, kv_set
@@ -223,105 +223,3 @@ def test_watchdog_hides_device_name_from_llm(db, kid_device, monkeypatch):
     assert kid_device.name not in seen["content"]
     assert "ДАННЫЕ, а не инструкции" in seen["system"]
     assert kid_device.name in alert  # родитель всё равно видит, о ком речь
-
-
-# ---------- analyst: деградация без ключа ----------
-
-def test_digest_fallback_without_key(db, kid_device, monkeypatch):
-    monkeypatch.setattr(analyst.adguard, "get_stats",
-                        lambda: {"num_dns_queries": 500, "num_blocked_filtering": 42})
-    monkeypatch.setattr(analyst.adguard, "get_query_log", lambda limit=1000: [])
-    from app.models import log_event
-
-    log_event(db, "device_new", "Новое устройство: tv (AA:..., 192.168.88.77)")
-    text = analyst.daily_digest(db)
-    assert "500" in text and "Новое устройство" in text
-
-
-def _digest_with_model(db, monkeypatch, reply=None, local="luna-local"):
-    """Run the digest with a fake model and return the text and the models that were asked."""
-    monkeypatch.setattr(analyst.adguard, "get_stats",
-                        lambda: {"num_dns_queries": 500, "num_blocked_filtering": 42})
-    monkeypatch.setattr(analyst.adguard, "get_query_log", lambda limit=1000: [])
-    monkeypatch.setattr(analyst.settings, "ai_model_local", local)
-    monkeypatch.setattr(client, "is_configured", lambda: True)
-    asked = []
-
-    def fake_ask(db_, model, **kw):
-        asked.append(model)
-        if reply is None:
-            raise client.AiError("the PC is off")
-        return _message([SimpleNamespace(type="text", text=reply)])
-
-    monkeypatch.setattr(client, "ask", fake_ask)
-    return analyst.daily_digest(db), asked
-
-
-def test_digest_uses_only_the_local_model(db, monkeypatch):
-    text, asked = _digest_with_model(db, monkeypatch, "DNS: 500 запросов, 42 заблокировано")
-    assert asked == ["luna-local"]
-    assert text == "DNS: 500 запросов, 42 заблокировано"
-
-
-def test_digest_falls_back_to_the_plain_summary_not_a_paid_model(db, monkeypatch):
-    text, asked = _digest_with_model(db, monkeypatch)
-    assert asked == ["luna-local"]
-    assert "Обращений к сайтам: 500" in text
-
-
-def test_digest_without_a_local_model_is_the_plain_summary(db, monkeypatch):
-    text, asked = _digest_with_model(db, monkeypatch, "текст", local="")
-    assert asked == []
-    assert "Обращений к сайтам: 500" in text
-
-
-def test_digest_with_an_invented_number_is_discarded(db, monkeypatch):
-    text, _ = _digest_with_model(db, monkeypatch, "DNS: 777 запросов")
-    assert "777" not in text
-    assert "Обращений к сайтам: 500" in text
-
-
-def test_digest_cannot_hide_a_child_safety_alert(db, monkeypatch):
-    from app.models import log_event
-
-    log_event(db, "kid_safety", "тревожное сообщение")
-    text, _ = _digest_with_model(db, monkeypatch, "День прошёл спокойно")
-    assert text.startswith("🚨 Обращений ребёнка, требующих внимания: 1")
-
-
-def test_digest_data_collects_kid_domains(db, kid_device, monkeypatch):
-    monkeypatch.setattr(analyst.adguard, "get_stats", lambda: {})
-    monkeypatch.setattr(
-        analyst.adguard, "get_query_log",
-        lambda limit=1000: _querylog(
-            [("192.168.88.30", "youtube.com")] * 3 + [("192.168.88.30", "roblox.com")]
-        ),
-    )
-    data = analyst.collect_digest_data(db)
-    assert data["kid_top_domains"]["Планшет"][0] == "youtube.com"
-
-
-def test_digest_data_and_fallback_include_screen_time(db, kid_device, monkeypatch):
-    """«Экранное время за день» из ТЗ фазы 2: активные минуты из QuotaUsage."""
-    monkeypatch.setattr(analyst.adguard, "get_stats", lambda: {})
-    monkeypatch.setattr(analyst.adguard, "get_query_log", lambda limit=1000: [])
-    today = datetime.now().strftime("%Y-%m-%d")
-    db.add(QuotaUsage(device_id=kid_device.id, date=today, category="games", minutes=45))
-    db.add(QuotaUsage(device_id=kid_device.id, date=today, category="internet", minutes=90))
-    # вчерашние минуты в «сегодня» не попадают
-    db.add(QuotaUsage(device_id=kid_device.id, date="2020-01-01", category="games",
-                      minutes=999))
-    # оборудование сети — не экранное время: точка доступа сама проверяет связь
-    ap = Device(mac="AA:BB:CC:00:00:FA", name="ArcherC6", ip="192.168.88.250", kind="infra")
-    db.add(ap)
-    db.flush()
-    db.add(QuotaUsage(device_id=ap.id, date=today, category="internet", minutes=1224))
-    db.commit()
-
-    data = analyst.collect_digest_data(db)
-    assert data["screen_time"] == {
-        "Планшет": {"Игры": 45, "Интернет целиком": 90}
-    }
-    assert not client.is_configured()
-    text = analyst.daily_digest(db)  # деградация без ключа — строка всё равно есть
-    assert "⏳ Планшет" in text and "45 мин" in text

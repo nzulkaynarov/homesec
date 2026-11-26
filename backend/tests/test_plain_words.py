@@ -12,7 +12,7 @@ import anthropic
 import httpx
 import pytest
 
-from app.ai import analyst, client, confirmations, orchestrator, tools, watchdog
+from app.ai import client, confirmations, orchestrator, tools, watchdog
 from app.bot import health, texts
 from app.bot import main as bot_main
 from app.config import settings
@@ -385,19 +385,6 @@ def test_watchdog_alerts_name_the_device_and_its_owner(db, misha, monkeypatch):
     alert = watchdog.format_alert(db, anomaly)
     assert alert.endswith("Устройство: «Планшет» (Миша)") and "ребёнка" in alert
     assert_plain(alert)
-
-
-def test_the_evening_summary_shows_names_not_addresses(db, monkeypatch):
-    monkeypatch.setattr(
-        analyst.adguard, "get_stats", lambda: {"num_dns_queries": 500, "num_blocked_filtering": 42}
-    )
-    monkeypatch.setattr(analyst.adguard, "get_query_log", lambda limit=1000: [])
-    log_event(db, "device_new", f"Новое устройство: tv ({MAC}, 192.168.88.77) ⚠️ случайный MAC")
-    log_event(db, "block", "Ручная блокировка: Планшет (192.168.88.30)")
-    monkeypatch.setattr(client, "is_configured", lambda: False)
-    text = analyst.daily_digest(db)
-    assert "🆕 Новое устройство: tv" in text and "⛔ Ручная блокировка: Планшет" in text
-    assert_plain(text)
 
 
 def test_plain_speed_and_names():

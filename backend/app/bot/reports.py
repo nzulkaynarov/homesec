@@ -1,5 +1,5 @@
-"""Reports for the family: time left on quotas with quick +15/+30 buttons, the AI spend (shown
-under «🖥 Сервер») and the daily digest."""
+"""Reports for the family: time left on quotas with quick +15/+30 buttons and the AI spend (shown
+under «🖥 Сервер»). The evening summary lives in bot/digest.py."""
 
 import asyncio
 from datetime import datetime, timedelta
@@ -14,25 +14,11 @@ from ..ai import client as ai_client
 from ..config import settings
 from ..models import Device, Person
 from ..services import time_grants
-from . import charts_menu, common, rich, screens, texts
+from . import charts_menu, rich, screens, texts
 
 
 async def btn_quota(message: Message) -> None:
     await cmd_quota(message)
-
-
-def _digest_sync() -> str:
-    from ..ai import analyst
-
-    s = dbmod.session()
-    try:
-        return analyst.daily_digest(s)
-    finally:
-        s.close()
-
-
-async def cmd_digest(message: Message) -> None:
-    await common.send_long(message, await asyncio.to_thread(_digest_sync))
 
 
 def _collect_quota_sync() -> list[dict]:
@@ -131,7 +117,9 @@ async def cb_grant(cb: CallbackQuery) -> None:
         await cb.answer(result[:200], show_alert=True)
         return
     await cb.answer()
-    await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
+    await cb.message.edit_text(
+        texts.with_result(cb.message, f"➡ {result}"), parse_mode="HTML", reply_markup=None
+    )
 
 
 def _spend_sync() -> str:
@@ -172,6 +160,5 @@ async def spend_screen() -> str:
 def register(router: Router) -> None:
     """Attach to the router that carries the access middleware, before catch-all text handlers."""
     router.message.register(btn_quota, F.text == "⏳ Квоты")
-    router.message.register(cmd_digest, Command("digest"))
     router.message.register(cmd_quota, Command("quota"))
     router.callback_query.register(cb_grant, F.data.startswith(f"{GRANT}:"))

@@ -46,6 +46,17 @@ def parent_chat_ids(db: Session) -> set[int]:
     return set(settings.telegram_allowed_ids) | {int(t) for t in linked if t is not None}
 
 
+def owner_chat_ids(db: Session) -> set[int]:
+    """The owner's chats: the ones in settings and the people linked as owner. They also get the
+    technical part of the evening summary."""
+    linked = db.scalars(
+        select(Person.telegram_id).where(
+            Person.telegram_id.is_not(None), Person.bot_role == "owner"
+        )
+    )
+    return set(settings.telegram_allowed_ids) | {int(t) for t in linked if t is not None}
+
+
 def get_user_role(db: Session, telegram_id: int) -> tuple[str, Person | None]:
     """Определяет роль пользователя в семейном боте.
     Приоритет:

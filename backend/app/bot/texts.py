@@ -1,5 +1,9 @@
 """Форматирование сообщений бота — чистые функции, покрыты тестами."""
 
+import html
+
+from aiogram.types import Message
+
 from ..services import plain
 
 # The "/" menu (set_my_commands at start-up): every feature is a button, so the menu only brings
@@ -146,6 +150,18 @@ def split_message(text: str, limit: int = TELEGRAM_MESSAGE_LIMIT) -> list[str]:
     if rest or not parts:
         parts.append(rest)
     return parts
+
+
+def alert_html(text: str) -> str:
+    """A notice as Telegram HTML: its first line, who and what, in bold, so it is found at a glance
+    among the others; the rest stays as written."""
+    head, sep, rest = text.partition("\n")
+    return f"<b>{html.escape(head, quote=False)}</b>{sep}{html.escape(rest, quote=False)}"
+
+
+def with_result(message: Message, result: str) -> str:
+    """A notice that was answered: its own text, bold first line kept, and the outcome under it."""
+    return f"{message.html_text}\n\n{html.escape(result, quote=False)}"
 
 
 def escape_markdown(text: str) -> str:

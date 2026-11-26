@@ -15,13 +15,13 @@ from aiogram.types import BotCommand, InlineKeyboardMarkup, ReplyKeyboardRemove
 from sqlalchemy.orm import Session
 
 from .. import db as dbmod
-from ..ai import analyst, watchdog
+from ..ai import watchdog
 from ..config import settings
 from ..db import Base, engine
 from ..migrations import ensure_schema
 from ..services import family as family_svc
 from ..services import followups, night_watch, plain, time_notices, uptime
-from . import access, alerts, handlers, luna_watch, notify, server_menu, texts
+from . import access, alerts, digest, handlers, luna_watch, notify, server_menu, texts
 from .health import default_monitor
 from .triage import vendor_of
 
@@ -46,13 +46,13 @@ def _parent_ids() -> set[int]:
 async def _broadcast(bot: Bot, chat_ids: set[int], text: str, keyboard=None) -> int:
     """Send to the configured chats and to every parent linked in the bot since; returns how many
     chats got the whole message."""
-    parts = texts.split_message(text)
+    parts = texts.split_message(texts.alert_html(text))
     delivered = 0
     for chat_id in chat_ids | await asyncio.to_thread(_parent_ids):
         try:
             for part in parts[:-1]:
-                await bot.send_message(chat_id, part)
-            await bot.send_message(chat_id, parts[-1], reply_markup=keyboard)
+                await bot.send_message(chat_id, part, parse_mode="HTML")
+            await bot.send_message(chat_id, parts[-1], parse_mode="HTML", reply_markup=keyboard)
             delivered += 1
         except Exception:
             log.exception("не удалось отправить сообщение в чат %s", chat_id)
@@ -305,14 +305,6 @@ async def uptime_loop(bot: Bot, chat_ids: set[int]) -> None:
         await asyncio.sleep(UPTIME_INTERVAL)
 
 
-def _build_digest() -> str:
-    s = dbmod.session()
-    try:
-        return analyst.daily_digest(s)
-    finally:
-        s.close()
-
-
 async def digest_loop(bot: Bot, chat_ids: set[int]) -> None:
     while True:
         now = datetime.now()
@@ -321,7 +313,7 @@ async def digest_loop(bot: Bot, chat_ids: set[int]) -> None:
             target += timedelta(days=1)
         await asyncio.sleep((target - now).total_seconds())
         try:
-            await _broadcast(bot, chat_ids, await asyncio.to_thread(_build_digest))
+            await digest.send(bot, chat_ids | await asyncio.to_thread(_parent_ids))
         except Exception:
             log.exception("digest_loop")
 

@@ -13,7 +13,7 @@ from .. import db as dbmod
 from ..ai import tools
 from ..models import GROUP_LABELS, BonusRequest, Device, Person
 from ..services import bonus, device_owners, followups, time_grants, time_notices
-from . import common
+from . import common, texts
 from .texts import DANGER, SUCCESS
 
 log = logging.getLogger("homesec.bot.alerts")
@@ -190,7 +190,11 @@ def _resolve_bonus_request(request_id: int, choice: str, drawn_for: str | None =
 
 async def _show_request(message: Message, request_id: int, notice: time_notices.Notice) -> None:
     try:
-        await message.edit_text(notice.text, reply_markup=request_keyboard(request_id, notice))
+        await message.edit_text(
+            texts.alert_html(notice.text),
+            parse_mode="HTML",
+            reply_markup=request_keyboard(request_id, notice),
+        )
     except TelegramBadRequest:  # the same text and buttons: nothing to change
         pass
 
@@ -204,7 +208,9 @@ async def _answer_request(cb: CallbackQuery, request_id: int, answer: Answer) ->
         await cb.answer(answer.text[:200], show_alert=True)
         return
     await cb.answer()
-    await cb.message.edit_text(f"{cb.message.text}\n\n➡ {answer.text}", reply_markup=None)
+    await cb.message.edit_text(
+        texts.with_result(cb.message, f"➡ {answer.text}"), parse_mode="HTML", reply_markup=None
+    )
 
 
 async def _answer_with(cb: CallbackQuery, request_id: int, work: Any, *args: Any) -> None:
@@ -310,7 +316,9 @@ async def cb_merge(cb: CallbackQuery) -> None:
             result = "Ошибка при объединении, подробности в журнале."
     await cb.answer()
     if isinstance(cb.message, Message):
-        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
+        await cb.message.edit_text(
+            texts.with_result(cb.message, f"➡ {result}"), parse_mode="HTML", reply_markup=None
+        )
 
 
 def _person_name(person_id: int) -> str | None:
@@ -351,11 +359,15 @@ async def cb_new_device(cb: CallbackQuery) -> None:
     except tools.ToolError as e:
         await cb.answer(str(e), show_alert=True)
         if isinstance(cb.message, Message):
-            await cb.message.edit_text(f"{cb.message.text}\n\n⚠️ {e}", reply_markup=None)
+            await cb.message.edit_text(
+                texts.with_result(cb.message, f"⚠️ {e}"), parse_mode="HTML", reply_markup=None
+            )
         return
     await cb.answer("Готово")
     if isinstance(cb.message, Message):  # у устаревших сообщений править нечего
-        await cb.message.edit_text(f"{cb.message.text}\n\n➡ {result}", reply_markup=None)
+        await cb.message.edit_text(
+            texts.with_result(cb.message, f"➡ {result}"), parse_mode="HTML", reply_markup=None
+        )
 
 
 async def cb_old_direct_request(cb: CallbackQuery) -> None:

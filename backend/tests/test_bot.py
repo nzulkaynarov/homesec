@@ -339,7 +339,7 @@ def _callback(data, text="🙏 Миша просит ещё времени"):
     from aiogram.types import Message
 
     cb = MagicMock(data=data, answer=AsyncMock())
-    cb.message = MagicMock(spec=Message, text=text, edit_text=AsyncMock())
+    cb.message = MagicMock(spec=Message, text=text, html_text=text, edit_text=AsyncMock())
     return cb
 
 
@@ -347,7 +347,9 @@ def _edited(cb):
     """The text and button labels a callback redrew its message with."""
     call = cb.message.edit_text.call_args
     markup = call.kwargs["reply_markup"]
-    return call.args[0], [b.text for row in markup.inline_keyboard for b in row]
+    assert call.kwargs.get("parse_mode") == "HTML"  # the first line goes in bold
+    text = call.args[0].replace("<b>", "").replace("</b>", "")
+    return text, [b.text for row in markup.inline_keyboard for b in row]
 
 
 def test_parents_read_the_request_without_addresses_or_numbers(db):
