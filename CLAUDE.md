@@ -244,7 +244,8 @@ cd backend && uv pip install -r requirements.txt pytest ruff mypy
 | `backend/app/services/mikrotik.py` | RouterOS API (librouteros); только address-lists, queues, leases, connections |
 | `backend/app/services/adguard.py` | AdGuard REST API: per-client блокировки сервисов, safe search |
 | `backend/app/ai/tools.py` | Реестр инструментов — ЕДИНСТВЕННАЯ точка, через которую ИИ и бот трогают систему; guardrails зашиты в код (self-IP, только hs-*, аудит) |
-| `backend/app/ai/` | ИИ-слой: client.py (Claude API + дневной бюджет), orchestrator.py (NL→tools, мутации только через кнопку), analyst.py (дайджест), watchdog.py (аномалии: эвристики + LLM-оформление) |
+| `backend/app/ai/` | ИИ-слой: client.py (Claude API + дневной бюджет), orchestrator.py (NL→tools, мутации только через кнопку), watchdog.py (аномалии: эвристики + LLM-оформление) |
+| `backend/app/services/digest.py`, `backend/app/bot/digest.py` | Вечерняя сводка родителям: факты собирает код (без ИИ), экран рисуется по одной схеме — итог 🔴/🟡/🟢, просьбы с кнопками, таблица детей, остальное свёрнуто; технические сбои только владельцу |
 | `backend/app/bot/` | Telegram-бот, отдельный systemd-юнит homesec-bot: уведомления, health-алерты, команды, ИИ-канал |
 | `backend/app/migrations.py` | Мини-миграции схемы (PRAGMA user_version), только аддитивные |
 | `backend/app/routers/`, `templates/` | Веб-панель (FastAPI + Jinja2, без JS-фреймворков) |
@@ -270,7 +271,8 @@ cd backend && uv pip install -r requirements.txt pytest ruff mypy
 на проде нужно заполнить HS_TELEGRAM_* в .env на малинке.
 Фаза 3 (ИИ) — **СДЕЛАНО в базовой версии**: NL-управление через Claude API
 (app/ai/orchestrator.py; Opus для рассуждений, Haiku для рутины), детектор
-аномалий (ночная активность, всплеск DoH), ИИ-дайджест дня. Правила: любая
+аномалий (ночная активность, всплеск DoH), ИИ-дайджест дня (с 2026-11-26
+сводку собирает код без модели, см. services/digest.py). Правила: любая
 мутация от ИИ — только через кнопку подтверждения в Telegram; дневной бюджет
 токенов HS_AI_DAILY_TOKEN_BUDGET; без ключа HS_ANTHROPIC_API_KEY ИИ молчит,
 остальное работает.
