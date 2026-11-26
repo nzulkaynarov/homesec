@@ -19,7 +19,7 @@ from sqlalchemy.orm import Session
 
 from ..ai import client as ai_client
 from ..models import Device, Person, QuotaUsage
-from . import hosts
+from . import hosts, plain
 
 DAYS = 7
 SHORT_DAYS = ("Пн", "Вт", "Ср", "Чт", "Пт", "Сб", "Вс")
@@ -180,19 +180,28 @@ def host_day_png(
 
 
 def spend_week_png(days: list[date], people: dict[str, list[float]]) -> bytes:
+    """Stacked bars per day. Below a dollar a day the axis is in cents, and nobody who spent
+    nothing this week takes a place in the legend."""
+    people = {name: usd for name, usd in people.items() if sum(usd) > 0}
+    totals = [sum(day) for day in zip(*people.values(), strict=True)] or [0.0] * len(days)
+    scale, unit = (1.0, "$") if max(totals) >= 1 else (1 / plain.CENT, "центы")
     with _lock:
         plt = _plt()
         fig, ax = plt.subplots(figsize=(8, 4.2))
         bottom = [0.0] * len(days)
         for name, usd in sorted(people.items(), key=lambda item: -sum(item[1])):
-            ax.bar(range(len(days)), usd, 0.6, bottom=bottom, label=name)
-            bottom = [b + u for b, u in zip(bottom, usd, strict=True)]
-        for i, total in enumerate(bottom):
+            values = [u * scale for u in usd]
+            ax.bar(range(len(days)), values, 0.6, bottom=bottom, label=name)
+            bottom = [b + v for b, v in zip(bottom, values, strict=True)]
+        for i, total in enumerate(totals):
             if total:
-                ax.annotate(f"${total:.2f}", (i, total), ha="center", va="bottom", fontsize=8)
+                ax.annotate(
+                    plain.money(total), (i, bottom[i]), ha="center", va="bottom", fontsize=8
+                )
         ax.set_xticks(range(len(days)), _day_labels(days))
-        ax.set_ylabel("$ (оценка)")
-        ax.set_title("Расходы на ИИ за неделю")
+        ax.yaxis.set_major_formatter(lambda value, _pos: f"{value:g}".replace(".", ","))
+        ax.set_ylabel(f"{unit}, оценка")
+        ax.set_title(f"Расходы на ИИ за неделю: {plain.money(sum(totals))}")
         if people:
             ax.legend(frameon=False)
         return _png(plt, fig)

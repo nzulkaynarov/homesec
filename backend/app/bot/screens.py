@@ -9,6 +9,7 @@ from datetime import datetime
 from typing import Any
 
 from ..models import FamilyNote
+from ..services import plain
 from . import texts
 from .rich import esc, heading, paragraph, table
 
@@ -94,13 +95,13 @@ def usage_html(
     for name, usd, requests, features in spend:
         top = sorted(features.items(), key=lambda item: item[1], reverse=True)
         labels = texts.FEATURE_LABELS
-        detail = ", ".join(f"{labels.get(k, texts.OTHER_FEATURE)} ${v:.2f}" for k, v in top)
-        rows.append((name, f"${usd:.2f}", str(requests), detail))
+        detail = ", ".join(f"{labels.get(k, texts.OTHER_FEATURE)} {plain.money(v)}" for k, v in top)
+        rows.append((name, plain.money(usd), str(requests), detail))
     if rows:
         total_usd = sum(r[1] for r in spend)
-        rows.append(("Итого", f"${total_usd:.2f}", str(sum(r[2] for r in spend)), ""))
+        rows.append(("Итого", plain.money(total_usd), str(sum(r[2] for r in spend)), ""))
         parts.append(
-            table(rows, header=("Кто", "$", "Запросов", "На что"), caption="💵 Деньги (оценка)")
+            table(rows, header=("Кто", "Сумма", "Запросов", "На что"), caption="💵 Деньги (оценка)")
         )
     else:
         parts.append(paragraph("Сегодня ИИ ещё ничего не потратил."))
@@ -109,7 +110,7 @@ def usage_html(
             "исчерпан до конца дня" if used_pct >= 100 else f"израсходовано {used_pct}%"
         )
         parts.append(paragraph(f"Дневной лимит ИИ: {limit}"))
-    parts.append(paragraph(f"За 7 дней: ${week_usd:.2f}"))
+    parts.append(paragraph(f"За 7 дней: {plain.money(week_usd)}"))
     return "".join(parts)
 
 

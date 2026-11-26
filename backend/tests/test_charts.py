@@ -8,7 +8,7 @@ import pytest
 from app.bot import access, charts_menu
 from app.db import Base, engine, session
 from app.models import Device, HostSample, KVState, Person, QuotaUsage
-from app.services import charts, hosts
+from app.services import charts, hosts, plain
 
 TODAY = date(2026, 11, 21)
 PNG = b"\x89PNG"
@@ -93,3 +93,34 @@ def test_only_the_owner_may_ask_for_the_server_chart_and_children_none():
     assert not access.check_callback("admin", charts_menu.SERVER).allowed
     assert access.check_callback("admin", charts_menu.SCREEN).allowed
     assert not access.check_callback("kid", charts_menu.SCREEN).allowed
+
+
+def test_money_below_a_dollar_reads_in_cents():
+    assert plain.money(0.0012) == "0,12 ¢"
+    assert plain.money(0.25) == "25 ¢"
+    assert plain.money(0.015) == "1,5 ¢" and plain.money(0.05) == "5 ¢"
+    assert plain.money(12.5) == "$12.50"
+
+
+def test_a_week_of_fractions_of_a_cent_is_drawn_in_cents_without_idle_people(monkeypatch):
+    drawn = {}
+    real = charts._png
+
+    def spy(plt, fig):
+        ax = fig.axes[0]
+        drawn["legend"] = [t.get_text() for t in ax.get_legend().get_texts()]
+        drawn["labels"] = [t.get_text() for t in ax.texts]
+        drawn["unit"] = ax.get_ylabel()
+        drawn["title"] = ax.get_title()
+        return real(plt, fig)
+
+    monkeypatch.setattr(charts, "_png", spy)
+    days = charts.week_days(TODAY)
+    people = {"Нурбек": [0, 0.00117, 0, 0, 0, 0.00196, 0], "Система": [0.0] * 7}
+    assert charts.spend_week_png(days, people).startswith(PNG)
+    assert drawn == {
+        "legend": ["Нурбек"],
+        "labels": ["0,12 ¢", "0,20 ¢"],
+        "unit": "центы, оценка",
+        "title": "Расходы на ИИ за неделю: 0,31 ¢",
+    }

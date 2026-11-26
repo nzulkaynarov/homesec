@@ -710,8 +710,8 @@ def test_format_usage():
     """The AI spend in money and plain words: no tokens, no gateway, no addresses."""
     spend = [("Миша", 0.25, 12, {"tutor": 0.2, "quiz": 0.05}), ("Папа", 0.5, 3, {})]
     text = to_plain(screens.usage_html(spend, 1.5, 40))
-    assert "Миша · $0.25 · 12 · репетитор $0.20, викторина $0.05" in text
-    assert "Итого · $0.75 · 15" in text
+    assert "Миша · 25 ¢ · 12 · репетитор 20 ¢, викторина 5 ¢" in text
+    assert "Итого · 75 ¢ · 15" in text
     assert "Дневной лимит ИИ: израсходовано 40%" in text
     assert "За 7 дней: $1.50" in text
     assert not re.search(r"[Тт]окен|[Шш]люз|\d+\.\d+\.\d+\.\d+", text)

@@ -73,3 +73,18 @@ def speed_words(limit: str) -> str:
     if upload == download:
         return f"до {download}"
     return f"до {download} на загрузку и до {upload} на отдачу"
+
+
+CENT = 0.01
+
+
+def money(usd: float) -> str:
+    """Dollars as people read them: "$1.25", and below a dollar in cents ("0,12 ¢"), since the
+    local models leave most days at a fraction of a cent and "$0.00" told nothing."""
+    if usd >= 1:
+        return f"${usd:.2f}"
+    cents = usd / CENT
+    if cents >= 10:
+        return f"{cents:.0f} ¢"
+    shown = f"{cents:.1f}".removesuffix(".0") if cents >= 1 else f"{cents:.2f}"
+    return f"{shown.replace('.', ',')} ¢"
