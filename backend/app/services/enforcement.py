@@ -546,43 +546,47 @@ def reconcile(db: Session) -> dict:
         _record_outcome(db, summary)
         return summary
 
-    try:
-        with _reconcile_lock(), mikrotik.api_session() as api:
-            devices = discover_devices(db, api, mikrotik.get_answering_macs(api))
-            devices = follow_arp(db, devices, mikrotik.get_live_arp(api))
-            if devices:  # never prune against an empty or unreadable database
-                for mac in mikrotik.prune_pinned_leases(api, set(known_macs(db))):
-                    log_event(db, "lease_pruned", f"Снят закреплённый адрес удалённого {mac}")
-            mark_seen(db, devices, mikrotik.get_online_ips(api))
-            names = {dev.ip: dev.name for dev in devices if dev.ip}
-            desired = _desired_state(db, devices, datetime.now(), self_ips)
-            quota_blocked = desired["quota_blocked"]
-            for list_name, ips in desired["lists"].items():
-                added, _removed = mikrotik.address_list_sync(api, list_name, ips)
-                if list_name == "hs-blocked":
-                    for ip in added:
-                        mikrotik.kill_connections(api, ip)
-                        summary["newly_blocked"].append(ip)
-            # Очереди скорости отдельно: их сбой не должен останавливать AdGuard
-            # и блокировки, которые уже применены выше.
-            try:
-                mikrotik.queues_sync(api, desired["queues"])
-            except (mikrotik.MikrotikError, ValueError) as e:
-                _fail(db, summary, "queues", f"очереди скорости: {e}")
-    except mikrotik.MikrotikError as e:
-        _fail(db, summary, "mikrotik", str(e))
-        _record_outcome(db, summary)
-        return summary  # без роутера состояние AdGuard считать рано
-    except Exception as e:  # noqa: BLE001 — любой сбой должен стать видимым, а не тихим
-        log.exception("reconcile failed")
-        _fail(db, summary, "unexpected", f"{type(e).__name__}: {e}")
-        _record_outcome(db, summary)
-        return summary
+    # The AdGuard step stays under the same lock: two reconciles that both read the clients
+    # before either wrote added the same new device twice (AdGuard refused the second,
+    # 2026-11-26), and a slower one could write an older state over a newer one.
+    with _reconcile_lock():
+        try:
+            with mikrotik.api_session() as api:
+                devices = discover_devices(db, api, mikrotik.get_answering_macs(api))
+                devices = follow_arp(db, devices, mikrotik.get_live_arp(api))
+                if devices:  # never prune against an empty or unreadable database
+                    for mac in mikrotik.prune_pinned_leases(api, set(known_macs(db))):
+                        log_event(db, "lease_pruned", f"Снят закреплённый адрес удалённого {mac}")
+                mark_seen(db, devices, mikrotik.get_online_ips(api))
+                names = {dev.ip: dev.name for dev in devices if dev.ip}
+                desired = _desired_state(db, devices, datetime.now(), self_ips)
+                quota_blocked = desired["quota_blocked"]
+                for list_name, ips in desired["lists"].items():
+                    added, _removed = mikrotik.address_list_sync(api, list_name, ips)
+                    if list_name == "hs-blocked":
+                        for ip in added:
+                            mikrotik.kill_connections(api, ip)
+                            summary["newly_blocked"].append(ip)
+                # Очереди скорости отдельно: их сбой не должен останавливать AdGuard
+                # и блокировки, которые уже применены выше.
+                try:
+                    mikrotik.queues_sync(api, desired["queues"])
+                except (mikrotik.MikrotikError, ValueError) as e:
+                    _fail(db, summary, "queues", f"очереди скорости: {e}")
+        except mikrotik.MikrotikError as e:
+            _fail(db, summary, "mikrotik", str(e))
+            _record_outcome(db, summary)
+            return summary  # без роутера состояние AdGuard считать рано
+        except Exception as e:  # noqa: BLE001 — любой сбой должен стать видимым, а не тихим
+            log.exception("reconcile failed")
+            _fail(db, summary, "unexpected", f"{type(e).__name__}: {e}")
+            _record_outcome(db, summary)
+            return summary
 
-    try:
-        adguard.sync_clients(desired["ag_clients"])
-    except adguard.AdGuardError as e:
-        _fail(db, summary, "adguard", str(e))
+        try:
+            adguard.sync_clients(desired["ag_clients"])
+        except adguard.AdGuardError as e:
+            _fail(db, summary, "adguard", str(e))
     _record_outcome(db, summary)
 
     # События — только при ПЕРЕХОДЕ в заблокированное состояние (newly_blocked:

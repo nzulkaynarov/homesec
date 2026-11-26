@@ -223,3 +223,25 @@ def test_block_event_names_the_device(db, monkeypatch):
     messages = sorted(e.message for e in db.query(EventLog) if e.kind == "block")
     assert messages == ["Заблокирован доступ: 192.168.88.99",
                         "Заблокирован доступ: «Планшет» (192.168.88.240)"]
+
+
+def test_adguard_is_synced_while_the_lock_is_held(db, monkeypatch):
+    """Two reconciles at once (the minute tick and a bot action) both added the same new
+    AdGuard client, and AdGuard refused the second; one writer at a time, AdGuard included."""
+    _router_up(monkeypatch)
+    held = []
+
+    class _Lock:
+        def __enter__(self):
+            held.append(True)
+
+        def __exit__(self, *exc):
+            held.pop()
+            return False
+
+    monkeypatch.setattr(enforcement, "_reconcile_lock", _Lock)
+    seen = []
+    monkeypatch.setattr(enforcement.adguard, "sync_clients", lambda wanted: seen.append(bool(held)))
+
+    assert enforcement.reconcile(db)["ok"] is True
+    assert seen == [True] and held == []
