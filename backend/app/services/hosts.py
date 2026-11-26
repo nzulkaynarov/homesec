@@ -29,6 +29,10 @@ SILENT_KEY = "host_silent:pc"  # the last PC sample's time, once its silence was
 BOOT_KEY = "host_boot:pc"  # the PC boot already seen
 KERNEL_KEY = "host_kernel:pc"  # "<boot id>:<count>" of kernel hardware errors already told
 OOM_KEY = "host_oom:pc"  # "<boot id>:<count>" of processes killed for lack of memory already told
+OOM_NOTE_KEY = "host_oom_note:pc"  # when the last routine note about a session's memory was sent
+# A session filling its own memory limit loses a test run and retries it; the owner hears about
+# that at most once an hour. Claude itself or the whole PC running out is told at once.
+OOM_NOTE_EVERY = timedelta(hours=1)
 
 # Thresholds. A run of this many bad minutes raises an alert; temperatures and memory spike
 # under normal work, so they need several, a full disk or an old backup does not.
@@ -362,7 +366,7 @@ def _pc_changes(db: Session, now: datetime) -> list[Change]:
         out.append(Change(SILENT_KEY, "", f"✅ ПК снова на связи{span}."))
     out += _boot_change(db, data, now)
     out += _kernel_change(db, data)
-    out += _oom_change(db, data)
+    out += _oom_change(db, data, now)
     return out
 
 
@@ -427,19 +431,73 @@ def _kernel_change(db: Session, data: dict[str, Any]) -> list[Change]:
     return [change]
 
 
-def _oom_change(db: Session, data: dict[str, Any]) -> list[Change]:
+def _count(n: int, one: str, few: str, many: str) -> str:
+    if n % 10 == 1 and n % 100 != 11:
+        return f"{n} {one}"
+    if 2 <= n % 10 <= 4 and not 12 <= n % 100 <= 14:
+        return f"{n} {few}"
+    return f"{n} {many}"
+
+
+def _where(events: list[dict[str, Any]]) -> str:
+    names = list(dict.fromkeys(str(e["session"]) for e in events if e.get("session")))
+    if not names:
+        return "одной из сессий Claude"
+    if len(names) == 1:
+        return f"сессии {names[0]}"
+    return "сессиях " + ", ".join(names[:-1]) + f" и {names[-1]}"
+
+
+def _oom_text(events: list[dict[str, Any]], new: int) -> tuple[str, bool]:
+    """The note about new kills and whether it is urgent (Claude itself or the whole PC)."""
+    whole = [e for e in events if e.get("whole_pc")]
+    claude = [e for e in events if e.get("claude")]
+    if whole:
+        return (
+            "🧠 Кончилась память у всего ПК, не только у одной сессии: система остановила "
+            f"{whole[-1].get('process', 'процесс')}. Могли пострадать Luna и другие службы. "
+            "Если повторится, стоит найти, что съедает память.",
+            True,
+        )
+    if claude:
+        return (
+            f"🧠 В {_where(claude)} кончилась память, и система остановила сам Claude. "
+            "Чтобы продолжить, перезапусти его: в окне этой сессии в tmux команда claude-session.",
+            True,
+        )
+    stopped = _count(max(new, len(events)), "процесс", "процесса", "процессов")
+    return (
+        f"🧠 В {_where(events)} не хватило памяти на всё сразу: система остановила {stopped} "
+        f"(последний: {events[-1].get('process', 'процесс')}). Обычно это тесты и сборки; Claude "
+        "работает и запустит их заново, делать ничего не нужно.\n"
+        "Если такое приходит каждый час, попроси сессию запускать не больше двух тяжёлых "
+        "проверок одновременно.",
+        False,
+    )
+
+
+def _oom_change(db: Session, data: dict[str, Any], now: datetime) -> list[Change]:
     change, new = _counted_change(db, data, OOM_KEY, "oom_kills")
     if change is None:
         return []
-    if new:
+    if not new:
+        return [change]
+    events = [e for e in data.get("oom_events") or [] if isinstance(e, dict)][-new:]
+    if not events:  # a monitor that does not tell sessions yet
         victim = data.get("oom_last") or "процесс"
         text = (
             f"🧠 На ПК кончилась память, и система остановила {victim}"
             + (f" (всего остановлено: {new})." if new > 1 else ".")
             + " Остальное работает; если повторяется, виновника стоит ограничить."
         )
-        change = replace(change, text=text)
-    return [change]
+        return [replace(change, text=text)]
+    text, urgent = _oom_text(events, new)
+    if urgent:
+        return [replace(change, text=text)]
+    last = _parse(kv_get(db, OOM_NOTE_KEY, ""))
+    if last is not None and now - last < OOM_NOTE_EVERY:
+        return []  # the told count stays, so the next note counts these kills too
+    return [replace(change, text=text), Change(OOM_NOTE_KEY, now.isoformat(), "")]
 
 
 # ---------------------------------------------------------------- one pass

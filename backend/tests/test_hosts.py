@@ -151,6 +151,50 @@ def test_an_oom_kill_is_told_as_memory_not_hardware(db):
     assert "нехватки памяти: ⚠️ 1" in hosts.status_text(db, NOW)
 
 
+def _kill(process: str, session: str | None = "RT_Platform", **kw) -> dict:
+    return {"process": process, "session": session, "claude": False, "whole_pc": False, **kw}
+
+
+def test_a_session_out_of_memory_is_a_calm_note_at_most_hourly(db):
+    _pc(db, 1, oom_kills=0)
+    _apply(db, NOW - timedelta(minutes=1))
+    events = [_kill("node-MainThread 1.3 GB"), _kill("node-MainThread 1.3 GB")]
+    _pc(db, 0, oom_kills=2, oom_events=events)
+    told = _apply(db)
+    assert len(told) == 1
+    assert "сессии RT_Platform" in told[0] and "2 процесса" in told[0]
+    assert "делать ничего не нужно" in told[0]
+    # twenty minutes later three more: held back, the hour is not over
+    events += [_kill("pytest 2.0 GB")] * 3
+    _pc(db, -20, oom_kills=5, oom_events=events)
+    assert _apply(db, NOW + timedelta(minutes=20)) == []
+    # after the hour the held kills are told together
+    _pc(db, -61, oom_kills=5, oom_events=events)
+    told = _apply(db, NOW + timedelta(minutes=61))
+    assert len(told) == 1 and "3 процесса" in told[0] and "pytest 2.0 GB" in told[0]
+
+
+def test_claude_itself_stopped_is_told_at_once_with_what_to_do(db):
+    _pc(db, 1, oom_kills=0)
+    _apply(db, NOW - timedelta(minutes=1))
+    _pc(db, 0, oom_kills=1, oom_events=[_kill("node 1.0 GB", session="KetoCare")])
+    _apply(db)
+    events = [_kill("node 1.0 GB", session="KetoCare"), _kill("claude 1.4 GB", claude=True)]
+    _pc(db, -5, oom_kills=2, oom_events=events)
+    told = _apply(db, NOW + timedelta(minutes=5))
+    assert len(told) == 1
+    assert "остановила сам Claude" in told[0] and "сессии RT_Platform" in told[0]
+    assert "claude-session" in told[0]
+
+
+def test_the_whole_pc_out_of_memory_is_told_at_once(db):
+    _pc(db, 1, oom_kills=0)
+    _apply(db, NOW - timedelta(minutes=1))
+    _pc(db, 0, oom_kills=1, oom_events=[_kill("postgres 0.5 GB", session=None, whole_pc=True)])
+    told = _apply(db)
+    assert len(told) == 1 and "у всего ПК" in told[0] and "postgres 0.5 GB" in told[0]
+
+
 def test_low_memory_is_told_after_two_minutes(db):
     _pc(db, 1, mem_avail_mb=1500, top_process="pytest 99%")
     assert _apply(db, NOW - timedelta(minutes=1)) == []
